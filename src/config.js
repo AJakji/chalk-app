@@ -1,7 +1,7 @@
 // API base URL — change this when you deploy to Railway
 // For local dev: run `npm run dev` in the backend folder first
 const DEV_API_URL = 'http://192.168.2.26:3001';
-const PROD_API_URL = 'https://your-railway-app.railway.app'; // update after Railway deploy
+const PROD_API_URL = 'https://chalk-app-production-7ce5.up.railway.app';
 
 export const API_URL = __DEV__ ? DEV_API_URL : PROD_API_URL;
 
