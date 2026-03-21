@@ -1,0 +1,176 @@
+// Mock scores data — will be replaced with API-Sports live data
+export const mockGames = [
+  {
+    id: 'g1',
+    league: 'NBA',
+    status: 'live',
+    clock: 'Q3 4:22',
+    awayTeam: { name: 'Golden State Warriors', abbr: 'GSW', score: 78 },
+    homeTeam: { name: 'Boston Celtics', abbr: 'BOS', score: 91 },
+    chalkPick: { team: 'BOS', pick: 'Celtics -4.5', result: 'winning' },
+    boxScore: {
+      away: {
+        players: [
+          { name: 'S. Curry', pos: 'PG', pts: 22, reb: 3, ast: 6, fg: '8-17', pm: -9 },
+          { name: 'K. Thompson', pos: 'SG', pts: 14, reb: 2, ast: 1, fg: '5-13', pm: -7 },
+          { name: 'A. Wiggins', pos: 'SF', pts: 11, reb: 5, ast: 2, fg: '4-9', pm: -4 },
+          { name: 'D. Green', pos: 'PF', pts: 4, reb: 7, ast: 8, fg: '2-6', pm: -10 },
+          { name: 'K. Looney', pos: 'C', pts: 7, reb: 9, ast: 1, fg: '3-5', pm: -6 },
+        ],
+        totals: { fg: '38-71', threeP: '9-29', ft: '12-15', reb: 35, ast: 22 },
+      },
+      home: {
+        players: [
+          { name: 'J. Brown', pos: 'SF', pts: 28, reb: 6, ast: 3, fg: '11-19', pm: +14 },
+          { name: 'J. Tatum', pos: 'PF', pts: 24, reb: 9, ast: 5, fg: '9-18', pm: +12 },
+          { name: 'D. White', pos: 'SG', pts: 16, reb: 4, ast: 4, fg: '6-11', pm: +8 },
+          { name: 'J. Holiday', pos: 'PG', pts: 12, reb: 3, ast: 7, fg: '4-8', pm: +11 },
+          { name: 'A. Horford', pos: 'C', pts: 11, reb: 8, ast: 3, fg: '4-7', pm: +9 },
+        ],
+        totals: { fg: '44-73', threeP: '13-31', ft: '18-22', reb: 41, ast: 26 },
+      },
+      quarters: {
+        away: [22, 18, 21, null],
+        home: [28, 25, 27, null],
+      },
+    },
+    playByPlay: [
+      { time: 'Q3 4:22', team: 'BOS', event: 'Jaylen Brown makes 2-pt jumper. Celtics 91, Warriors 78.' },
+      { time: 'Q3 5:01', team: 'GSW', event: 'Steph Curry misses 3-pointer. Rebound Horford.' },
+      { time: 'Q3 5:40', team: 'BOS', event: 'Jayson Tatum makes 3-pointer. Celtics 89, Warriors 78.' },
+      { time: 'Q3 6:15', team: 'GSW', event: 'Draymond Green turnover. Stolen by D. White.' },
+      { time: 'Q3 6:55', team: 'BOS', event: 'Derrick White makes pull-up jumper. Celtics 86, Warriors 78.' },
+      { time: 'Q3 7:30', team: 'GSW', event: 'Stephen Curry makes 2-pt floater. Warriors 78, Celtics 84.' },
+      { time: 'Q3 8:12', team: 'BOS', event: 'Jrue Holiday finds Tatum. Slam dunk. Celtics 84, Warriors 76.' },
+    ],
+  },
+  {
+    id: 'g2',
+    league: 'NBA',
+    status: 'live',
+    clock: 'Q2 11:04',
+    awayTeam: { name: 'Denver Nuggets', abbr: 'DEN', score: 48 },
+    homeTeam: { name: 'LA Lakers', abbr: 'LAL', score: 41 },
+    chalkPick: { team: 'DEN', pick: 'Nuggets ML', result: 'winning' },
+    boxScore: {
+      away: {
+        players: [
+          { name: 'N. Jokic', pos: 'C', pts: 18, reb: 11, ast: 7, fg: '7-10', pm: +8 },
+          { name: 'J. Murray', pos: 'PG', pts: 14, reb: 2, ast: 5, fg: '5-9', pm: +7 },
+          { name: 'M. Porter Jr.', pos: 'SF', pts: 10, reb: 4, ast: 1, fg: '4-8', pm: +5 },
+          { name: 'K. Caldwell-Pope', pos: 'SG', pts: 6, reb: 1, ast: 2, fg: '3-5', pm: +4 },
+          { name: 'A. Gordon', pos: 'PF', pts: 0, reb: 5, ast: 3, fg: '0-4', pm: -2 },
+        ],
+        totals: { fg: '19-38', threeP: '5-14', ft: '8-10', reb: 23, ast: 18 },
+      },
+      home: {
+        players: [
+          { name: 'A. Davis', pos: 'C', pts: 16, reb: 8, ast: 2, fg: '6-11', pm: -7 },
+          { name: 'D. Russell', pos: 'PG', pts: 12, reb: 1, ast: 4, fg: '4-9', pm: -5 },
+          { name: 'A. Reaves', pos: 'SG', pts: 8, reb: 2, ast: 3, fg: '3-7', pm: -8 },
+          { name: 'R. Hachimura', pos: 'SF', pts: 5, reb: 3, ast: 0, fg: '2-5', pm: -3 },
+          { name: 'J. Vanderbilt', pos: 'PF', pts: 0, reb: 4, ast: 1, fg: '0-3', pm: -4 },
+        ],
+        totals: { fg: '16-41', threeP: '4-13', ft: '5-7', reb: 18, ast: 10 },
+      },
+      quarters: {
+        away: [26, 22, null, null],
+        home: [19, 22, null, null],
+      },
+    },
+    playByPlay: [
+      { time: 'Q2 11:04', team: 'DEN', event: 'Nikola Jokic posts up, drops in hook shot. Nuggets 48, Lakers 41.' },
+      { time: 'Q2 11:41', team: 'LAL', event: 'Anthony Davis misses turnaround jumper. Rebound Jokic.' },
+      { time: 'Q2 12:20', team: 'DEN', event: 'Jamal Murray drives and converts. Nuggets 46, Lakers 41.' },
+      { time: 'Q2 12:55', team: 'LAL', event: 'D\'Angelo Russell 3-pointer good. Lakers 41, Nuggets 44.' },
+    ],
+  },
+  {
+    id: 'g3',
+    league: 'NFL',
+    status: 'upcoming',
+    clock: 'Sun 4:25 PM ET',
+    awayTeam: { name: 'Buffalo Bills', abbr: 'BUF', score: null },
+    homeTeam: { name: 'Kansas City Chiefs', abbr: 'KC', score: null },
+    chalkPick: { team: null, pick: 'Over 51.5', result: null },
+    boxScore: null,
+    playByPlay: [],
+  },
+  {
+    id: 'g4',
+    league: 'NBA',
+    status: 'final',
+    clock: 'Final',
+    awayTeam: { name: 'Phoenix Suns', abbr: 'PHX', score: 108 },
+    homeTeam: { name: 'Miami Heat', abbr: 'MIA', score: 114 },
+    chalkPick: { team: 'MIA', pick: 'Heat ML', result: 'win' },
+    boxScore: {
+      away: {
+        players: [
+          { name: 'D. Booker', pos: 'SG', pts: 31, reb: 4, ast: 6, fg: '11-22', pm: -6 },
+          { name: 'K. Durant', pos: 'PF', pts: 28, reb: 7, ast: 3, fg: '10-19', pm: -5 },
+          { name: 'B. Beal', pos: 'PG', pts: 19, reb: 2, ast: 8, fg: '7-16', pm: -8 },
+          { name: 'E. Gordon', pos: 'SF', pts: 15, reb: 3, ast: 2, fg: '6-10', pm: -4 },
+          { name: 'J. Nurkic', pos: 'C', pts: 15, reb: 11, ast: 3, fg: '6-10', pm: -3 },
+        ],
+        totals: { fg: '40-88', threeP: '11-28', ft: '17-21', reb: 35, ast: 24 },
+      },
+      home: {
+        players: [
+          { name: 'J. Butler', pos: 'SF', pts: 29, reb: 8, ast: 7, fg: '10-17', pm: +7 },
+          { name: 'B. Adebayo', pos: 'C', pts: 24, reb: 12, ast: 4, fg: '9-15', pm: +9 },
+          { name: 'T. Herro', pos: 'SG', pts: 22, reb: 3, ast: 5, fg: '8-17', pm: +6 },
+          { name: 'K. Lowry', pos: 'PG', pts: 16, reb: 2, ast: 9, fg: '6-10', pm: +8 },
+          { name: 'H. Duncan', pos: 'PF', pts: 23, reb: 7, ast: 2, fg: '9-13', pm: +5 },
+        ],
+        totals: { fg: '42-82', threeP: '14-32', ft: '16-19', reb: 44, ast: 28 },
+      },
+      quarters: {
+        away: [28, 24, 31, 25],
+        home: [30, 27, 28, 29],
+      },
+    },
+    playByPlay: [
+      { time: 'Final', team: 'MIA', event: 'Game over. Miami Heat win 114-108.' },
+    ],
+  },
+  {
+    id: 'g5',
+    league: 'Soccer',
+    status: 'live',
+    clock: '67\'',
+    awayTeam: { name: 'Barcelona', abbr: 'BAR', score: 1 },
+    homeTeam: { name: 'Real Madrid', abbr: 'RMA', score: 2 },
+    chalkPick: { team: 'RMA', pick: 'Real Madrid ML', result: 'winning' },
+    boxScore: null,
+    playByPlay: [
+      { time: '67\'', team: 'RMA', event: 'Vinicius Jr. goal! Real Madrid 2 - 1 Barcelona.' },
+      { time: '54\'', team: 'BAR', event: 'Robert Lewandowski equalizer. 1-1.' },
+      { time: '23\'', team: 'RMA', event: 'Jude Bellingham opens the scoring. Real Madrid 1-0.' },
+    ],
+  },
+  {
+    id: 'g6',
+    league: 'NHL',
+    status: 'final',
+    clock: 'Final',
+    awayTeam: { name: 'Toronto Maple Leafs', abbr: 'TOR', score: 3 },
+    homeTeam: { name: 'Tampa Bay Lightning', abbr: 'TBL', score: 2 },
+    chalkPick: null,
+    boxScore: null,
+    playByPlay: [],
+  },
+  {
+    id: 'g7',
+    league: 'MLB',
+    status: 'upcoming',
+    clock: 'Tonight 7:05 PM ET',
+    awayTeam: { name: 'New York Yankees', abbr: 'NYY', score: null },
+    homeTeam: { name: 'Boston Red Sox', abbr: 'BOS', score: null },
+    chalkPick: null,
+    boxScore: null,
+    playByPlay: [],
+  },
+];
+
+export const LEAGUES = ['All', 'NBA', 'NFL', 'Soccer', 'NHL', 'MLB'];
