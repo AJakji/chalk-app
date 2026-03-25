@@ -5,8 +5,10 @@ const { generatePicks, getTodaysPicks } = require('../services/aiPicks');
 const db = require('../db');
 
 const MOCK_PICKS = [
+  // ── GAME PICKS ────────────────────────────────────────────────────────────
   {
     id: 'mock-1', league: 'NBA', sport_key: 'basketball_nba', pick_type: 'Spread',
+    pick_category: 'game',
     away_team: 'Golden State Warriors', home_team: 'Boston Celtics',
     game_time: 'Tonight 7:30 PM ET', game_id: 'mock-g1',
     pick_value: 'Celtics -4.5', confidence: 84, result: null,
@@ -32,33 +34,8 @@ const MOCK_PICKS = [
     },
   },
   {
-    id: 'mock-2', league: 'NFL', sport_key: 'americanfootball_nfl', pick_type: 'Total',
-    away_team: 'Buffalo Bills', home_team: 'Kansas City Chiefs',
-    game_time: 'Sunday 4:25 PM ET', game_id: 'mock-g2',
-    pick_value: 'Over 51.5', confidence: 76, result: null,
-    short_reason: 'Elite QBs, fast pace, weak secondaries on both sides',
-    odds_data: { draftkings: '-115', fanduel: '-112', betmgm: '-110', bet365: '-113' },
-    analysis: {
-      summary: 'Mahomes vs Allen — two elite QBs in ideal scoring conditions. Both offenses rank top-5 in pace and both defenses have struggled defending the deep ball this season.',
-      sections: [
-        { title: 'Why This Pick', icon: '🎯', content: 'When Mahomes and Allen face each other, the over has hit 7 of their last 9 matchups. Combined TDs average 6.2 per game.' },
-        { title: 'Line Value',    icon: '💰', content: 'BetMGM offering -110 vs the market standard -115. Small edge worth taking on a high-confidence over.' },
-        { title: 'Key Risk',      icon: '⚠️', content: 'Wind above 15 mph kills passing offenses. Check forecast at game time — current projection is 8 mph.' },
-      ],
-      keyStats: [
-        { label: 'Over % in Mahomes/Allen games', value: '7-2', pct: 78 },
-        { label: 'Chiefs Scoring Avg',            value: '29.4 PPG', pct: 75 },
-        { label: 'Model Confidence',              value: '76%', pct: 76 },
-      ],
-      trends: [
-        'Over 7-2 in last 9 Mahomes vs Allen matchups',
-        'Chiefs over 27 points in 8 of last 10 home games',
-        'Bills score 35+ in 5 of last 7 road games',
-      ],
-    },
-  },
-  {
     id: 'mock-3', league: 'NBA', sport_key: 'basketball_nba', pick_type: 'Moneyline',
+    pick_category: 'game',
     away_team: 'Denver Nuggets', home_team: 'LA Lakers',
     game_time: 'Tonight 10:00 PM ET', game_id: 'mock-g3',
     pick_value: 'Nuggets ML', confidence: 71, result: null,
@@ -81,6 +58,95 @@ const MOCK_PICKS = [
         'Jokic 6 triple-doubles in last 10 vs LA',
         'Denver 14-7 ATS on the road this season',
       ],
+    },
+  },
+  // ── PLAYER PROP PICKS ─────────────────────────────────────────────────────
+  {
+    id: 'mock-prop-1', league: 'NBA', sport_key: 'basketball_nba', pick_type: 'Player Prop',
+    pick_category: 'prop',
+    player_name: 'Nikola Jokic', player_team: 'Denver Nuggets', player_position: 'C',
+    away_team: 'Denver Nuggets', home_team: 'LA Lakers',
+    game_time: 'Tonight 10:00 PM ET', game_id: 'mock-g3',
+    matchup_text: 'vs LAL · Tonight 10:00 PM ET',
+    pick_value: 'Over 11.5 Rebounds', confidence: 82, result: null,
+    short_reason: "Jokic averaging 13.1 boards last 5 — Lakers can't box him out",
+    odds_data: { draftkings: '-115', fanduel: '-118', betmgm: '-120', bet365: '-112' },
+    analysis: {
+      summary: "Jokic has cleared 11.5 rebounds in 4 of his last 5 games. The Lakers rank 28th in defensive rebound rate, giving up second-chance opportunities at will. At -112 on bet365, this is clean value.",
+      sections: [
+        { title: 'Why This Prop', icon: '🎯', content: 'Jokic is averaging 13.1 rebounds in his last 5 games. The Lakers play small without LeBron and struggle on the boards.' },
+        { title: 'Line Value',   icon: '💰', content: 'The 11.5 line is conservative. Our projection puts Jokic at 13.4 boards tonight — nearly 2 full boards of edge over the line.' },
+        { title: 'Key Risk',     icon: '⚠️', content: 'Anthony Davis is an elite rebounder. If Davis dominates the paint, some of Jokic\'s boards could dry up late.' },
+      ],
+      keyStats: [
+        { label: 'Last 5 Games Avg',  value: '13.1 REB', pct: 82 },
+        { label: 'Hit Rate (L10)',     value: '8/10',     pct: 80 },
+        { label: 'Model Confidence',  value: '82%',      pct: 82 },
+      ],
+      trends: [
+        'Jokic 8/10 Over 11.5 REB in last 10 games',
+        'Lakers rank 28th in opponent defensive rebound rate',
+        'Jokic averages 14.2 REB vs LAL historically',
+      ],
+      last10Games: [
+        { date: 'Mar 20', opp: 'GSW', result: 'W', stat: 15 },
+        { date: 'Mar 18', opp: 'MEM', result: 'W', stat: 14 },
+        { date: 'Mar 16', opp: 'PHX', result: 'W', stat: 12 },
+        { date: 'Mar 14', opp: 'SAS', result: 'W', stat: 9 },
+        { date: 'Mar 12', opp: 'HOU', result: 'L', stat: 13 },
+        { date: 'Mar 10', opp: 'MIL', result: 'W', stat: 16 },
+        { date: 'Mar 8',  opp: 'BOS', result: 'L', stat: 11 },
+        { date: 'Mar 6',  opp: 'NYK', result: 'W', stat: 14 },
+        { date: 'Mar 4',  opp: 'IND', result: 'W', stat: 12 },
+        { date: 'Mar 2',  opp: 'OKC', result: 'L', stat: 8 },
+      ],
+      seasonAvg: 13.1, propLine: 11.5,
+      homeAvg: 13.8,   awayAvg: 12.3,
+      vsOppHistory: 14.2, injuryStatus: 'Active',
+    },
+  },
+  {
+    id: 'mock-prop-2', league: 'NBA', sport_key: 'basketball_nba', pick_type: 'Player Prop',
+    pick_category: 'prop',
+    player_name: 'Stephen Curry', player_team: 'Golden State Warriors', player_position: 'PG',
+    away_team: 'Golden State Warriors', home_team: 'Boston Celtics',
+    game_time: 'Tonight 7:30 PM ET', game_id: 'mock-g1',
+    matchup_text: '@ BOS · Tonight 7:30 PM ET',
+    pick_value: 'Over 4.5 Three-Pointers', confidence: 76, result: null,
+    short_reason: "Curry bombing away — 5.8 threes per game over his last 8",
+    odds_data: { draftkings: '-120', fanduel: '-115', betmgm: '-125', bet365: '-118' },
+    analysis: {
+      summary: "Curry has hit 5+ threes in 6 of his last 8 games and is averaging 5.8 per game in that stretch. Boston allows the 18th most threes per game. At -115 on FanDuel, this is legitimate value.",
+      sections: [
+        { title: 'Why This Prop', icon: '🎯', content: "Curry is in one of his shooting stretches — 5.8 threes per game over his last 8. He shoots regardless of game script, making this a volume play." },
+        { title: 'Line Value',   icon: '💰', content: 'FanDuel -115 is 10 cents better than BetMGM -125. With a 76% hit rate in our model, this is clearly +EV at -115.' },
+        { title: 'Key Risk',     icon: '⚠️', content: "Boston has Al Horford defending threes at a high rate. If Curry faces heavy attention in the corners, his attempts could be capped." },
+      ],
+      keyStats: [
+        { label: 'Last 8 Games Avg', value: '5.8 3PM', pct: 76 },
+        { label: 'Hit Rate (L10)',   value: '7/10',    pct: 70 },
+        { label: 'Model Confidence', value: '76%',     pct: 76 },
+      ],
+      trends: [
+        'Curry hit 5+ threes in 6 of his last 8 games',
+        'Boston allows 18th most threes per game this season',
+        'Curry averages 4.9 threes on the road this season',
+      ],
+      last10Games: [
+        { date: 'Mar 20', opp: 'MEM', result: 'W', stat: 7 },
+        { date: 'Mar 18', opp: 'IND', result: 'W', stat: 6 },
+        { date: 'Mar 16', opp: 'HOU', result: 'W', stat: 5 },
+        { date: 'Mar 14', opp: 'OKC', result: 'L', stat: 3 },
+        { date: 'Mar 12', opp: 'MIL', result: 'W', stat: 7 },
+        { date: 'Mar 10', opp: 'PHX', result: 'W', stat: 6 },
+        { date: 'Mar 8',  opp: 'SAS', result: 'L', stat: 4 },
+        { date: 'Mar 6',  opp: 'DEN', result: 'W', stat: 5 },
+        { date: 'Mar 4',  opp: 'LAL', result: 'W', stat: 6 },
+        { date: 'Mar 2',  opp: 'NYK', result: 'L', stat: 2 },
+      ],
+      seasonAvg: 4.9, propLine: 4.5,
+      homeAvg: 5.1,   awayAvg: 4.8,
+      vsOppHistory: 4.7, injuryStatus: 'Questionable (knee bruise)',
     },
   },
 ];

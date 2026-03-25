@@ -6,7 +6,6 @@ const BASE_URL = 'https://api.the-odds-api.com/v4';
 // Maps Chalk league names → The Odds API sport keys
 const SPORT_KEYS = {
   NBA:    'basketball_nba',
-  NFL:    'americanfootball_nfl',
   MLB:    'baseball_mlb',
   NHL:    'icehockey_nhl',
   Soccer: 'soccer_fifa_world_cup',
@@ -71,7 +70,7 @@ function formatGame(game) {
 
 // Fetch odds for all active leagues at once
 async function fetchAllOdds() {
-  const activeLeagues = ['NBA', 'NFL', 'MLB', 'NHL', 'Soccer'];
+  const activeLeagues = ['NBA', 'MLB', 'NHL', 'Soccer'];
   const results = [];
 
   for (const league of activeLeagues) {
