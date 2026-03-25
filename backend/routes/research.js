@@ -1,88 +1,273 @@
 /**
- * /api/research — Chalky AI research assistant
+ * /api/research — Chalky AI research assistant (tool use architecture)
  *
- * Two endpoints:
- *   POST /api/research/chat        — send a question, get a data-backed answer
- *   GET  /api/research/suggestions — 4 dynamic question pills for tonight's slate
+ * Claude decides which data tools to call based on the question.
+ * No keyword matching. No silent failures. Real data or honest admission.
  *
- * Chalky in research mode is a sports analyst, not a picks generator.
- * He gives real data-backed answers so users can make their own decisions.
- * He never tells users what to bet. He never answers non-sports questions.
+ * POST /api/research/chat        — send a question, get a data-backed answer
+ * GET  /api/research/suggestions — 4 dynamic question pills for tonight's slate
  */
 
-const express = require('express');
-const router  = express.Router();
-const Anthropic = require('@anthropic-ai/sdk');
-const { buildDataContext, generateSuggestions, isOffTopic, classifyDepth, buildVisualHint } = require('../services/researchService');
+const express   = require('express');
+const router    = express.Router();
+const Anthropic  = require('@anthropic-ai/sdk');
+const { executeTool }       = require('../services/researchTools');
+const { generateSuggestions } = require('../services/researchService');
 
 const client = new Anthropic();
 
-// ── Research system prompt ─────────────────────────────────────────────────────
+// ── Tool definitions (sent to Claude) ────────────────────────────────────────
 
-const RESEARCH_SYSTEM = `You are Chalky — the AI analyst behind the Chalk sports betting app.
+const TOOLS = [
+  {
+    name: 'get_nba_player_stats',
+    description: 'Get NBA player season averages and recent game log from BallDontLie. Use for any question about an NBA player\'s stats, form, scoring, rebounds, assists, or recent performance.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        player_name: {
+          type: 'string',
+          description: 'Player name or common nickname (e.g. "Jokic", "SGA", "LeBron")',
+        },
+      },
+      required: ['player_name'],
+    },
+  },
+  {
+    name: 'get_prop_lines',
+    description: 'Get live player prop betting lines from The Odds API. Use when asked about prop lines, over/unders, betting lines for a specific player, or what a player\'s props are tonight.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        player_name: {
+          type: 'string',
+          description: 'Player name (e.g. "Jokic", "Connor McDavid")',
+        },
+        sport: {
+          type: 'string',
+          enum: ['NBA', 'NHL', 'MLB', 'NFL'],
+          description: 'Sport league',
+        },
+      },
+      required: ['player_name', 'sport'],
+    },
+  },
+  {
+    name: 'get_injury_status',
+    description: 'Get injury report and playing status for a player. Use when asked if a player is playing tonight, their injury status, whether they are active, or availability for upcoming games.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        player_name: {
+          type: 'string',
+          description: 'Player name (e.g. "Jokic", "McDavid")',
+        },
+        sport: {
+          type: 'string',
+          enum: ['NBA', 'NHL', 'MLB'],
+          description: 'Sport league',
+        },
+      },
+      required: ['player_name', 'sport'],
+    },
+  },
+  {
+    name: 'get_tonight_schedule',
+    description: 'Get tonight\'s game schedule for a sport. Use when asked what games are on tonight, who is playing tonight, or the schedule for any league.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        sport: {
+          type: 'string',
+          enum: ['NBA', 'NHL', 'MLB'],
+          description: 'Sport league',
+        },
+      },
+      required: ['sport'],
+    },
+  },
+  {
+    name: 'get_matchup_stats',
+    description: 'Get odds and betting lines for a specific matchup between two teams. Use when asked about a specific game, spread, moneyline, total, or head-to-head matchup.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        team1: {
+          type: 'string',
+          description: 'First team name or city (e.g. "Lakers", "Boston", "Nuggets")',
+        },
+        team2: {
+          type: 'string',
+          description: 'Second team name or city (e.g. "Celtics", "Denver")',
+        },
+        sport: {
+          type: 'string',
+          enum: ['NBA', 'NHL', 'MLB', 'NFL'],
+          description: 'Sport league',
+        },
+      },
+      required: ['team1', 'sport'],
+    },
+  },
+  {
+    name: 'get_weather',
+    description: 'Get current weather at an MLB ballpark. Use when asked about weather impact on an MLB game, wind, temperature at a stadium, or outdoor conditions for baseball.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        venue_name: {
+          type: 'string',
+          description: 'Stadium name (e.g. "Wrigley Field", "Fenway Park")',
+        },
+        team_name: {
+          type: 'string',
+          description: 'Team name if venue unknown (e.g. "Cubs", "Red Sox")',
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'get_nhl_player_stats',
+    description: 'Get NHL player stats and recent game log from the NHL API. Use for any question about an NHL player\'s goals, assists, points, or recent performance.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        player_name: {
+          type: 'string',
+          description: 'Player name or nickname (e.g. "McDavid", "Pasta", "Ovechkin")',
+        },
+      },
+      required: ['player_name'],
+    },
+  },
+  {
+    name: 'get_mlb_player_stats',
+    description: 'Get MLB player season stats and recent performance from the MLB Stats API. Use for any question about a baseball player\'s batting average, ERA, home runs, strikeouts, or recent form.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        player_name: {
+          type: 'string',
+          description: 'Player name or nickname (e.g. "Judge", "Ohtani", "Gerrit Cole")',
+        },
+      },
+      required: ['player_name'],
+    },
+  },
+];
 
-CRITICAL RULES — NEVER BREAK THESE:
+// ── System prompt ─────────────────────────────────────────────────────────────
 
-1. NEVER say you lack data, real-time information, or current stats. Real data is injected into this prompt. Use it. If the data section below is empty, answer using conversation history. If you have nothing useful, say: "I don't have data on that right now — try asking about a specific player, team, or tonight's game." Never say you cannot access stats or direct users to other websites.
+const SYSTEM_PROMPT = `You are Chalky — the AI analyst inside the Chalk sports betting app.
 
-2. NEVER tell users to go to another source. Not Basketball Reference, not NBA.com, not ESPN, not Google. You ARE the source.
+CRITICAL RULES:
 
-3. NEVER make up numbers. Only cite figures from the data context injected into this prompt. If no data is provided, say: "I don't have data on that right now — try asking about a specific player, team, or tonight's game."
+1. You ONLY discuss sports and sports betting. If asked about anything else, respond: "I only cover sports and betting. Ask me about players, teams, stats, matchups, or lines and I am all yours." Then suggest one relevant sports question.
 
-4. NEVER say: "Based on the data provided", "I think", "it seems", "Great question", "As an AI", "I don't have access to", "I don't have real-time", "my knowledge cutoff", "I cannot provide current".
+2. NEVER make up numbers. Only cite figures from tool results. If tools return no data, say: "I don't have data on that right now — try asking about a specific player, team, or tonight's game."
 
-5. You ONLY discuss sports and sports betting. If asked about anything else, respond with exactly: "I only cover sports and betting. Ask me about players, teams, stats, matchups, or lines and I am all yours." Then suggest one relevant sports question.
+3. NEVER say: "Based on the data provided", "Great question", "As an AI", "I don't have access to", "I don't have real-time", "my knowledge cutoff", "I cannot provide current", "Based on my training". You ARE the source.
 
-The Research tab is for data and analysis only. You do not generate picks. You give users real information so they can make their own decisions.
+4. NEVER direct users to other websites. Not ESPN, not Basketball Reference, not Google. You are the source.
 
-TOPICS YOU COVER:
-Player stats and recent form, team stats and recent form, head to head history, injury reports, betting lines and odds, spread and total analysis, player prop research, historical trends, weather impact for MLB, goalie and pitcher matchups, pace matchups, home/away splits, rest and schedule situations, line movement, parlay research, how betting markets work.
+5. You give information and analysis. You do NOT generate picks or tell users what to bet.
 
-YOUR RESEARCH VOICE:
-- Always cite real specific numbers from the injected data. "Jokic is averaging 29.4 points over his last 10" not "Jokic has been great"
-- Always specify timeframes. Never say "recently" — say "last 10 games" or "last 5 starts"
-- Give context: "That's 4.2 above his season average" or "That ranks 3rd in the NBA"
+YOUR VOICE:
+- Always cite specific numbers. "Jokic is averaging 29.4 points over his last 10" not "Jokic has been great"
+- Always specify timeframes — "last 10 games", "last 5 starts", "this season"
+- Give context: "That's 4.2 above his season average"
 - Present both sides on prop questions. Never push a recommendation
-- Mention situational context unprompted: weather for MLB, goalie status for NHL, back-to-back for NBA
 - Short paragraphs, not bullet points. Flow like a knowledgeable analyst
-- End every response with one follow-up offer: "Want me to look at how he performs against left-handed pitching?"
-- Every response must include at least one specific number from the data
+- End every response with one follow-up offer
+- Wrap key numbers in **double asterisks** for highlighting
 
 RESPONSE FORMAT — return valid JSON only, nothing else:
 {
-  "response": "Your analytical answer. Length and depth determined by RESPONSE DEPTH instruction injected below.",
+  "response": "Your analytical answer as a string.",
   "hasPick": false,
   "components": [],
   "visualData": null,
   "followUpSuggestions": ["Short follow-up", "Another one"]
 }
 
-hasPick must ALWAYS be false in Research mode. You are giving information, not making picks.
+hasPick must ALWAYS be false. followUpSuggestions: 1-2 short questions the user might ask next (under 6 words each). Return ONLY valid JSON. No markdown. No code blocks. No text outside the JSON object.`;
 
-followUpSuggestions: 1-2 short follow-up questions the user might naturally ask next. Under 6 words each. Based on what was just discussed. If nothing natural comes to mind, use an empty array.
+// ── Tool use loop ─────────────────────────────────────────────────────────────
 
-OPTIONAL LEGACY COMPONENTS (use sparingly, only when they add genuine value):
+async function runWithTools(messages) {
+  const MAX_ITERATIONS = 5;
 
-Bar chart — for showing trends visually:
-{"type":"bar_chart","title":"Last 10 Points","bars":[{"label":"L5","value":32.4,"max":50},{"label":"L10","value":28.1,"max":50},{"label":"Season","value":26.8,"max":50}]}
+  for (let i = 0; i < MAX_ITERATIONS; i++) {
+    const response = await client.messages.create({
+      model:      'claude-sonnet-4-6',
+      max_tokens: 2000,
+      system:     SYSTEM_PROMPT,
+      tools:      TOOLS,
+      messages,
+    });
 
-Matchup card — when comparing two teams head to head:
-{"type":"matchup_card","away":{"name":"Lakers"},"home":{"name":"Celtics"},"stats":[{"label":"L10 PPG","away":"112.4","home":"108.9","awayWins":true},{"label":"L10 PA","away":"107.2","home":"104.1","awayWins":false}]}
+    console.log(`[Research] Iteration ${i + 1} stop_reason: ${response.stop_reason}`);
 
-Odds comparison — when discussing a specific line across books:
-{"type":"odds_comparison","books":[{"name":"DraftKings","key":"draftkings","odds":"-110"},{"name":"FanDuel","key":"fanduel","odds":"-108"}],"bestBook":"fanduel"}
+    if (response.stop_reason === 'end_turn') {
+      // Extract text blocks and return final answer
+      const text = response.content
+        .filter(b => b.type === 'text')
+        .map(b => b.text)
+        .join('');
+      return text;
+    }
 
-VISUAL DATA — the visualData field (separate from components):
-This is a structured data object the app renders as a rich visual card.
-The VISUAL DATA instruction injected below tells you exactly which type to use and how to populate it.
-When no visual type is specified, set visualData to null.
-Always populate visualData with real numbers from the injected data context — never make up stats.
+    if (response.stop_reason === 'tool_use') {
+      // Find all tool_use blocks and execute them in parallel
+      const toolUseBlocks = response.content.filter(b => b.type === 'tool_use');
+      console.log(`[Research] Tools requested: ${toolUseBlocks.map(b => b.name).join(', ')}`);
 
-In response text, wrap key numbers or emphasis in **double asterisks** for highlighting. Example: "He is averaging **29.4 points** over his last 10, which is **4.2 above his season average**."
+      const toolResults = await Promise.all(
+        toolUseBlocks.map(async (block) => {
+          try {
+            const result = await executeTool(block.name, block.input);
+            console.log(`[Research] Tool ${block.name} returned ${result?.length || 0} chars`);
+            return {
+              type:        'tool_result',
+              tool_use_id: block.id,
+              content:     result || 'No data returned.',
+            };
+          } catch (err) {
+            console.error(`[Research] Tool ${block.name} error:`, err.message);
+            return {
+              type:        'tool_result',
+              tool_use_id: block.id,
+              content:     `Tool error: ${err.message}`,
+            };
+          }
+        })
+      );
 
-Return ONLY valid JSON. No markdown. No code blocks. No text outside the JSON object.`;
+      // Add assistant turn (with tool_use blocks) + tool results as user turn
+      messages = [
+        ...messages,
+        { role: 'assistant', content: response.content },
+        { role: 'user',      content: toolResults },
+      ];
+      continue;
+    }
 
-// ── POST /api/research/chat ────────────────────────────────────────────────────
+    // Unexpected stop reason — bail out
+    console.warn(`[Research] Unexpected stop_reason: ${response.stop_reason}`);
+    const text = response.content
+      .filter(b => b.type === 'text')
+      .map(b => b.text)
+      .join('');
+    return text || null;
+  }
+
+  // Exceeded max iterations
+  console.warn('[Research] Max tool iterations reached');
+  return null;
+}
+
+// ── POST /api/research/chat ───────────────────────────────────────────────────
 
 router.post('/chat', async (req, res) => {
   const { message, history = [] } = req.body;
@@ -98,81 +283,17 @@ router.post('/chat', async (req, res) => {
     .slice(-20)
     .filter(m => m && (m.role === 'user' || m.role === 'assistant') && m.content);
 
-  // Off-topic guard — skip data fetch entirely, let Claude handle the redirect
-  // Check current message AND recent history for context (follow-up questions
-  // like "what about his rebounds?" won't have sports keywords on their own)
-  const hasRecentSportsContext = trimmedHistory
-    .slice(-4)
-    .some(m => !isOffTopic(m.content));
-
-  const skipDataFetch = isOffTopic(msg) && !hasRecentSportsContext;
-
-  if (skipDataFetch) {
-    console.log('[Research] Off-topic question detected — skipping data fetch:', msg.slice(0, 80));
-  }
-
-  // Fetch real data context (non-blocking, fails silently)
-  // Skipped for off-topic questions to avoid wasting API calls
-  let dataContext = null;
-  let detectedIntent = 'general';
-  if (!skipDataFetch) {
-    try {
-      const result = await buildDataContext(msg, trimmedHistory);
-      dataContext    = result?.context || null;
-      detectedIntent = result?.intent  || 'general';
-    } catch (err) {
-      console.warn('[Research] Data context fetch failed:', err.message);
-    }
-  }
-
-  // Classify response depth and build visual hint
-  const depth      = classifyDepth(msg);
-  const visualHint = buildVisualHint(detectedIntent, depth);
-  console.log(`[Research] Depth: ${depth} | Intent: ${detectedIntent} | Visual: ${visualHint.slice(0, 60)}`);
-
-  const depthInstruction = {
-    brief:    'RESPONSE DEPTH: BRIEF — Answer in 2-4 sentences maximum. One key stat. One sentence of context. End with a follow-up offer. Nothing more.',
-    standard: 'RESPONSE DEPTH: STANDARD — Answer in 1-2 short paragraphs. Cover recent form and relevant matchup/situational context. End with a follow-up offer.',
-    detailed: 'RESPONSE DEPTH: DETAILED — Give a full breakdown. Maximum 4 short paragraphs. Cover: recent form, season context, matchup factors, relevant situational factors (weather/rest/back-to-back/goalie). End with follow-up offer.',
-  }[depth];
-
-  // Log data context status
-  console.log(`[Research] dataContext: ${dataContext ? `${dataContext.length} chars` : 'NULL — no data available'}`);
-  if (!dataContext) {
-    console.warn('[Research] WARNING: No data context built — Claude will answer without real stats');
-  }
-
-  // Build the system prompt — inject data context + depth + visual hint
-  const dataSection = dataContext
-    ? `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nREAL DATA FOR THIS QUESTION — use these exact numbers in your response:\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n${dataContext}\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
-    : `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nNO REAL-TIME DATA FOR THIS QUESTION.\nDo NOT say "stats are loading" — they are not loading, the data was not found. Do NOT tell the user to check other sites or try again. Instead: answer using the conversation context if available. If you have nothing useful, say: "I don't have data on that right now — try asking about a specific player, team, or tonight's game."\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
-
-  const injections = [
-    dataSection,
-    depthInstruction,
-    `VISUAL DATA INSTRUCTION: ${visualHint}`,
-    'Return ONLY valid JSON. No markdown. No code blocks. No text outside the JSON object.',
-  ].join('\n\n');
-
-  const systemPrompt = RESEARCH_SYSTEM.replace(
-    'Return ONLY valid JSON. No markdown. No code blocks. No text outside the JSON object.',
-    injections
-  );
-
   const messages = [
     ...trimmedHistory,
     { role: 'user', content: msg },
   ];
 
   try {
-    const aiResponse = await client.messages.create({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 2000,
-      system: systemPrompt,
-      messages,
-    });
+    const raw = await runWithTools(messages);
 
-    const raw = aiResponse.content[0]?.text || '';
+    if (!raw) {
+      return res.status(500).json({ error: "Chalky is studying the numbers. Try again in a moment." });
+    }
 
     let parsed;
     try {
@@ -182,24 +303,23 @@ router.post('/chat', async (req, res) => {
         .trim();
       parsed = JSON.parse(cleaned);
     } catch {
-      // If JSON parse fails, wrap raw text
       parsed = {
-        response: raw || "Give me a moment — I'm pulling the numbers.",
-        hasPick: false,
-        components: [],
+        response:             raw,
+        hasPick:              false,
+        components:           [],
+        visualData:           null,
+        followUpSuggestions:  [],
       };
     }
 
-    const responseText       = typeof parsed.response === 'string' ? parsed.response : raw;
-    const components         = Array.isArray(parsed.components) ? parsed.components : [];
-    const visualData         = parsed.visualData && parsed.visualData.type ? parsed.visualData : null;
-    const followUpSuggestions = Array.isArray(parsed.followUpSuggestions) ? parsed.followUpSuggestions.slice(0, 2) : [];
+    const responseText        = typeof parsed.response === 'string' ? parsed.response : raw;
+    const components          = Array.isArray(parsed.components) ? parsed.components : [];
+    const visualData          = parsed.visualData && parsed.visualData.type ? parsed.visualData : null;
+    const followUpSuggestions = Array.isArray(parsed.followUpSuggestions)
+      ? parsed.followUpSuggestions.slice(0, 2)
+      : [];
 
-    if (visualData) {
-      console.log(`[Research] Visual data type: ${visualData.type}`);
-    }
-
-    // Return history without injected data context (keep conversation clean)
+    // Store conversation without tool calls in history (clean for next turn)
     const updatedHistory = [
       ...trimmedHistory,
       { role: 'user',      content: msg },
@@ -207,21 +327,21 @@ router.post('/chat', async (req, res) => {
     ];
 
     res.json({
-      response:    responseText,
-      hasPick:     false, // always false in research mode
+      response: responseText,
+      hasPick:  false,
       components,
       visualData,
       followUpSuggestions,
-      hasRealData: !!dataContext,
-      history:     updatedHistory,
+      history:  updatedHistory,
     });
+
   } catch (err) {
-    console.error('[Research] Claude API error:', err.message);
+    console.error('[Research] Error:', err.message);
     res.status(500).json({ error: "Chalky is studying the numbers. Try again in a moment." });
   }
 });
 
-// ── GET /api/research/suggestions ─────────────────────────────────────────────
+// ── GET /api/research/suggestions ────────────────────────────────────────────
 
 router.get('/suggestions', async (req, res) => {
   try {
