@@ -7,11 +7,14 @@ import {
   StyleSheet,
   SafeAreaView,
   StatusBar,
+  ActivityIndicator,
+  Alert,
 } from 'react-native';
+import { useAuth } from '@clerk/clerk-expo';
 import { colors, spacing, radius } from '../theme';
 import ProfileHeader from '../components/profile/ProfileHeader';
 import RecentPickRow from '../components/profile/RecentPickRow';
-import { myProfile } from '../data/mockProfile';
+import useProfile from '../hooks/useProfile';
 
 const TABS = ['Picks', 'Following', 'Followers'];
 
@@ -52,11 +55,24 @@ function UserRow({ user }) {
 
 export default function ProfileScreen() {
   const [activeTab, setActiveTab] = useState(0);
-  const profile = myProfile;
+  const { signOut } = useAuth();
+  const { profile, loading, refresh } = useProfile();
+
+  function confirmSignOut() {
+    Alert.alert(
+      'Sign Out',
+      'Are you sure you want to sign out?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Sign Out', style: 'destructive', onPress: () => signOut() },
+      ]
+    );
+  }
 
   const renderContent = () => {
+    if (!profile) return null;
     if (activeTab === 0) {
-      if (profile.recentPicks.length === 0) {
+      if (!profile.recentPicks || profile.recentPicks.length === 0) {
         return (
           <View style={styles.emptyState}>
             <Text style={styles.emptyIcon}>🎯</Text>
@@ -76,6 +92,16 @@ export default function ProfileScreen() {
     }
   };
 
+  if (loading && !profile) {
+    return (
+      <SafeAreaView style={styles.safeArea}>
+        <View style={styles.loadingWrap}>
+          <ActivityIndicator size="large" color={colors.green} />
+        </View>
+      </SafeAreaView>
+    );
+  }
+
   return (
     <SafeAreaView style={styles.safeArea}>
       <StatusBar barStyle="light-content" backgroundColor={colors.background} />
@@ -84,23 +110,27 @@ export default function ProfileScreen() {
         data={[]}
         keyExtractor={() => ''}
         renderItem={null}
+        onRefresh={refresh}
+        refreshing={loading}
         ListHeaderComponent={
           <>
             {/* Top nav */}
             <View style={styles.topNav}>
               <Text style={styles.topNavTitle}>Profile</Text>
-              <TouchableOpacity style={styles.settingsBtn}>
+              <TouchableOpacity style={styles.settingsBtn} onPress={confirmSignOut}>
                 <Text style={styles.settingsIcon}>⚙️</Text>
               </TouchableOpacity>
             </View>
 
             {/* Profile header */}
-            <ProfileHeader
-              profile={profile}
-              isOwnProfile={true}
-              isFollowing={false}
-              onFollowToggle={() => {}}
-            />
+            {profile && (
+              <ProfileHeader
+                profile={profile}
+                isOwnProfile={true}
+                isFollowing={false}
+                onFollowToggle={() => {}}
+              />
+            )}
 
             {/* Tab bar */}
             <View style={styles.tabBar}>
@@ -114,10 +144,10 @@ export default function ProfileScreen() {
                   <Text style={[styles.tabText, activeTab === i && styles.tabTextActive]}>
                     {tab}
                   </Text>
-                  {i === 1 && (
+                  {i === 1 && profile && (
                     <Text style={styles.tabCount}> {profile.following}</Text>
                   )}
-                  {i === 2 && (
+                  {i === 2 && profile && (
                     <Text style={styles.tabCount}> {profile.followers}</Text>
                   )}
                 </TouchableOpacity>
@@ -140,6 +170,11 @@ const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
     backgroundColor: colors.background,
+  },
+  loadingWrap: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   topNav: {
     flexDirection: 'row',

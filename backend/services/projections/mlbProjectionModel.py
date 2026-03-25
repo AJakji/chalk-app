@@ -2194,6 +2194,148 @@ def confidence_score_pitcher(sp_logs: list[dict], days_rest: int = 5) -> int:
     return max(45, min(92, confidence))
 
 
+# ── New v2.1 factor functions — matchup, arsenal, umpire, bullpen, splits ─────────
+
+def get_pitcher_batter_matchup_factor(conn, pitcher_id, batter_id, league_avg_ba=0.248):
+    """Career matchup factor. High weight if 20+ AB, low if <10."""
+    if not pitcher_id or not batter_id:
+        return 1.0
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT ab, avg FROM pitcher_batter_matchups
+        WHERE pitcher_id = %s AND batter_id = %s
+        ORDER BY season DESC LIMIT 1
+    """, (pitcher_id, batter_id))
+    row = cur.fetchone()
+    if not row or not row[0] or row[0] < 5:
+        return 1.0
+    ab, career_avg = row[0], float(row[1] or league_avg_ba)
+    weight = min(1.0, (ab - 5) / 15.0)  # 0 at 5 AB, 1.0 at 20+ AB
+    raw_factor = career_avg / league_avg_ba if league_avg_ba > 0 else 1.0
+    raw_factor = max(0.7, min(1.4, raw_factor))
+    return 1.0 + (raw_factor - 1.0) * weight
+
+
+def get_pitcher_arsenal_k_factor(conn, pitcher_id):
+    """Whiff-rate weighted arsenal factor for K projections."""
+    if not pitcher_id:
+        return 1.0
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT usage_pct, whiff_rate FROM pitcher_arsenal
+        WHERE pitcher_id = %s
+        AND usage_pct IS NOT NULL AND whiff_rate IS NOT NULL
+        AND season = (SELECT MAX(season) FROM pitcher_arsenal WHERE pitcher_id = %s)
+    """, (pitcher_id, pitcher_id))
+    rows = cur.fetchall()
+    if not rows:
+        return 1.0
+    weighted_whiff = sum(float(r[0]) * float(r[1]) for r in rows) / 100.0
+    total_usage = sum(float(r[0]) for r in rows)
+    if total_usage > 0:
+        weighted_whiff = weighted_whiff / (total_usage / 100.0)
+    league_avg_whiff = 0.245
+    factor = weighted_whiff / league_avg_whiff if league_avg_whiff > 0 else 1.0
+    return max(0.82, min(1.22, factor))
+
+
+def get_umpire_factors(conn, game_pk):
+    """Get umpire K/BB/runs factors for tonight's game."""
+    if not game_pk:
+        return {'k_factor': 1.0, 'bb_factor': 1.0, 'runs_factor': 1.0}
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT ut.avg_k_per_game, ut.avg_bb_per_game, ut.avg_runs_per_game, ut.zone_rating
+        FROM game_umpires gu
+        JOIN umpire_tendencies ut ON gu.hp_umpire_id = ut.umpire_id
+        WHERE gu.game_pk = %s
+    """, (game_pk,))
+    row = cur.fetchone()
+    if not row or not row[0]:
+        return {'k_factor': 1.0, 'bb_factor': 1.0, 'runs_factor': 1.0}
+    league_k, league_bb, league_runs = 17.0, 6.2, 8.8
+    return {
+        'k_factor': max(0.88, min(1.15, float(row[0]) / league_k)),
+        'bb_factor': max(0.88, min(1.15, float(row[1]) / league_bb)),
+        'runs_factor': max(0.90, min(1.12, float(row[2]) / league_runs)),
+    }
+
+
+def get_bullpen_factor(conn, team_id, collected_date=None):
+    """Return bullpen fatigue factor (>0 = tired pen = more runs allowed late)."""
+    if not team_id:
+        return 1.0
+    if not collected_date:
+        from datetime import date as dt
+        collected_date = dt.today().strftime('%Y-%m-%d')
+    cur = conn.cursor()
+    # Check if top relievers (high recent usage) are overworked
+    cur.execute("""
+        SELECT pitcher_name, pitches_last_3, innings_last_3, days_since_last_app
+        FROM bullpen_usage
+        WHERE team_id = %s AND collected_date = %s
+        ORDER BY pitches_last_3 DESC
+        LIMIT 5
+    """, (team_id, collected_date))
+    rows = cur.fetchall()
+    if not rows:
+        return 1.0
+    # Count how many top arms are fatigued (50+ pitches in 3 days or appeared 2+ times)
+    tired = sum(1 for r in rows if float(r[1] or 0) >= 50 or float(r[2] or 0) >= 2.0)
+    if tired >= 2:
+        return 1.05  # tired bullpen → more late-game runs
+    elif tired == 1:
+        return 1.02
+    return 1.0
+
+
+def get_day_night_factor(conn, player_id, is_day_game, season):
+    """Day/night split factor for batter."""
+    if player_id is None:
+        return 1.0
+    cur = conn.cursor()
+    col = 'day_avg' if is_day_game else 'night_avg'
+    cur.execute(f"""
+        SELECT {col} FROM player_splits
+        WHERE player_id = %s AND sport = 'MLB' AND season = %s
+    """, (player_id, season))
+    row = cur.fetchone()
+    if not row or not row[0]:
+        return 1.0
+    split_avg = float(row[0])
+    # Get season avg for comparison
+    cur.execute("""
+        SELECT AVG(fg_pct) FROM player_game_logs
+        WHERE player_id = %s AND sport = 'MLB' AND season = %s
+        AND fg_pct IS NOT NULL AND fg_pct > 0
+    """, (player_id, season))
+    season_row = cur.fetchone()
+    if not season_row or not season_row[0]:
+        return 1.0
+    season_avg = float(season_row[0])
+    if season_avg <= 0:
+        return 1.0
+    factor = split_avg / season_avg
+    return max(0.85, min(1.20, factor))
+
+
+def get_risp_factor(conn, player_id, season):
+    """RISP clutch factor for RBI projections."""
+    if not player_id:
+        return 1.0
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT risp_avg FROM player_splits
+        WHERE player_id = %s AND sport = 'MLB' AND season = %s
+    """, (player_id, season))
+    row = cur.fetchone()
+    if not row or not row[0]:
+        return 1.0
+    league_risp_avg = 0.240
+    factor = float(row[0]) / league_risp_avg
+    return max(0.80, min(1.25, factor))
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────────
 
 def main():
@@ -2331,6 +2473,19 @@ def main():
                 # Platoon splits (fetched individually for each batter)
                 batter_splits = get_platoon_splits(conn, pid)
 
+                # v2.1 — Fetch new enhanced factors
+                opp_sp_id = None
+                if side == 'home' and away_sp_info:
+                    opp_sp_id = away_sp_info['id']
+                elif side == 'away' and home_sp_info:
+                    opp_sp_id = home_sp_info['id']
+
+                matchup_f  = get_pitcher_batter_matchup_factor(conn, opp_sp_id, pid)
+                ump_f      = get_umpire_factors(conn, game_pk)
+                is_day     = False  # default night; could be enhanced with schedule time
+                day_night_f = get_day_night_factor(conn, pid, is_day, CURRENT_SEASON)
+                risp_f     = get_risp_factor(conn, pid, CURRENT_SEASON)
+
                 # Run all batter projection functions — platoon now handled inside each function
                 proj_hits_val,  fac_hits  = project_hits(bat_logs, opp_sp_logs, weather, park, loc, lp, lineup_confirmed, batter_splits, opp_sp_throws)
                 proj_tb_val,    fac_tb    = project_total_bases(bat_logs, opp_sp_logs, weather, park, loc, lp, lineup_confirmed, batter_splits, opp_sp_throws)
@@ -2338,6 +2493,13 @@ def main():
                 proj_rbi_val,   fac_rbi   = project_rbi(bat_logs, opp_sp_logs, weather, park, loc, lp, team_obp, lineup_confirmed)
                 proj_runs_val,  fac_runs  = project_runs(bat_logs, opp_sp_logs, weather, park, loc, lp, lineup_confirmed)
                 proj_sb_val,    fac_sb    = project_stolen_bases(bat_logs, opp_sp_logs, weather, park, loc, opp_sp_throws)
+
+                # Apply v2.1 factors to hit/RBI/run projections
+                proj_hits_val  = round(proj_hits_val  * matchup_f * day_night_f * ump_f['runs_factor'], 3)
+                proj_tb_val    = round(proj_tb_val    * matchup_f * ump_f['runs_factor'], 3)
+                proj_hr_val    = round(proj_hr_val    * ump_f['runs_factor'], 4)
+                proj_rbi_val   = round(proj_rbi_val   * risp_f * ump_f['runs_factor'], 3)
+                proj_runs_val  = round(proj_runs_val  * day_night_f * ump_f['runs_factor'], 3)
 
                 conf = confidence_score_batter(bat_logs, rest_days, lineup_confirmed, opp_sp_logs)
 
@@ -2357,6 +2519,13 @@ def main():
                         'lineup_confirmed': lineup_confirmed,
                         'opp_sp_throws':    opp_sp_throws,
                         'weather_available': bool(weather),
+                        # v2.1 new factors
+                        'matchup_f':        round(matchup_f, 3),
+                        'day_night_f':      round(day_night_f, 3),
+                        'risp_f':           round(risp_f, 3),
+                        'ump_k_f':          round(ump_f['k_factor'], 3),
+                        'ump_runs_f':       round(ump_f['runs_factor'], 3),
+                        'opp_sp_id':        opp_sp_id,
                     },
                 }
 
@@ -2405,10 +2574,19 @@ def main():
             # Compute days rest for this SP
             sp_days_rest = compute_days_rest(sp_logs, game_date)
 
+            # v2.1 — arsenal-based K factor and umpire factor
+            arsenal_k_f = get_pitcher_arsenal_k_factor(conn, pid)
+            ump_f_sp    = get_umpire_factors(conn, game_pk)
+
             proj_k_val,    fac_k    = project_strikeouts(sp_logs, opp_team_logs, weather, loc, opp_k_rate, sp_days_rest, sp_hand)
             proj_er_val,   fac_er   = project_earned_runs(sp_logs, opp_team_logs, weather, park, loc, sp_days_rest)
             proj_bb_val,   fac_bb   = project_walks(sp_logs, opp_team_logs, weather, loc, sp_days_rest)
             proj_outs_val, fac_outs = project_outs_recorded(sp_logs, weather, bullpen_era, sp_days_rest, game_date)
+
+            # Apply v2.1 factors to K and ER projections
+            proj_k_val  = round(proj_k_val  * arsenal_k_f * ump_f_sp['k_factor'], 3)
+            proj_er_val = round(proj_er_val * ump_f_sp['runs_factor'], 3)
+            proj_bb_val = round(proj_bb_val * ump_f_sp['bb_factor'], 3)
 
             conf = confidence_score_pitcher(sp_logs, sp_days_rest)
 
@@ -2425,6 +2603,11 @@ def main():
                     'sp_hand':          sp_hand,
                     'days_rest':        sp_days_rest,
                     'weather_available': bool(weather),
+                    # v2.1 new factors
+                    'arsenal_k_f':      round(arsenal_k_f, 3),
+                    'ump_k_f':          round(ump_f_sp['k_factor'], 3),
+                    'ump_bb_f':         round(ump_f_sp['bb_factor'], 3),
+                    'ump_runs_f':       round(ump_f_sp['runs_factor'], 3),
                 },
             }
 

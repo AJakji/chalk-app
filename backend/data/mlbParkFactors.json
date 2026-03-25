@@ -1,0 +1,281 @@
+{
+  "comment": "3-year rolling MLB park factors. hr = home run factor, runs = runs scored factor, hits = hits factor. 1.00 = league average. Updated for 2024 season.",
+  "parks": {
+    "coors_field": {
+      "team": "Colorado Rockies",
+      "city": "Denver, CO",
+      "altitude_ft": 5183,
+      "hr": 1.35,
+      "runs": 1.28,
+      "hits": 1.14,
+      "wind_notes": "High altitude dramatically increases carry on all batted balls"
+    },
+    "great_american_ballpark": {
+      "team": "Cincinnati Reds",
+      "city": "Cincinnati, OH",
+      "altitude_ft": 489,
+      "hr": 1.25,
+      "runs": 1.18,
+      "hits": 1.08,
+      "wind_notes": "Short dimensions to left-center, warm Ohio summers"
+    },
+    "yankee_stadium": {
+      "team": "New York Yankees",
+      "city": "New York, NY",
+      "altitude_ft": 55,
+      "hr": 1.18,
+      "runs": 1.10,
+      "hits": 1.05,
+      "wind_notes": "Short porch in right field (314 ft) massive for LHB"
+    },
+    "citizens_bank_park": {
+      "team": "Philadelphia Phillies",
+      "city": "Philadelphia, PA",
+      "altitude_ft": 20,
+      "hr": 1.15,
+      "runs": 1.10,
+      "hits": 1.05,
+      "wind_notes": "Wind patterns from Delaware River often blow out"
+    },
+    "wrigley_field": {
+      "team": "Chicago Cubs",
+      "city": "Chicago, IL",
+      "altitude_ft": 595,
+      "hr": 1.10,
+      "runs": 1.08,
+      "hits": 1.06,
+      "wind_notes": "Most wind-dependent park in MLB — check direction before every pick"
+    },
+    "truist_park": {
+      "team": "Atlanta Braves",
+      "city": "Atlanta, GA",
+      "altitude_ft": 1050,
+      "hr": 1.05,
+      "runs": 1.02,
+      "hits": 1.01,
+      "wind_notes": "Elevation + warm Georgia weather boosts carry"
+    },
+    "chase_field": {
+      "team": "Arizona Diamondbacks",
+      "city": "Phoenix, AZ",
+      "altitude_ft": 1082,
+      "hr": 1.05,
+      "runs": 1.04,
+      "hits": 1.02,
+      "wind_notes": "Retractable roof — check if open (heat and elevation amplify) or closed"
+    },
+    "rogers_centre": {
+      "team": "Toronto Blue Jays",
+      "city": "Toronto, ON",
+      "altitude_ft": 251,
+      "hr": 1.06,
+      "runs": 1.04,
+      "hits": 1.02,
+      "wind_notes": "Turf plays fast; dome nullifies weather effects"
+    },
+    "globe_life_field": {
+      "team": "Texas Rangers",
+      "city": "Arlington, TX",
+      "altitude_ft": 551,
+      "hr": 1.08,
+      "runs": 1.05,
+      "hits": 1.03,
+      "wind_notes": "Climate-controlled dome, Texas heat adds carry in open sections"
+    },
+    "nationals_park": {
+      "team": "Washington Nationals",
+      "city": "Washington, DC",
+      "altitude_ft": 25,
+      "hr": 1.08,
+      "runs": 1.04,
+      "hits": 1.02,
+      "wind_notes": "Wind patterns vary; warmer summer games favor offense"
+    },
+    "guaranteed_rate_field": {
+      "team": "Chicago White Sox",
+      "city": "Chicago, IL",
+      "altitude_ft": 595,
+      "hr": 1.08,
+      "runs": 1.05,
+      "hits": 1.03,
+      "wind_notes": "Wind similar to Wrigley but less dramatic effect"
+    },
+    "camden_yards": {
+      "team": "Baltimore Orioles",
+      "city": "Baltimore, MD",
+      "altitude_ft": 32,
+      "hr": 1.06,
+      "runs": 1.05,
+      "hits": 1.03,
+      "wind_notes": "RF power alley short, humidity summer months"
+    },
+    "minute_maid_park": {
+      "team": "Houston Astros",
+      "city": "Houston, TX",
+      "altitude_ft": 43,
+      "hr": 1.07,
+      "runs": 1.04,
+      "hits": 1.02,
+      "wind_notes": "Crawford Boxes in LF only 315 ft; retractable roof affects play"
+    },
+    "tropicana_field": {
+      "team": "Tampa Bay Rays",
+      "city": "St. Petersburg, FL",
+      "altitude_ft": 15,
+      "hr": 1.05,
+      "runs": 1.00,
+      "hits": 0.99,
+      "wind_notes": "Dome eliminates weather; turf plays fast"
+    },
+    "american_family_field": {
+      "team": "Milwaukee Brewers",
+      "city": "Milwaukee, WI",
+      "altitude_ft": 635,
+      "hr": 1.02,
+      "runs": 1.01,
+      "hits": 1.00,
+      "wind_notes": "Retractable roof; check if open for cold Milwaukee nights"
+    },
+    "dodger_stadium": {
+      "team": "Los Angeles Dodgers",
+      "city": "Los Angeles, CA",
+      "altitude_ft": 340,
+      "hr": 0.97,
+      "runs": 0.97,
+      "hits": 0.99,
+      "wind_notes": "Marine layer from Pacific suppresses fly balls on cold nights"
+    },
+    "angel_stadium": {
+      "team": "Los Angeles Angels",
+      "city": "Anaheim, CA",
+      "altitude_ft": 154,
+      "hr": 0.97,
+      "runs": 0.97,
+      "hits": 0.99,
+      "wind_notes": "Marine influence moderate; warm days good for offense"
+    },
+    "busch_stadium": {
+      "team": "St. Louis Cardinals",
+      "city": "St. Louis, MO",
+      "altitude_ft": 455,
+      "hr": 0.92,
+      "runs": 0.95,
+      "hits": 0.98,
+      "wind_notes": "Large foul territory, pitcher-friendly dimensions"
+    },
+    "target_field": {
+      "team": "Minnesota Twins",
+      "city": "Minneapolis, MN",
+      "altitude_ft": 830,
+      "hr": 0.95,
+      "runs": 0.97,
+      "hits": 0.99,
+      "wind_notes": "Cold springs depress offense significantly; check temps"
+    },
+    "progressive_field": {
+      "team": "Cleveland Guardians",
+      "city": "Cleveland, OH",
+      "altitude_ft": 580,
+      "hr": 0.97,
+      "runs": 0.98,
+      "hits": 1.01,
+      "wind_notes": "Lake Erie wind can suppress HR; watch direction"
+    },
+    "comerica_park": {
+      "team": "Detroit Tigers",
+      "city": "Detroit, MI",
+      "altitude_ft": 600,
+      "hr": 0.90,
+      "runs": 0.95,
+      "hits": 0.98,
+      "wind_notes": "Deep power alleys, large outfield suppresses HR significantly"
+    },
+    "kauffman_stadium": {
+      "team": "Kansas City Royals",
+      "city": "Kansas City, MO",
+      "altitude_ft": 750,
+      "hr": 0.88,
+      "runs": 0.94,
+      "hits": 0.96,
+      "wind_notes": "Large outfield, pitcher-friendly; wind from south can help"
+    },
+    "t_mobile_park": {
+      "team": "Seattle Mariners",
+      "city": "Seattle, WA",
+      "altitude_ft": 8,
+      "hr": 0.88,
+      "runs": 0.94,
+      "hits": 0.97,
+      "wind_notes": "Marine air from Puget Sound suppresses fly balls; retractable roof"
+    },
+    "pnc_park": {
+      "team": "Pittsburgh Pirates",
+      "city": "Pittsburgh, PA",
+      "altitude_ft": 705,
+      "hr": 0.88,
+      "runs": 0.94,
+      "hits": 0.97,
+      "wind_notes": "River valley location, deep outfield dimensions"
+    },
+    "american_airlines_center": {
+      "team": "Texas Rangers (old)",
+      "city": "Dallas, TX",
+      "altitude_ft": 551,
+      "hr": 1.03,
+      "runs": 1.01,
+      "hits": 1.00,
+      "wind_notes": "Placeholder — Globe Life Field is current Rangers park"
+    },
+    "fenway_park": {
+      "team": "Boston Red Sox",
+      "city": "Boston, MA",
+      "altitude_ft": 20,
+      "hr": 0.95,
+      "runs": 1.07,
+      "hits": 1.08,
+      "wind_notes": "Green Monster suppresses HR but generates wall doubles; many hits"
+    },
+    "oracle_park": {
+      "team": "San Francisco Giants",
+      "city": "San Francisco, CA",
+      "altitude_ft": 0,
+      "hr": 0.82,
+      "runs": 0.91,
+      "hits": 0.95,
+      "wind_notes": "McCovey Cove wind off SF Bay — most suppressive park for HR in MLB"
+    },
+    "petco_park": {
+      "team": "San Diego Padres",
+      "city": "San Diego, CA",
+      "altitude_ft": 17,
+      "hr": 0.78,
+      "runs": 0.90,
+      "hits": 0.94,
+      "wind_notes": "Marine layer from Pacific, deep power alleys — most pitcher-friendly park in NL"
+    },
+    "loanDepot_park": {
+      "team": "Miami Marlins",
+      "city": "Miami, FL",
+      "altitude_ft": 6,
+      "hr": 0.85,
+      "runs": 0.93,
+      "hits": 0.96,
+      "wind_notes": "Retractable dome most games due to weather; suppresses offense when closed"
+    },
+    "citi_field": {
+      "team": "New York Mets",
+      "city": "New York, NY",
+      "altitude_ft": 20,
+      "hr": 0.93,
+      "runs": 0.96,
+      "hits": 0.98,
+      "wind_notes": "Flushing winds vary; power alleys deep in CF and RF"
+    }
+  },
+  "notes": {
+    "altitude_effect": "Every 1000 ft above sea level increases ball carry by ~0.5%. Coors Field (5183 ft) has the most dramatic effect.",
+    "wind_threshold": "Wind speeds above 15 mph have meaningful impact. Direction matters most — check if blowing toward power alleys.",
+    "temperature_effect": "Cold air is denser and kills carry. Below 50°F reduces HR probability significantly. Above 85°F in direct sunlight adds carry.",
+    "wrigley_note": "Wrigley Field is uniquely wind-dependent. When blowing out toward Waveland Ave (SW wind), it becomes one of the highest HR parks in MLB. When blowing in off Lake Michigan, it becomes a pitcher's park."
+  }
+}

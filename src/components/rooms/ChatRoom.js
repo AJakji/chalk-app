@@ -14,10 +14,11 @@ import {
 } from 'react-native';
 import { colors, spacing, radius } from '../../theme';
 import { simulatedMessages } from '../../data/mockRooms';
+import TeamLogo from '../TeamLogo';
+import { useTeamLogos } from '../../context/TeamLogosContext';
 
 const LEAGUE_COLORS = {
   NBA: '#C9082A',
-  NFL: '#013369',
   MLB: '#002D72',
   NHL: '#000000',
   Soccer: '#00A859',
@@ -128,6 +129,7 @@ export default function ChatRoom({ room, visible, onClose }) {
   if (!room) return null;
 
   const { league, title, status, clock, awayTeam, homeTeam, chalkPick } = room;
+  const getLogo = useTeamLogos();
   const isLive = status === 'live';
   const leagueColor = LEAGUE_COLORS[league] || colors.grey;
 
@@ -167,18 +169,20 @@ export default function ChatRoom({ room, visible, onClose }) {
         {/* Scoreboard strip for live games */}
         {isLive && (
           <View style={styles.scoreStrip}>
+            <TeamLogo uri={getLogo(awayTeam.abbr, league)} abbr={awayTeam.abbr} size={32} />
             <Text style={styles.scoreStripTeam}>{awayTeam.abbr}</Text>
             <Text style={styles.scoreStripScore}>{awayTeam.score}</Text>
             <Text style={styles.scoreStripClock}>{clock}</Text>
             <Text style={styles.scoreStripScore}>{homeTeam.score}</Text>
             <Text style={styles.scoreStripTeam}>{homeTeam.abbr}</Text>
+            <TeamLogo uri={getLogo(homeTeam.abbr, league)} abbr={homeTeam.abbr} size={32} />
           </View>
         )}
 
-        {/* Chalk pick strip */}
+        {/* Chalky pick strip */}
         {chalkPick && (
           <View style={styles.chalkStrip}>
-            <Text style={styles.chalkStripText}>🎯 Chalk: {chalkPick}</Text>
+            <Text style={styles.chalkStripText}>🎯 Chalky: {chalkPick}</Text>
           </View>
         )}
 

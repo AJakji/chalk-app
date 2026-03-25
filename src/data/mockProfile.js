@@ -34,15 +34,6 @@ export const myProfile = {
       postedAt: '2 days ago',
     },
     {
-      id: 'rp3',
-      league: 'NFL',
-      pick: 'Bills ML',
-      game: 'BUF @ NYJ',
-      result: 'win',
-      odds: '-145',
-      postedAt: '3 days ago',
-    },
-    {
       id: 'rp4',
       league: 'NBA',
       pick: 'Nuggets -3',
@@ -68,15 +59,6 @@ export const myProfile = {
       result: 'win',
       odds: '-110',
       postedAt: '6 days ago',
-    },
-    {
-      id: 'rp7',
-      league: 'NFL',
-      pick: 'Chiefs -6',
-      game: 'KC @ LV',
-      result: 'loss',
-      odds: '-110',
-      postedAt: '7 days ago',
     },
     {
       id: 'rp8',
@@ -113,15 +95,6 @@ export const otherProfile = {
       result: null,
       odds: '-110',
       postedAt: '2m ago',
-    },
-    {
-      id: 'op2',
-      league: 'NFL',
-      pick: 'Chiefs/Bills Over 51.5',
-      game: 'BUF @ KC',
-      result: null,
-      odds: '-110',
-      postedAt: '1h ago',
     },
     {
       id: 'op3',

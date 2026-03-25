@@ -86,17 +86,6 @@ export const mockGames = [
     ],
   },
   {
-    id: 'g3',
-    league: 'NFL',
-    status: 'upcoming',
-    clock: 'Sun 4:25 PM ET',
-    awayTeam: { name: 'Buffalo Bills', abbr: 'BUF', score: null },
-    homeTeam: { name: 'Kansas City Chiefs', abbr: 'KC', score: null },
-    chalkPick: { team: null, pick: 'Over 51.5', result: null },
-    boxScore: null,
-    playByPlay: [],
-  },
-  {
     id: 'g4',
     league: 'NBA',
     status: 'final',
@@ -173,4 +162,4 @@ export const mockGames = [
   },
 ];
 
-export const LEAGUES = ['All', 'NBA', 'NFL', 'Soccer', 'NHL', 'MLB'];
+export const LEAGUES = ['All', 'NBA', 'Soccer', 'NHL', 'MLB'];

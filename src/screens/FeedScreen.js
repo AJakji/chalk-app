@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -7,25 +7,28 @@ import {
   StyleSheet,
   SafeAreaView,
   StatusBar,
+  ActivityIndicator,
 } from 'react-native';
 import { colors, spacing, radius } from '../theme';
 import PickPost from '../components/feed/PickPost';
 import SuggestedPickers from '../components/feed/SuggestedPickers';
-import { mockPosts, mockUsers, suggestedPickers } from '../data/mockFeed';
+import PostPickModal from '../components/feed/PostPickModal';
+import useFeed from '../hooks/useFeed';
+import { suggestedPickers } from '../data/mockFeed';
 
 const TABS = ['For You', 'Top'];
-
-// Map userId → user object
-const userMap = Object.fromEntries(mockUsers.map((u) => [u.id, u]));
-
-// "Top" tab sorts by total tails
-const topPosts = [...mockPosts].sort((a, b) => b.tails - a.tails);
 
 export default function FeedScreen() {
   const [activeTab, setActiveTab] = useState(0);
   const [showSuggested, setShowSuggested] = useState(true);
+  const [showPostModal, setShowPostModal] = useState(false);
 
-  const posts = activeTab === 0 ? mockPosts : topPosts;
+  const { forYouPosts, topPosts, loading, load, react, tail, fade } = useFeed();
+
+  // Load on mount
+  useEffect(() => { load(); }, [load]);
+
+  const posts = activeTab === 0 ? forYouPosts : topPosts;
 
   const renderHeader = () => (
     <>
@@ -45,7 +48,7 @@ export default function FeedScreen() {
         ))}
       </View>
 
-      {/* Suggested pickers — shown once until dismissed */}
+      {/* Suggested pickers */}
       {showSuggested && activeTab === 0 && (
         <View>
           <SuggestedPickers users={suggestedPickers} />
@@ -74,22 +77,50 @@ export default function FeedScreen() {
       {/* Top header */}
       <View style={styles.header}>
         <Text style={styles.title}>Feed</Text>
-        <View style={styles.headerRight}>
-          <TouchableOpacity style={styles.postBtn}>
-            <Text style={styles.postBtnText}>+ Post Pick</Text>
-          </TouchableOpacity>
-        </View>
+        <TouchableOpacity style={styles.postBtn} onPress={() => setShowPostModal(true)}>
+          <Text style={styles.postBtnText}>+ Post Pick</Text>
+        </TouchableOpacity>
       </View>
 
-      <FlatList
-        data={posts}
-        keyExtractor={(item) => item.id + activeTab}
-        ListHeaderComponent={renderHeader}
-        renderItem={({ item }) => (
-          <PickPost post={item} user={userMap[item.userId]} />
-        )}
-        contentContainerStyle={styles.listContent}
-        showsVerticalScrollIndicator={false}
+      {/* Initial loading spinner */}
+      {loading && posts.length === 0 && (
+        <View style={styles.loadingWrap}>
+          <ActivityIndicator size="large" color={colors.green} />
+          <Text style={styles.loadingText}>Loading feed...</Text>
+        </View>
+      )}
+
+      {!loading || posts.length > 0 ? (
+        <FlatList
+          data={posts}
+          keyExtractor={(item) => item.id + activeTab}
+          ListHeaderComponent={renderHeader}
+          onRefresh={load}
+          refreshing={loading}
+          renderItem={({ item }) => (
+            <PickPost
+              post={item}
+              user={item.user}
+              onReact={react}
+              onTail={tail}
+              onFade={fade}
+            />
+          )}
+          contentContainerStyle={styles.listContent}
+          showsVerticalScrollIndicator={false}
+          ListEmptyComponent={
+            <View style={styles.emptyState}>
+              <Text style={styles.emptyIcon}>📭</Text>
+              <Text style={styles.emptyText}>No picks posted yet</Text>
+            </View>
+          }
+        />
+      ) : null}
+
+      <PostPickModal
+        visible={showPostModal}
+        onClose={() => setShowPostModal(false)}
+        onPosted={load}
       />
     </SafeAreaView>
   );
@@ -114,7 +145,6 @@ const styles = StyleSheet.create({
     color: colors.offWhite,
     letterSpacing: -0.5,
   },
-  headerRight: {},
   postBtn: {
     backgroundColor: colors.green,
     paddingHorizontal: spacing.md,
@@ -173,5 +203,26 @@ const styles = StyleSheet.create({
   listContent: {
     paddingHorizontal: spacing.md,
     paddingBottom: spacing.xl,
+  },
+  loadingWrap: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.md,
+    paddingTop: 80,
+  },
+  loadingText: {
+    fontSize: 14,
+    color: colors.grey,
+  },
+  emptyState: {
+    alignItems: 'center',
+    paddingTop: 80,
+    gap: spacing.md,
+  },
+  emptyIcon: { fontSize: 40 },
+  emptyText: {
+    fontSize: 15,
+    color: colors.grey,
   },
 });

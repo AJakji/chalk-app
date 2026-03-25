@@ -1,6 +1,21 @@
 // Mock feed data — will be replaced with real user-generated content from the backend
 
+// Chalky — the official AI account. Verified. Always first.
+export const chalkyUser = {
+  id: 'u_chalky',
+  username: 'chalky',
+  displayName: 'Chalky',
+  avatar: null,        // renders ChalkyAvatar component, not emoji
+  isChalky: true,
+  verified: true,
+  streak: 5,
+  streakType: 'hot',
+  record: { last10: [1,1,0,1,1,1,1,0,1,1] }, // 8-2
+  followers: 48200,
+};
+
 export const mockUsers = [
+  chalkyUser,
   {
     id: 'u1',
     username: 'sharpangle',
@@ -54,6 +69,28 @@ export const mockUsers = [
 ];
 
 export const mockPosts = [
+  // Chalky's official posts — pinned to top
+  {
+    id: 'c1',
+    userId: 'u_chalky',
+    createdAt: 'Just now',
+    league: 'NBA',
+    pick: 'Celtics -4.5',
+    pickType: 'Spread',
+    game: 'GSW @ BOS',
+    gameTime: 'Tonight 7:30 PM ET',
+    odds: '-108',
+    confidence: 84,
+    caption: "Warriors on a back-to-back. Curry questionable. Boston at home is a problem for everyone right now. I studied this line until 3am. Celtics cover.",
+    reactions: { lock: 1842, fire: 934, cap: 44, fade: 28, hit: 0 },
+    userReaction: null,
+    tails: 3812,
+    fades: 201,
+    affiliateLinks: {
+      draftkings: 'https://draftkings.com',
+      fanduel: 'https://fanduel.com',
+    },
+  },
   {
     id: 'p1',
     userId: 'u1',
@@ -70,27 +107,6 @@ export const mockPosts = [
     userReaction: null,
     tails: 234,
     fades: 31,
-    affiliateLinks: {
-      draftkings: 'https://draftkings.com',
-      fanduel: 'https://fanduel.com',
-    },
-  },
-  {
-    id: 'p2',
-    userId: 'u2',
-    createdAt: '14m ago',
-    league: 'NFL',
-    pick: 'Chiefs/Bills Over 51.5',
-    pickType: 'Total',
-    game: 'BUF @ KC',
-    gameTime: 'Sunday 4:25 PM ET',
-    odds: '-110',
-    confidence: 76,
-    caption: 'Mahomes vs Allen. You already know. Pound the over every single time these two meet. 7-2 O/U in their last 9 matchups.',
-    reactions: { lock: 311, fire: 204, cap: 44, fade: 19, hit: 0 },
-    userReaction: null,
-    tails: 891,
-    fades: 67,
     affiliateLinks: {
       draftkings: 'https://draftkings.com',
       fanduel: 'https://fanduel.com',
@@ -164,7 +180,8 @@ export const mockPosts = [
 ];
 
 export const suggestedPickers = [
-  mockUsers[0],
-  mockUsers[1],
-  mockUsers[3],
+  chalkyUser,      // Chalky always first
+  mockUsers[1],    // sharpangle
+  mockUsers[2],    // lockoftheday
+  mockUsers[4],    // analyticsedge
 ];

@@ -1,14 +1,30 @@
-import React from 'react';
-import { NavigationContainer, DefaultTheme } from '@react-navigation/native';
+import React, { useRef, useEffect } from 'react';
+import { NavigationContainer, DefaultTheme, useIsFocused } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import { View, StyleSheet } from 'react-native';
+import { View, Animated, StyleSheet } from 'react-native';
+import { ClerkProvider } from '@clerk/clerk-expo';
+import { TeamLogosProvider } from './src/context/TeamLogosContext';
+import * as SecureStore from 'expo-secure-store';
 
 import PicksScreen from './src/screens/PicksScreen';
 import ScoresScreen from './src/screens/ScoresScreen';
-import FeedScreen from './src/screens/FeedScreen';
-import RoomsScreen from './src/screens/RoomsScreen';
-import ProfileScreen from './src/screens/ProfileScreen';
+import ResearchScreen from './src/screens/ResearchScreen';
+import PlayersScreen from './src/screens/PlayersScreen';
+import ChalkyOnboarding from './src/components/ChalkyOnboarding';
 import { colors } from './src/theme';
+
+const CLERK_PUBLISHABLE_KEY = 'pk_test_cXVhbGl0eS1wZXJjaC0zOC5jbGVyay5hY2NvdW50cy5kZXYk';
+
+const tokenCache = {
+  async getToken(key) {
+    try { return await SecureStore.getItemAsync(key); }
+    catch { return null; }
+  },
+  async saveToken(key, value) {
+    try { await SecureStore.setItemAsync(key, value); }
+    catch {}
+  },
+};
 
 const Tab = createBottomTabNavigator();
 
@@ -23,14 +39,71 @@ const ChalkNavTheme = {
   },
 };
 
-// Minimal geometric icon components — no icon library needed
+// ── Fade wrapper — fades in every time the tab becomes focused ────────────────
+
+function FadeScreen({ children }) {
+  const isFocused = useIsFocused();
+  const opacity = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    if (isFocused) {
+      opacity.setValue(0);
+      Animated.timing(opacity, {
+        toValue: 1,
+        duration: 200,
+        useNativeDriver: true,
+      }).start();
+    }
+  }, [isFocused]);
+
+  return (
+    <Animated.View style={{ flex: 1, opacity }}>
+      {children}
+    </Animated.View>
+  );
+}
+
+const PicksTab    = () => <FadeScreen><PicksScreen /></FadeScreen>;
+const ResearchTab = () => <FadeScreen><ResearchScreen /></FadeScreen>;
+const ScoresTab   = () => <FadeScreen><ScoresScreen /></FadeScreen>;
+const PlayersTab  = ({ navigation }) => <FadeScreen><PlayersScreen navigation={navigation} /></FadeScreen>;
+
+// ── Tab Icons ─────────────────────────────────────────────────────────────────
+
 function PicksIcon({ color, size }) {
   const s = size * 0.55;
   return (
     <View style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }}>
-      <View style={{ width: s, height: s, transform: [{ rotate: '45deg' }], borderWidth: 2, borderColor: color, borderRadius: 3 }}>
-        <View style={{ position: 'absolute', top: s * 0.25, left: s * 0.25, width: s * 0.5, height: s * 0.5, backgroundColor: color, borderRadius: 2 }} />
+      <View style={{
+        width: s, height: s, transform: [{ rotate: '45deg' }],
+        borderWidth: 2, borderColor: color, borderRadius: 3,
+      }}>
+        <View style={{
+          position: 'absolute', top: s * 0.25, left: s * 0.25,
+          width: s * 0.5, height: s * 0.5,
+          backgroundColor: color, borderRadius: 2,
+        }} />
       </View>
+    </View>
+  );
+}
+
+function ResearchIcon({ color, size }) {
+  const circleSize = size * 0.56;
+  const circleR = circleSize / 2;
+  return (
+    <View style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }}>
+      <View style={{
+        width: circleSize, height: circleSize, borderRadius: circleR,
+        borderWidth: 2.5, borderColor: color,
+        position: 'absolute', top: size * 0.06, left: size * 0.06,
+      }} />
+      <View style={{
+        position: 'absolute', bottom: size * 0.06, right: size * 0.06,
+        width: 3, height: size * 0.34,
+        backgroundColor: color, borderRadius: 3,
+        transform: [{ rotate: '45deg' }],
+      }} />
     </View>
   );
 }
@@ -39,62 +112,69 @@ function ScoresIcon({ color, size }) {
   const barW = size * 0.14;
   const gap = size * 0.08;
   return (
-    <View style={{ width: size, height: size, alignItems: 'flex-end', justifyContent: 'flex-end', flexDirection: 'row', gap }}>
+    <View style={{
+      width: size, height: size,
+      alignItems: 'flex-end', justifyContent: 'flex-end',
+      flexDirection: 'row', gap,
+    }}>
       {[0.45, 0.65, 0.85, 1.0].map((h, i) => (
-        <View key={i} style={{ width: barW, height: size * h * 0.7, backgroundColor: color, borderRadius: 2 }} />
+        <View
+          key={i}
+          style={{ width: barW, height: size * h * 0.7, backgroundColor: color, borderRadius: 2 }}
+        />
       ))}
     </View>
   );
 }
 
-function FeedIcon({ color, size }) {
-  const lineH = size * 0.1;
-  const gap = size * 0.15;
-  return (
-    <View style={{ width: size, height: size, justifyContent: 'center', gap }}>
-      <View style={{ height: lineH, backgroundColor: color, borderRadius: 99, width: '100%' }} />
-      <View style={{ height: lineH, backgroundColor: color, borderRadius: 99, width: '75%' }} />
-      <View style={{ height: lineH, backgroundColor: color, borderRadius: 99, width: '55%' }} />
-    </View>
-  );
-}
-
-function RoomsIcon({ color, size }) {
-  const r = size * 0.42;
-  const tailSize = size * 0.22;
+function PlayersIcon({ color, size }) {
+  const s = size * 0.62;
+  const headR = s * 0.3;
+  const bodyW = s * 0.54;
+  const bodyH = s * 0.3;
   return (
     <View style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }}>
-      <View style={{ width: r * 2, height: r * 1.5, borderRadius: r, borderWidth: 2, borderColor: color }}>
-        <View style={{
-          position: 'absolute', bottom: -tailSize * 0.6, left: r * 0.3,
-          width: tailSize, height: tailSize,
-          borderRightWidth: 2, borderBottomWidth: 2, borderColor: color,
-          transform: [{ rotate: '30deg' }], borderRadius: 2,
-        }} />
-      </View>
-    </View>
-  );
-}
-
-function ProfileIcon({ color, size }) {
-  const headR = size * 0.22;
-  const bodyW = size * 0.55;
-  const bodyH = size * 0.28;
-  return (
-    <View style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center', gap: size * 0.06 }}>
-      <View style={{ width: headR * 2, height: headR * 2, borderRadius: headR, borderWidth: 2, borderColor: color }} />
-      <View style={{ width: bodyW, height: bodyH, borderTopLeftRadius: bodyW / 2, borderTopRightRadius: bodyW / 2, borderWidth: 2, borderColor: color, borderBottomWidth: 0 }} />
+      {/* Head circle */}
+      <View style={{
+        width: headR * 2, height: headR * 2, borderRadius: headR,
+        borderWidth: 2, borderColor: color,
+        marginBottom: 3,
+      }} />
+      {/* Shoulders arc as rounded rect */}
+      <View style={{
+        width: bodyW, height: bodyH,
+        borderTopLeftRadius: bodyW / 2, borderTopRightRadius: bodyW / 2,
+        borderWidth: 2, borderColor: color,
+        borderBottomWidth: 0,
+      }} />
     </View>
   );
 }
 
 function TabIcon({ IconComponent, focused }) {
-  const iconSize = 22;
+  const scale = useRef(new Animated.Value(1)).current;
+  const prevFocused = useRef(focused);
+
+  useEffect(() => {
+    if (focused !== prevFocused.current) {
+      prevFocused.current = focused;
+      if (focused) {
+        scale.setValue(0.82);
+        Animated.spring(scale, {
+          toValue: 1,
+          tension: 220,
+          friction: 7,
+          useNativeDriver: true,
+        }).start();
+      }
+    }
+  }, [focused]);
+
   const color = focused ? colors.green : colors.grey;
   return (
-    <View style={[tabStyles.wrap, focused && tabStyles.wrapActive]}>
-      <IconComponent color={color} size={iconSize} />
-    </View>
+    <Animated.View style={[tabStyles.wrap, focused && tabStyles.wrapActive, { transform: [{ scale }] }]}>
+      <IconComponent color={color} size={22} />
+    </Animated.View>
   );
 }
 
@@ -111,9 +191,12 @@ const tabStyles = StyleSheet.create({
   },
 });
 
-export default function App() {
+// ── App ───────────────────────────────────────────────────────────────────────
+
+function MainApp() {
   return (
     <NavigationContainer theme={ChalkNavTheme}>
+      <ChalkyOnboarding />
       <Tab.Navigator
         screenOptions={{
           headerShown: false,
@@ -137,30 +220,43 @@ export default function App() {
       >
         <Tab.Screen
           name="Picks"
-          component={PicksScreen}
-          options={{ tabBarIcon: ({ focused }) => <TabIcon IconComponent={PicksIcon} focused={focused} /> }}
+          component={PicksTab}
+          options={{
+            tabBarIcon: ({ focused }) => <TabIcon IconComponent={PicksIcon} focused={focused} />,
+          }}
+        />
+        <Tab.Screen
+          name="Research"
+          component={ResearchTab}
+          options={{
+            tabBarIcon: ({ focused }) => <TabIcon IconComponent={ResearchIcon} focused={focused} />,
+          }}
         />
         <Tab.Screen
           name="Scores"
-          component={ScoresScreen}
-          options={{ tabBarIcon: ({ focused }) => <TabIcon IconComponent={ScoresIcon} focused={focused} /> }}
+          component={ScoresTab}
+          options={{
+            tabBarIcon: ({ focused }) => <TabIcon IconComponent={ScoresIcon} focused={focused} />,
+          }}
         />
         <Tab.Screen
-          name="Feed"
-          component={FeedScreen}
-          options={{ tabBarIcon: ({ focused }) => <TabIcon IconComponent={FeedIcon} focused={focused} /> }}
-        />
-        <Tab.Screen
-          name="Rooms"
-          component={RoomsScreen}
-          options={{ tabBarIcon: ({ focused }) => <TabIcon IconComponent={RoomsIcon} focused={focused} /> }}
-        />
-        <Tab.Screen
-          name="Profile"
-          component={ProfileScreen}
-          options={{ tabBarIcon: ({ focused }) => <TabIcon IconComponent={ProfileIcon} focused={focused} /> }}
+          name="Players"
+          component={PlayersTab}
+          options={{
+            tabBarIcon: ({ focused }) => <TabIcon IconComponent={PlayersIcon} focused={focused} />,
+          }}
         />
       </Tab.Navigator>
     </NavigationContainer>
+  );
+}
+
+export default function App() {
+  return (
+    <ClerkProvider publishableKey={CLERK_PUBLISHABLE_KEY} tokenCache={tokenCache}>
+      <TeamLogosProvider>
+        <MainApp />
+      </TeamLogosProvider>
+    </ClerkProvider>
   );
 }

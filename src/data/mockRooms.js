@@ -16,7 +16,7 @@ export const mockRooms = [
     messages: [
       { id: 'm1', userId: 'u_jay', username: 'jay_bets', avatar: '🏀', text: 'Celtics up 13 in Q3 lol this is over', timestamp: '2m ago', isOwn: false },
       { id: 'm2', userId: 'u_gswfan', username: 'dubnation', avatar: '🌉', text: 'Curry woke up. Watch this Q4', timestamp: '1m ago', isOwn: false },
-      { id: 'm3', userId: 'u_chalk', username: 'chalkpicks', avatar: '🎯', text: '🎯 Chalk Pick: Celtics -4.5 — currently WINNING', timestamp: '1m ago', isOwn: false, isChalk: true },
+      { id: 'm3', userId: 'u_chalk', username: 'chalkpicks', avatar: '🎯', text: '🎯 Chalky Pick: Celtics -4.5 — currently WINNING', timestamp: '1m ago', isOwn: false, isChalk: true },
       { id: 'm4', userId: 'u_sharp', username: 'sharpangle', avatar: '📊', text: 'BOS 18-4 ATS at home. Called this one yesterday', timestamp: '45s ago', isOwn: false },
       { id: 'm5', userId: 'u_me', username: 'you', avatar: '😎', text: 'Tatum just cooked Wiggins again 🔥', timestamp: '30s ago', isOwn: true },
       { id: 'm6', userId: 'u_fade', username: 'fadeking', avatar: '👻', text: 'I faded this one 😭', timestamp: '20s ago', isOwn: false },
@@ -37,28 +37,9 @@ export const mockRooms = [
     messages: [
       { id: 'm1', userId: 'u_jok', username: 'joker_fan', avatar: '👑', text: 'Jokic with 18/11/7 in the first half lmaooo', timestamp: '3m ago', isOwn: false },
       { id: 'm2', userId: 'u_lal', username: 'lakersnation', avatar: '💜', text: 'Without LeBron we have no chance at all', timestamp: '2m ago', isOwn: false },
-      { id: 'm3', userId: 'u_chalk', username: 'chalkpicks', avatar: '🎯', text: '🎯 Chalk Pick: Nuggets ML — currently WINNING', timestamp: '2m ago', isOwn: false, isChalk: true },
+      { id: 'm3', userId: 'u_chalk', username: 'chalkpicks', avatar: '🎯', text: '🎯 Chalky Pick: Nuggets ML — currently WINNING', timestamp: '2m ago', isOwn: false, isChalk: true },
       { id: 'm4', userId: 'u_val', username: 'betvalue', avatar: '💰', text: 'Got Nuggets -130 on FD. Easy money with Bron out', timestamp: '1m ago', isOwn: false },
       { id: 'm5', userId: 'u_ad', username: 'adszn', avatar: '🏆', text: 'AD with 16 in first half at least. Fighting solo', timestamp: '30s ago', isOwn: false },
-    ],
-  },
-  {
-    id: 'r3',
-    gameId: 'g3',
-    league: 'NFL',
-    title: 'Bills vs Chiefs',
-    status: 'upcoming',
-    clock: 'Sun 4:25 PM ET',
-    awayTeam: { abbr: 'BUF', score: null },
-    homeTeam: { abbr: 'KC', score: null },
-    chalkPick: 'Over 51.5',
-    activeUsers: 3104,
-    messages: [
-      { id: 'm1', userId: 'u_afc', username: 'afcnerd', avatar: '🏈', text: 'Mahomes vs Allen 🍿 Can\'t wait', timestamp: '10m ago', isOwn: false },
-      { id: 'm2', userId: 'u_over', username: 'overkiller', avatar: '📈', text: 'Pounding the over. 7-2 O/U in last 9 matchups. Free money.', timestamp: '8m ago', isOwn: false },
-      { id: 'm3', userId: 'u_chalk', username: 'chalkpicks', avatar: '🎯', text: '🎯 Chalk Pick: Over 51.5 — game kicks off Sunday', timestamp: '6m ago', isOwn: false, isChalk: true },
-      { id: 'm4', userId: 'u_wx', username: 'weatherguy', avatar: '🌤️', text: 'Checked the forecast — 45°F, 8mph winds. Near perfect passing conditions', timestamp: '4m ago', isOwn: false },
-      { id: 'm5', userId: 'u_buf', username: 'billiemike', avatar: '🦬', text: 'Allen is locked in this week. Bills rolling', timestamp: '2m ago', isOwn: false },
     ],
   },
   {
@@ -75,7 +56,7 @@ export const mockRooms = [
     messages: [
       { id: 'm1', userId: 'u_vini', username: 'vinifan', avatar: '⚡', text: 'VINIIII GOAALLLL 🔥🔥🔥 2-1 Madrid!!', timestamp: '3m ago', isOwn: false },
       { id: 'm2', userId: 'u_bar', username: 'blaugrana', avatar: '🔵', text: 'Refs are absolutely terrible this is corruption', timestamp: '2m ago', isOwn: false },
-      { id: 'm3', userId: 'u_chalk', username: 'chalkpicks', avatar: '🎯', text: '🎯 Chalk Pick: Real Madrid ML — currently WINNING', timestamp: '2m ago', isOwn: false, isChalk: true },
+      { id: 'm3', userId: 'u_chalk', username: 'chalkpicks', avatar: '🎯', text: '🎯 Chalky Pick: Real Madrid ML — currently WINNING', timestamp: '2m ago', isOwn: false, isChalk: true },
       { id: 'm4', userId: 'u_belli', username: 'bellibell', avatar: '🏴󠁧󠁢󠁥󠁮󠁧󠁿', text: 'Bellingham class. Madrid hold on please 🙏', timestamp: '1m ago', isOwn: false },
       { id: 'm5', userId: 'u_neutral', username: 'neutralfan', avatar: '⚽', text: 'This is the best game of the year so far', timestamp: '45s ago', isOwn: false },
       { id: 'm6', userId: 'u_madbet', username: 'madridbet', avatar: '💰', text: 'Got ML at +105 before kickoff. Come on boys!!', timestamp: '20s ago', isOwn: false },

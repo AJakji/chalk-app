@@ -5,16 +5,16 @@ import StreakBadge from './StreakBadge';
 import Last10Bar from './Last10Bar';
 import ReactionBar from './ReactionBar';
 import TailFadeButtons from './TailFadeButtons';
+import ChalkyAvatar from '../ChalkyAvatar';
 
 const LEAGUE_COLORS = {
   NBA: '#C9082A',
-  NFL: '#013369',
   MLB: '#002D72',
   NHL: '#000000',
   Soccer: '#00A859',
 };
 
-export default function PickPost({ post, user }) {
+export default function PickPost({ post, user, onReact, onTail, onFade }) {
   const [reactions, setReactions] = useState(post.reactions);
   const [userReaction, setUserReaction] = useState(post.userReaction);
 
@@ -29,6 +29,7 @@ export default function PickPost({ post, user }) {
       return next;
     });
     setUserReaction(isToggleOff ? null : key);
+    onReact?.(post.id, key);
   };
 
   const leagueColor = LEAGUE_COLORS[post.league] || colors.grey;
@@ -39,12 +40,23 @@ export default function PickPost({ post, user }) {
     <View style={styles.card}>
       {/* User row */}
       <View style={styles.userRow}>
-        <View style={styles.avatar}>
-          <Text style={styles.avatarText}>{user.avatar}</Text>
-        </View>
+        {user.isChalky ? (
+          <ChalkyAvatar size={40} showGlow />
+        ) : (
+          <View style={styles.avatar}>
+            <Text style={styles.avatarText}>{user.avatar}</Text>
+          </View>
+        )}
         <View style={styles.userInfo}>
           <View style={styles.nameRow}>
-            <Text style={styles.displayName}>{user.displayName}</Text>
+            <Text style={[styles.displayName, user.isChalky && styles.chalkyName]}>
+              {user.displayName}
+            </Text>
+            {user.isChalky && (
+              <View style={styles.chalkyBadge}>
+                <Text style={styles.chalkyBadgeText}>AI</Text>
+              </View>
+            )}
             <StreakBadge streak={user.streak} type={user.streakType} />
           </View>
           <View style={styles.metaRow}>
@@ -115,6 +127,8 @@ export default function PickPost({ post, user }) {
         fades={post.fades}
         affiliateLinks={post.affiliateLinks}
         result={post.result}
+        onTail={() => onTail?.(post.id)}
+        onFade={() => onFade?.(post.id)}
       />
 
       {/* Reactions */}
@@ -308,6 +322,23 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: colors.offWhite,
     lineHeight: 20,
+  },
+  chalkyName: {
+    color: colors.offWhite,
+  },
+  chalkyBadge: {
+    backgroundColor: colors.green + '22',
+    borderRadius: 99,
+    borderWidth: 1,
+    borderColor: colors.green + '55',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  chalkyBadgeText: {
+    fontSize: 9,
+    fontWeight: '700',
+    color: colors.green,
+    letterSpacing: 1,
   },
   reactionsRow: {
     marginTop: 2,

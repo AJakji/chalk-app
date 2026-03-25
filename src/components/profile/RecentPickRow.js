@@ -4,7 +4,6 @@ import { colors, spacing, radius } from '../../theme';
 
 const LEAGUE_COLORS = {
   NBA: '#C9082A',
-  NFL: '#013369',
   MLB: '#002D72',
   NHL: '#000000',
   Soccer: '#00A859',

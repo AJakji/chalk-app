@@ -1,10 +1,11 @@
-import React from 'react';
-import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
+import React, { useRef, useEffect } from 'react';
+import { View, Text, Pressable, Animated, StyleSheet } from 'react-native';
 import { colors, spacing, radius } from '../../theme';
+import TeamLogo from '../TeamLogo';
+import { useTeamLogos } from '../../context/TeamLogosContext';
 
 const LEAGUE_COLORS = {
   NBA: '#C9082A',
-  NFL: '#013369',
   MLB: '#002D72',
   NHL: '#000000',
   Soccer: '#00A859',
@@ -34,110 +35,152 @@ function ChalkPickBanner({ pick }) {
         isWinning && { color: colors.green },
         isLosing && { color: colors.red },
       ]}>
-        🎯 Chalk: {pick.pick}
+        🎯 Chalky: {pick.pick}
         {isWinning ? ' · Winning' : isLosing ? ' · Losing' : ''}
       </Text>
     </View>
   );
 }
 
+// Flashing score — flashes green background when score changes during a live game
+function FlashScore({ score, isLive, style }) {
+  const flash = useRef(new Animated.Value(0)).current;
+  const prevScore = useRef(score);
+
+  useEffect(() => {
+    if (isLive && score !== prevScore.current) {
+      prevScore.current = score;
+      flash.setValue(1);
+      Animated.timing(flash, {
+        toValue: 0,
+        duration: 900,
+        useNativeDriver: false,
+      }).start();
+    }
+  }, [score, isLive]);
+
+  const bg = flash.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['transparent', colors.green + '40'],
+  });
+
+  return (
+    <Animated.View style={[{ borderRadius: 4, paddingHorizontal: 2 }, { backgroundColor: bg }]}>
+      <Text style={[styles.score, style]}>{score}</Text>
+    </Animated.View>
+  );
+}
+
 export default function ScoreCard({ game, onPress }) {
   const { awayTeam, homeTeam, status, clock, league, chalkPick } = game;
+  const getLogo = useTeamLogos();
   const isLive = status === 'live';
   const isFinal = status === 'final';
   const isUpcoming = status === 'upcoming';
   const leagueColor = LEAGUE_COLORS[league] || colors.grey;
+  const scale = useRef(new Animated.Value(1)).current;
 
   const awayWinning = isLive && awayTeam.score > homeTeam.score;
   const homeWinning = isLive && homeTeam.score > awayTeam.score;
   const awayWon = isFinal && awayTeam.score > homeTeam.score;
   const homeWon = isFinal && homeTeam.score > awayTeam.score;
 
+  const handlePressIn = () => {
+    Animated.spring(scale, { toValue: 0.97, tension: 300, friction: 10, useNativeDriver: true }).start();
+  };
+  const handlePressOut = () => {
+    Animated.spring(scale, { toValue: 1, tension: 300, friction: 10, useNativeDriver: true }).start();
+  };
+
   return (
-    <TouchableOpacity
-      style={[styles.card, isLive && styles.cardLive]}
+    <Pressable
       onPress={() => onPress(game)}
-      activeOpacity={0.85}
+      onPressIn={handlePressIn}
+      onPressOut={handlePressOut}
     >
-      {/* Top: league + status */}
-      <View style={styles.topRow}>
-        <View style={[styles.leagueBadge, { backgroundColor: leagueColor }]}>
-          <Text style={styles.leagueText}>{league}</Text>
-        </View>
-        {isLive ? (
-          <LivePulse />
-        ) : (
-          <Text style={[styles.clockText, isFinal && styles.finalText]}>
-            {clock}
-          </Text>
-        )}
-      </View>
-
-      {/* Score row */}
-      <View style={styles.scoreBlock}>
-        {/* Away team */}
-        <View style={styles.teamRow}>
-          <Text style={[
-            styles.teamName,
-            (awayWon || awayWinning) && styles.teamNameWinning,
-            (isFinal && !awayWon) && styles.teamNameLost,
-          ]}>
-            {awayTeam.abbr}
-          </Text>
-          <Text style={styles.teamFullName} numberOfLines={1}>{awayTeam.name}</Text>
-          {!isUpcoming && (
-            <Text style={[
-              styles.score,
-              (awayWon || awayWinning) && styles.scoreWinning,
-            ]}>
-              {awayTeam.score}
-            </Text>
-          )}
-        </View>
-
-        {/* Divider / AT */}
-        <View style={styles.atRow}>
-          {isUpcoming ? (
-            <Text style={styles.atText}>@</Text>
+      <Animated.View
+        style={[styles.card, isLive && styles.cardLive, { transform: [{ scale }] }]}
+      >
+        {/* Top: league + status */}
+        <View style={styles.topRow}>
+          <View style={[styles.leagueBadge, { backgroundColor: leagueColor }]}>
+            <Text style={styles.leagueText}>{league}</Text>
+          </View>
+          {isLive ? (
+            <LivePulse />
           ) : (
-            <View style={styles.scoreDivider} />
-          )}
-        </View>
-
-        {/* Home team */}
-        <View style={styles.teamRow}>
-          <Text style={[
-            styles.teamName,
-            (homeWon || homeWinning) && styles.teamNameWinning,
-            (isFinal && !homeWon) && styles.teamNameLost,
-          ]}>
-            {homeTeam.abbr}
-          </Text>
-          <Text style={styles.teamFullName} numberOfLines={1}>{homeTeam.name}</Text>
-          {!isUpcoming && (
-            <Text style={[
-              styles.score,
-              (homeWon || homeWinning) && styles.scoreWinning,
-            ]}>
-              {homeTeam.score}
+            <Text style={[styles.clockText, isFinal && styles.finalText]}>
+              {clock}
             </Text>
           )}
         </View>
-      </View>
 
-      {/* Clock for live games */}
-      {isLive && (
-        <Text style={styles.liveClockText}>{clock}</Text>
-      )}
+        {/* Score rows */}
+        <View style={styles.scoreBlock}>
+          {/* Away team */}
+          <View style={styles.teamRow}>
+            <TeamLogo uri={getLogo(awayTeam.abbr, league)} abbr={awayTeam.abbr} size={28} style={styles.logo} />
+            <Text style={[
+              styles.teamName,
+              (awayWon || awayWinning) && styles.teamNameWinning,
+              (isFinal && !awayWon) && styles.teamNameLost,
+            ]}>
+              {awayTeam.abbr}
+            </Text>
+            <Text style={styles.teamFullName} numberOfLines={1}>{awayTeam.name}</Text>
+            {!isUpcoming && (
+              <FlashScore
+                score={awayTeam.score}
+                isLive={isLive}
+                style={(awayWon || awayWinning) && styles.scoreWinning}
+              />
+            )}
+          </View>
 
-      {/* Chalk pick banner */}
-      <ChalkPickBanner pick={chalkPick} />
+          {/* Divider / AT */}
+          <View style={styles.atRow}>
+            {isUpcoming ? (
+              <Text style={styles.atText}>@</Text>
+            ) : (
+              <View style={styles.scoreDivider} />
+            )}
+          </View>
 
-      {/* Tap hint */}
-      {(game.boxScore || isLive) && (
-        <Text style={styles.tapHint}>Box score & stats →</Text>
-      )}
-    </TouchableOpacity>
+          {/* Home team */}
+          <View style={styles.teamRow}>
+            <TeamLogo uri={getLogo(homeTeam.abbr, league)} abbr={homeTeam.abbr} size={28} style={styles.logo} />
+            <Text style={[
+              styles.teamName,
+              (homeWon || homeWinning) && styles.teamNameWinning,
+              (isFinal && !homeWon) && styles.teamNameLost,
+            ]}>
+              {homeTeam.abbr}
+            </Text>
+            <Text style={styles.teamFullName} numberOfLines={1}>{homeTeam.name}</Text>
+            {!isUpcoming && (
+              <FlashScore
+                score={homeTeam.score}
+                isLive={isLive}
+                style={(homeWon || homeWinning) && styles.scoreWinning}
+              />
+            )}
+          </View>
+        </View>
+
+        {/* Clock for live games */}
+        {isLive && (
+          <Text style={styles.liveClockText}>{clock}</Text>
+        )}
+
+        {/* Chalk pick banner */}
+        <ChalkPickBanner pick={chalkPick} />
+
+        {/* Tap hint */}
+        {(game.boxScore || isLive) && (
+          <Text style={styles.tapHint}>Box score & stats →</Text>
+        )}
+      </Animated.View>
+    </Pressable>
   );
 }
 
@@ -208,6 +251,9 @@ const styles = StyleSheet.create({
   teamRow: {
     flexDirection: 'row',
     alignItems: 'center',
+  },
+  logo: {
+    marginRight: 8,
   },
   teamName: {
     fontSize: 16,

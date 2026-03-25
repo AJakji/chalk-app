@@ -132,6 +132,61 @@ if (process.env.MOCK_MODE !== 'true') {
     }
   }, { timezone: 'America/New_York' });
 
+  // ── 12:45 AM — Collect pitcher pitch arsenals for upcoming SPs
+  cron.schedule('45 0 * * *', async () => {
+    console.log('\n⏰ [12:45 AM] MLB Pitcher Arsenal Collector…');
+    try {
+      await runPythonScript('mlbPitcherArsenalCollector.py');
+      console.log('✅ MLB pitcher arsenal collection complete');
+    } catch (err) {
+      console.error('❌ MLB pitcher arsenal collection failed:', err.message);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // ── 1:00 AM — Collect pitcher vs batter career matchup data
+  cron.schedule('0 1 * * *', async () => {
+    console.log('\n⏰ [1:00 AM] MLB Matchup Collector…');
+    try {
+      await runPythonScript('mlbMatchupCollector.py');
+      console.log('✅ MLB matchup collection complete');
+    } catch (err) {
+      console.error('❌ MLB matchup collection failed:', err.message);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // ── 1:15 AM — Collect umpire assignments and compute tendencies
+  cron.schedule('15 1 * * *', async () => {
+    console.log('\n⏰ [1:15 AM] MLB Umpire Collector…');
+    try {
+      await runPythonScript('mlbUmpireCollector.py');
+      console.log('✅ MLB umpire collection complete');
+    } catch (err) {
+      console.error('❌ MLB umpire collection failed:', err.message);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // ── 1:30 AM — Collect bullpen usage (pitches/innings last 3 days)
+  cron.schedule('30 1 * * *', async () => {
+    console.log('\n⏰ [1:30 AM] MLB Bullpen Usage Collector…');
+    try {
+      await runPythonScript('mlbBullpenCollector.py');
+      console.log('✅ MLB bullpen usage collection complete');
+    } catch (err) {
+      console.error('❌ MLB bullpen usage collection failed:', err.message);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // ── 1:45 AM — Collect batter splits (day/night, count, RISP)
+  cron.schedule('45 1 * * *', async () => {
+    console.log('\n⏰ [1:45 AM] MLB Splits Collector…');
+    try {
+      await runPythonScript('mlbSplitsCollector.py');
+      console.log('✅ MLB splits collection complete');
+    } catch (err) {
+      console.error('❌ MLB splits collection failed:', err.message);
+    }
+  }, { timezone: 'America/New_York' });
+
   // ── 8:00 AM — Weather + grading ──────────────────────────────────────────────
   cron.schedule('0 8 * * *', async () => {
     console.log('\n⏰ [8:00 AM] Weather fetch + pick grading…');
@@ -211,6 +266,8 @@ if (process.env.MOCK_MODE !== 'true') {
   // ── 10:30 AM — NHL projection model + MLB edge detection ─────────────────────
   cron.schedule('30 10 * * *', async () => {
     console.log('\n⏰ [10:30 AM] NHL projection model + MLB edge detection…');
+    // Also refresh matchup data with confirmed lineups at 10:30 AM
+    runPythonScript('mlbMatchupCollector.py').catch(e => console.error('MLB matchup refresh failed:', e.message));
     const [nhlResult, mlbEdgesResult] = await Promise.allSettled([
       runPythonScript('nhlProjectionModel.py'),
       detectEdgesForSport('MLB'),

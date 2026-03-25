@@ -399,3 +399,93 @@ CREATE TABLE IF NOT EXISTS player_splits (
     updated_at  TIMESTAMPTZ DEFAULT NOW(),
     PRIMARY KEY (player_id, sport, season)
 );
+
+-- ─────────────────────────────────────────────────────────────
+-- MLB Enhanced Data Tables
+-- ─────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS pitcher_batter_matchups (
+  id              SERIAL PRIMARY KEY,
+  pitcher_id      INTEGER NOT NULL,
+  pitcher_name    TEXT NOT NULL,
+  batter_id       INTEGER NOT NULL,
+  batter_name     TEXT NOT NULL,
+  ab              INTEGER DEFAULT 0,
+  hits            INTEGER DEFAULT 0,
+  hr              INTEGER DEFAULT 0,
+  bb              INTEGER DEFAULT 0,
+  k               INTEGER DEFAULT 0,
+  avg             NUMERIC(5,3) DEFAULT 0,
+  ops             NUMERIC(5,3) DEFAULT 0,
+  season          INTEGER NOT NULL DEFAULT 2025,
+  updated_at      TIMESTAMP DEFAULT NOW(),
+  UNIQUE(pitcher_id, batter_id, season)
+);
+
+CREATE TABLE IF NOT EXISTS pitcher_arsenal (
+  id              SERIAL PRIMARY KEY,
+  pitcher_id      INTEGER NOT NULL,
+  pitcher_name    TEXT NOT NULL,
+  pitch_type      TEXT NOT NULL,  -- FF, SL, CH, CU, SI, etc.
+  pitch_name      TEXT,
+  avg_velocity    NUMERIC(5,1),
+  usage_pct       NUMERIC(5,1),
+  whiff_rate      NUMERIC(5,3),
+  ba_against      NUMERIC(5,3),
+  slg_against     NUMERIC(5,3),
+  avg_spin_rate   INTEGER,
+  season          INTEGER NOT NULL DEFAULT 2025,
+  updated_at      TIMESTAMP DEFAULT NOW(),
+  UNIQUE(pitcher_id, pitch_type, season)
+);
+
+CREATE TABLE IF NOT EXISTS bullpen_usage (
+  id                      SERIAL PRIMARY KEY,
+  team_id                 INTEGER NOT NULL,
+  team_abbr               TEXT NOT NULL,
+  pitcher_id              INTEGER NOT NULL,
+  pitcher_name            TEXT NOT NULL,
+  is_closer               BOOLEAN DEFAULT FALSE,
+  games_last_3            INTEGER DEFAULT 0,
+  pitches_last_3          INTEGER DEFAULT 0,
+  innings_last_3          NUMERIC(4,1) DEFAULT 0,
+  days_since_last_app     INTEGER,
+  collected_date          DATE NOT NULL DEFAULT CURRENT_DATE,
+  UNIQUE(pitcher_id, collected_date)
+);
+
+CREATE TABLE IF NOT EXISTS umpire_tendencies (
+  id                  SERIAL PRIMARY KEY,
+  umpire_id           INTEGER NOT NULL UNIQUE,
+  umpire_name         TEXT NOT NULL,
+  games_sampled       INTEGER DEFAULT 0,
+  avg_k_per_game      NUMERIC(5,2),
+  avg_bb_per_game     NUMERIC(5,2),
+  avg_runs_per_game   NUMERIC(5,2),
+  over_pct            NUMERIC(5,3),
+  zone_rating         TEXT,  -- 'tight', 'normal', 'generous'
+  updated_at          TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS game_umpires (
+  id              SERIAL PRIMARY KEY,
+  game_pk         INTEGER NOT NULL,
+  game_date       DATE NOT NULL,
+  home_team_id    INTEGER,
+  away_team_id    INTEGER,
+  hp_umpire_id    INTEGER REFERENCES umpire_tendencies(umpire_id),
+  hp_umpire_name  TEXT,
+  UNIQUE(game_pk)
+);
+
+-- Extended splits columns for player_splits table
+ALTER TABLE player_splits ADD COLUMN IF NOT EXISTS player_name TEXT;
+ALTER TABLE player_splits ADD COLUMN IF NOT EXISTS day_avg NUMERIC(5,3);
+ALTER TABLE player_splits ADD COLUMN IF NOT EXISTS day_ops NUMERIC(5,3);
+ALTER TABLE player_splits ADD COLUMN IF NOT EXISTS night_avg NUMERIC(5,3);
+ALTER TABLE player_splits ADD COLUMN IF NOT EXISTS night_ops NUMERIC(5,3);
+ALTER TABLE player_splits ADD COLUMN IF NOT EXISTS risp_avg NUMERIC(5,3);
+ALTER TABLE player_splits ADD COLUMN IF NOT EXISTS risp_ops NUMERIC(5,3);
+ALTER TABLE player_splits ADD COLUMN IF NOT EXISTS ahead_count_avg NUMERIC(5,3);
+ALTER TABLE player_splits ADD COLUMN IF NOT EXISTS behind_count_avg NUMERIC(5,3);
+ALTER TABLE player_splits ADD COLUMN IF NOT EXISTS two_strike_avg NUMERIC(5,3);

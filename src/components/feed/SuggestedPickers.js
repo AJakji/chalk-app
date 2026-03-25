@@ -3,6 +3,7 @@ import { View, Text, ScrollView, TouchableOpacity, StyleSheet } from 'react-nati
 import { colors, spacing, radius } from '../../theme';
 import StreakBadge from './StreakBadge';
 import Last10Bar from './Last10Bar';
+import ChalkyAvatar from '../ChalkyAvatar';
 
 export default function SuggestedPickers({ users }) {
   const [followed, setFollowed] = useState({});
@@ -19,19 +20,30 @@ export default function SuggestedPickers({ users }) {
         contentContainerStyle={styles.scroll}
       >
         {users.map((user) => (
-          <View key={user.id} style={styles.card}>
+          <View key={user.id} style={[styles.card, user.isChalky && styles.chalkyCard]}>
             {/* Avatar + streak */}
             <View style={styles.avatarRow}>
-              <View style={styles.avatar}>
-                <Text style={styles.avatarText}>{user.avatar}</Text>
-              </View>
+              {user.isChalky ? (
+                <ChalkyAvatar size={40} showGlow />
+              ) : (
+                <View style={styles.avatar}>
+                  <Text style={styles.avatarText}>{user.avatar}</Text>
+                </View>
+              )}
               <StreakBadge streak={user.streak} type={user.streakType} />
             </View>
 
             {/* Name */}
-            <Text style={styles.displayName} numberOfLines={1}>
-              {user.displayName}
-            </Text>
+            <View style={styles.nameRow}>
+              <Text style={styles.displayName} numberOfLines={1}>
+                {user.displayName}
+              </Text>
+              {user.isChalky && (
+                <View style={styles.chalkyBadge}>
+                  <Text style={styles.chalkyBadgeText}>AI</Text>
+                </View>
+              )}
+            </View>
             <Text style={styles.username}>@{user.username}</Text>
 
             {/* Last 10 */}
@@ -145,5 +157,28 @@ const styles = StyleSheet.create({
   },
   followBtnTextActive: {
     color: colors.grey,
+  },
+  chalkyCard: {
+    borderColor: colors.green + '44',
+    borderWidth: 1,
+  },
+  nameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  chalkyBadge: {
+    backgroundColor: colors.green + '22',
+    borderRadius: 99,
+    borderWidth: 1,
+    borderColor: colors.green + '55',
+    paddingHorizontal: 5,
+    paddingVertical: 2,
+  },
+  chalkyBadgeText: {
+    fontSize: 8,
+    fontWeight: '700',
+    color: colors.green,
+    letterSpacing: 1,
   },
 });

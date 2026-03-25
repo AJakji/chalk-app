@@ -1,9 +1,15 @@
-// API base URL — change this when you deploy to Railway
-// For local dev: run `npm run dev` in the backend folder first
-const DEV_API_URL = 'http://192.168.2.26:3001';
+// API base URL — auto-detects local IP in dev so you never need to update this manually
+import Constants from 'expo-constants';
+
 const PROD_API_URL = 'https://chalk-app-production-7ce5.up.railway.app';
 
-export const API_URL = __DEV__ ? DEV_API_URL : PROD_API_URL;
+function getDevApiUrl() {
+  // Expo injects the Metro bundler host — strip the port and use 3001
+  const host = Constants.expoConfig?.hostUri?.split(':')[0] || '192.168.2.200';
+  return `http://${host}:3001`;
+}
+
+export const API_URL = PROD_API_URL;
 
 export const AFFILIATE_LINKS = {
   draftkings: 'https://draftkings.com',  // replace with your real affiliate URLs

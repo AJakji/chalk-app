@@ -1,9 +1,12 @@
-import React, { useRef } from 'react';
+import React, { useRef, useEffect } from 'react';
 import {
   View,
   Text,
+  Image,
   ScrollView,
   TouchableOpacity,
+  Pressable,
+  Animated,
   StyleSheet,
   Linking,
   Modal,
@@ -11,6 +14,8 @@ import {
   StatusBar,
 } from 'react-native';
 import { colors, spacing, radius, typography } from '../../theme';
+
+const CHALKY_PNG = require('../../../assets/chalky.png');
 
 const SPORTSBOOK_NAMES = {
   draftkings: 'DraftKings',
@@ -26,8 +31,29 @@ const SPORTSBOOK_COLORS = {
   bet365: '#007A3D',
 };
 
-function StatBar({ label, value, pct }) {
+// Stat bar — animates fill from 0 → pct when shouldAnimate triggers
+function StatBar({ label, value, pct, shouldAnimate }) {
+  const barAnim = useRef(new Animated.Value(0)).current;
   const barColor = pct >= 70 ? colors.green : pct >= 45 ? '#FFB800' : colors.red;
+
+  useEffect(() => {
+    if (shouldAnimate) {
+      const t = setTimeout(() => {
+        Animated.timing(barAnim, {
+          toValue: pct,
+          duration: 700,
+          useNativeDriver: false,
+        }).start();
+      }, 200);
+      return () => clearTimeout(t);
+    }
+  }, [shouldAnimate]);
+
+  const barWidth = barAnim.interpolate({
+    inputRange: [0, 100],
+    outputRange: ['0%', '100%'],
+  });
+
   return (
     <View style={styles.statBarRow}>
       <View style={styles.statBarHeader}>
@@ -35,44 +61,74 @@ function StatBar({ label, value, pct }) {
         <Text style={[styles.statBarValue, { color: barColor }]}>{value}</Text>
       </View>
       <View style={styles.statTrack}>
-        <View style={[styles.statFill, { width: `${pct}%`, backgroundColor: barColor }]} />
+        <Animated.View style={[styles.statFill, { width: barWidth, backgroundColor: barColor }]} />
       </View>
     </View>
   );
 }
 
 function AffiliateButton({ bookKey, odds, link, isBest }) {
+  const scale = useRef(new Animated.Value(1)).current;
+
   return (
-    <TouchableOpacity
-      style={[
-        styles.affiliateBtn,
-        { borderColor: isBest ? colors.green : colors.border },
-        isBest && styles.affiliateBtnBest,
-      ]}
+    <Pressable
       onPress={() => Linking.openURL(link)}
-      activeOpacity={0.8}
+      onPressIn={() => Animated.spring(scale, { toValue: 0.97, tension: 300, friction: 10, useNativeDriver: true }).start()}
+      onPressOut={() => Animated.spring(scale, { toValue: 1, tension: 300, friction: 10, useNativeDriver: true }).start()}
     >
-      <View style={styles.affiliateBtnInner}>
-        <View>
-          <Text style={[styles.affiliateName, { color: isBest ? colors.green : colors.offWhite }]}>
-            {SPORTSBOOK_NAMES[bookKey]}
-          </Text>
-          {isBest && (
-            <Text style={styles.bestOddsTag}>Best odds</Text>
-          )}
+      <Animated.View
+        style={[
+          styles.affiliateBtn,
+          { borderColor: isBest ? colors.green : colors.border },
+          isBest && styles.affiliateBtnBest,
+          { transform: [{ scale }] },
+        ]}
+      >
+        <View style={styles.affiliateBtnInner}>
+          <View>
+            <Text style={[styles.affiliateName, { color: isBest ? colors.green : colors.offWhite }]}>
+              {SPORTSBOOK_NAMES[bookKey]}
+            </Text>
+            {isBest && (
+              <Text style={styles.bestOddsTag}>Best odds</Text>
+            )}
+          </View>
+          <View style={styles.affiliateRight}>
+            <Text style={[styles.affiliateOdds, { color: isBest ? colors.green : colors.offWhite }]}>
+              {odds}
+            </Text>
+            <Text style={styles.affiliateBet}>Bet Now →</Text>
+          </View>
         </View>
-        <View style={styles.affiliateRight}>
-          <Text style={[styles.affiliateOdds, { color: isBest ? colors.green : colors.offWhite }]}>
-            {odds}
-          </Text>
-          <Text style={styles.affiliateBet}>Bet Now →</Text>
-        </View>
-      </View>
-    </TouchableOpacity>
+      </Animated.View>
+    </Pressable>
   );
 }
 
 export default function PickDetailModal({ pick, visible, onClose }) {
+  const contentOpacity = useRef(new Animated.Value(0)).current;
+  const contentTranslateY = useRef(new Animated.Value(24)).current;
+
+  useEffect(() => {
+    if (visible) {
+      contentOpacity.setValue(0);
+      contentTranslateY.setValue(24);
+      // Slight delay lets the native modal open animation start first
+      const t = setTimeout(() => {
+        Animated.parallel([
+          Animated.timing(contentOpacity, { toValue: 1, duration: 280, useNativeDriver: true }),
+          Animated.spring(contentTranslateY, {
+            toValue: 0,
+            tension: 65,
+            friction: 9,
+            useNativeDriver: true,
+          }),
+        ]).start();
+      }, 80);
+      return () => clearTimeout(t);
+    }
+  }, [visible]);
+
   if (!pick) return null;
 
   const { analysis, odds, bestOdds, affiliateLinks } = pick;
@@ -99,71 +155,83 @@ export default function PickDetailModal({ pick, visible, onClose }) {
           </TouchableOpacity>
         </View>
 
-        <ScrollView style={styles.scroll} showsVerticalScrollIndicator={false}>
-          {/* Pick hero */}
-          <View style={styles.pickHero}>
-            <Text style={styles.pickHeroValue}>{pick.pick}</Text>
-            <View style={styles.confidencePill}>
-              <Text style={styles.confidencePillText}>{pick.confidence}% confidence</Text>
+        {/* Animated content */}
+        <Animated.View
+          style={{
+            flex: 1,
+            opacity: contentOpacity,
+            transform: [{ translateY: contentTranslateY }],
+          }}
+        >
+          <ScrollView style={styles.scroll} showsVerticalScrollIndicator={false}>
+            {/* Pick hero */}
+            <View style={styles.pickHero}>
+              <Text style={styles.pickHeroValue}>{pick.pick}</Text>
+              <View style={styles.confidencePill}>
+                <Text style={styles.confidencePillText}>Chalky: {pick.confidence}% confident</Text>
+              </View>
             </View>
-          </View>
 
-          {/* AI Summary */}
-          <View style={styles.section}>
-            <Text style={styles.sectionLabel}>AI Analysis</Text>
-            <Text style={styles.summaryText}>{analysis.summary}</Text>
-          </View>
-
-          {/* Analysis sections */}
-          {analysis.sections.map((s, i) => (
-            <View key={i} style={styles.analysisCard}>
-              <Text style={styles.analysisSectionTitle}>
-                {s.icon}  {s.title}
-              </Text>
-              <Text style={styles.analysisSectionContent}>{s.content}</Text>
+            {/* Chalky's take */}
+            <View style={styles.section}>
+              <View style={styles.chalkyTakeHeader}>
+                <Image source={CHALKY_PNG} style={styles.chalkyTakeIcon} resizeMode="contain" />
+                <Text style={styles.sectionLabel}>Chalky's Take</Text>
+              </View>
+              <Text style={styles.summaryText}>{analysis.summary}</Text>
             </View>
-          ))}
 
-          {/* Key Stats */}
-          <View style={styles.section}>
-            <Text style={styles.sectionLabel}>Key Stats</Text>
-            {analysis.keyStats.map((s, i) => (
-              <StatBar key={i} label={s.label} value={s.value} pct={s.pct} />
-            ))}
-          </View>
-
-          {/* Trends */}
-          <View style={styles.section}>
-            <Text style={styles.sectionLabel}>Trends</Text>
-            {analysis.trends.map((t, i) => (
-              <View key={i} style={styles.trendRow}>
-                <View style={styles.trendDot} />
-                <Text style={styles.trendText}>{t}</Text>
+            {/* Analysis sections */}
+            {analysis.sections.map((s, i) => (
+              <View key={i} style={styles.analysisCard}>
+                <Text style={styles.analysisSectionTitle}>
+                  {s.icon}  {s.title}
+                </Text>
+                <Text style={styles.analysisSectionContent}>{s.content}</Text>
               </View>
             ))}
-          </View>
 
-          {/* Odds Comparison + Bet Buttons */}
-          <View style={styles.section}>
-            <Text style={styles.sectionLabel}>Compare Odds & Bet</Text>
-            {Object.entries(odds).map(([book, odd]) => (
-              <AffiliateButton
-                key={book}
-                bookKey={book}
-                odds={odd}
-                link={affiliateLinks[book]}
-                isBest={bestOdds === book}
-              />
-            ))}
-          </View>
+            {/* Key Stats — bars animate in */}
+            <View style={styles.section}>
+              <Text style={styles.sectionLabel}>Key Stats</Text>
+              {analysis.keyStats.map((s, i) => (
+                <StatBar key={i} label={s.label} value={s.value} pct={s.pct} shouldAnimate={visible} />
+              ))}
+            </View>
 
-          {/* Disclaimer */}
-          <Text style={styles.disclaimer}>
-            Chalk is for entertainment only. Bet responsibly. 18+.
-          </Text>
+            {/* Trends */}
+            <View style={styles.section}>
+              <Text style={styles.sectionLabel}>Trends</Text>
+              {analysis.trends.map((t, i) => (
+                <View key={i} style={styles.trendRow}>
+                  <View style={styles.trendDot} />
+                  <Text style={styles.trendText}>{t}</Text>
+                </View>
+              ))}
+            </View>
 
-          <View style={{ height: 40 }} />
-        </ScrollView>
+            {/* Odds Comparison + Bet Buttons */}
+            <View style={styles.section}>
+              <Text style={styles.sectionLabel}>Compare Odds & Bet</Text>
+              {Object.entries(odds).map(([book, odd]) => (
+                <AffiliateButton
+                  key={book}
+                  bookKey={book}
+                  odds={odd}
+                  link={affiliateLinks[book]}
+                  isBest={bestOdds === book}
+                />
+              ))}
+            </View>
+
+            {/* Disclaimer */}
+            <Text style={styles.disclaimer}>
+              Chalky is for entertainment only. Bet responsibly. 18+.
+            </Text>
+
+            <View style={{ height: 40 }} />
+          </ScrollView>
+        </Animated.View>
       </SafeAreaView>
     </Modal>
   );
@@ -242,13 +310,24 @@ const styles = StyleSheet.create({
   section: {
     marginBottom: spacing.lg,
   },
+  chalkyTakeHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    marginBottom: spacing.sm,
+  },
+  chalkyTakeIcon: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+  },
   sectionLabel: {
     fontSize: 11,
     fontWeight: '700',
     color: colors.grey,
     textTransform: 'uppercase',
     letterSpacing: 1,
-    marginBottom: spacing.sm,
+    marginBottom: 0,
   },
   summaryText: {
     fontSize: 15,

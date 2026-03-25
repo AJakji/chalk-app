@@ -897,6 +897,55 @@ vs RHP: AVG ${vsR?.avg || 'N/A'} | OBP ${vsR?.obp || 'N/A'} | SLG ${vsR?.slg || 
   const opposingSP = isHomeTeam ? awaySPStats : homeSPStats;
   const teamSP     = isHomeTeam ? homeSPStats : awaySPStats;
 
+  // Pitch arsenal from DB (for pitchers)
+  let arsenalBlock = '';
+  if (isPitch) {
+    const arsenalRows = await db.query(`
+      SELECT pitch_type, pitch_name, avg_velocity, usage_pct, whiff_rate, ba_against
+      FROM pitcher_arsenal
+      WHERE pitcher_id = $1
+      AND season = (SELECT MAX(season) FROM pitcher_arsenal WHERE pitcher_id = $1)
+      ORDER BY usage_pct DESC NULLS LAST
+    `, [playerId]).catch(() => ({ rows: [] }));
+
+    if (arsenalRows.rows.length > 0) {
+      const lines = arsenalRows.rows.map(r => {
+        const vel   = r.avg_velocity ? `${parseFloat(r.avg_velocity).toFixed(1)}mph` : '?mph';
+        const usage = r.usage_pct    ? `${parseFloat(r.usage_pct).toFixed(1)}%`      : '?%';
+        const whiff = r.whiff_rate   ? `${(parseFloat(r.whiff_rate) * 100).toFixed(1)}% whiff` : '';
+        const ba    = r.ba_against   ? `.${String(Math.round(parseFloat(r.ba_against) * 1000)).padStart(3, '0')} BA against` : '';
+        return `  ${r.pitch_name || r.pitch_type}: ${vel} | ${usage} usage${whiff ? ' | ' + whiff : ''}${ba ? ' | ' + ba : ''}`;
+      });
+      arsenalBlock = `PITCH ARSENAL:\n${lines.join('\n')}`;
+    }
+  }
+
+  // Career vs tonight's SP (for batters only)
+  let careerVsSpBlock = '';
+  if (tonightGame && !isPitch) {
+    const spPitcher = isHomeTeam
+      ? tonightGame.teams?.away?.probablePitcher
+      : tonightGame.teams?.home?.probablePitcher;
+
+    if (spPitcher?.id) {
+      const careerRow = await db.query(`
+        SELECT ab, hits, hr, bb, k, avg, ops
+        FROM pitcher_batter_matchups
+        WHERE pitcher_id = $1 AND batter_id = $2
+        LIMIT 1
+      `, [spPitcher.id, playerId]).catch(() => ({ rows: [] }));
+
+      if (careerRow.rows[0]?.ab > 0) {
+        const m = careerRow.rows[0];
+        const avgStr = `.${String(Math.round(parseFloat(m.avg || 0) * 1000)).padStart(3, '0')}`;
+        const sampleNote = m.ab < 10 ? ' (small sample)' : m.ab >= 20 ? ' (strong sample)' : '';
+        careerVsSpBlock = `CAREER vs ${spPitcher.fullName}: ${m.hits}-${m.ab} (${avgStr}), ${m.hr} HR, ${m.bb} BB, ${m.k} K, OPS ${parseFloat(m.ops || 0).toFixed(3)}${sampleNote}`;
+      } else if (spPitcher.fullName) {
+        careerVsSpBlock = `CAREER vs ${spPitcher.fullName}: No career matchup data (first meeting or insufficient AB)`;
+      }
+    }
+  }
+
   let spBlock = '';
   if (tonightGame) {
     const homeAbbr = tonightGame.teams?.home?.team?.abbreviation || 'HOME';
@@ -938,6 +987,8 @@ IP: ${stats.inningsPitched || 'N/A'} | HR/9: ${stats.homeRunsPer9 || 'N/A'}
 RECENT STARTS:
 ${recentLog || 'No recent starts on record.'}
 
+${arsenalBlock}
+
 ${tonightBlock}
 
 ${propLines ? `PROP LINES TONIGHT:\n${propLines}` : ''}`.trim();
@@ -976,6 +1027,8 @@ ${recentLog || 'No recent games on record yet.'}
 ${dbBlock}
 
 ${platoonBlock}
+
+${careerVsSpBlock}
 
 ${tonightBlock}
 

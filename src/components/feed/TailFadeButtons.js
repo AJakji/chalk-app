@@ -2,14 +2,16 @@ import React from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Linking } from 'react-native';
 import { colors, radius, spacing } from '../../theme';
 
-export default function TailFadeButtons({ tails, fades, affiliateLinks, result }) {
+export default function TailFadeButtons({ tails, fades, affiliateLinks, result, onTail, onFade }) {
   // After a result, tapping opens the sportsbook anyway (for future bets)
   const handleTail = () => {
+    onTail?.();
     const url = affiliateLinks?.fanduel || affiliateLinks?.draftkings || 'https://fanduel.com';
     Linking.openURL(url);
   };
 
   const handleFade = () => {
+    onFade?.();
     const url = affiliateLinks?.draftkings || affiliateLinks?.fanduel || 'https://draftkings.com';
     Linking.openURL(url);
   };
