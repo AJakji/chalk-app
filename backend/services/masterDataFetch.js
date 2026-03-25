@@ -154,14 +154,24 @@ async function fetchLivePropLines(sport, playerDisplayName, oddsEventId) {
 
 // ── NBA ───────────────────────────────────────────────────────────────────────
 
-async function getNBAPlayerComplete(playerName) {
-  // 1. BDL player lookup
+async function getNBAPlayerComplete(playerName, displayNameHint) {
+  // 1. BDL player lookup — prefer active players, match first name to disambiguate (e.g. Cade vs Dante Cunningham)
   const bdlTerm = playerName.split(' ').pop().toLowerCase();
   let found = await bdl.searchPlayers(bdlTerm).catch(() => []);
   if (!found?.[0]) found = await bdl.searchPlayers(playerName.toLowerCase()).catch(() => []);
   if (!found?.[0]) return null;
 
-  const player = found[0];
+  // Prefer players with an active team
+  const active = (found || []).filter(p => p.team !== null);
+  const pool   = active.length > 0 ? active : found;
+
+  // If a display name hint is provided, prefer the player whose first name matches
+  let player = null;
+  if (displayNameHint) {
+    const firstHint = displayNameHint.split(' ')[0].toLowerCase();
+    player = pool.find(p => (p.first_name || '').toLowerCase().startsWith(firstHint));
+  }
+  if (!player) player = pool[0];
   const pName  = `${player.first_name} ${player.last_name}`;
   const abbr   = player.team?.abbreviation || '';
   const season = getCurrentNBASeason();
@@ -717,6 +727,66 @@ ${propLines ? `TONIGHT'S PROP LINES:\n${propLines}` : ''}
 ${projBlock}`.trim();
 }
 
+// ── MLB helpers ───────────────────────────────────────────────────────────────
+
+async function getSPStats(pitcher) {
+  // pitcher = probablePitcher object from schedule: { id, fullName }
+  if (!pitcher?.id) return null;
+  const season = new Date().getFullYear();
+  const statSeason = season > 2025 ? 2025 : season;
+
+  const [personRes, statsRes] = await Promise.all([
+    fetch(`https://statsapi.mlb.com/api/v1/people/${pitcher.id}`, { signal: AbortSignal.timeout(6000) })
+      .then(r => r.ok ? r.json() : null).catch(() => null),
+    fetch(`https://statsapi.mlb.com/api/v1/people/${pitcher.id}/stats?stats=season&season=${statSeason}&group=pitching`, { signal: AbortSignal.timeout(6000) })
+      .then(r => r.ok ? r.json() : null).catch(() => null),
+  ]);
+
+  const hand  = personRes?.people?.[0]?.pitchHand?.code || '?';
+  const stats = statsRes?.stats?.[0]?.splits?.[0]?.stat || {};
+
+  // Last 5 starts from DB
+  const dbStarts = await db.query(`
+    SELECT game_date, opponent,
+           minutes       AS ip,
+           blocks        AS er,
+           ft_att        AS k,
+           ft_made       AS bb,
+           points        AS h
+    FROM player_game_logs
+    WHERE sport = 'MLB' AND player_name ILIKE $1
+    ORDER BY game_date DESC
+    LIMIT 5
+  `, [`%${lastName(pitcher.fullName || '')}%`]).catch(() => ({ rows: [] }));
+
+  const recentLines = dbStarts.rows.map(g =>
+    `${fmtDate(g.game_date)} vs ${g.opponent || '?'}: ${parseFloat(g.ip||0).toFixed(1)}IP ${g.er||0}ER ${g.k||0}K`
+  );
+
+  return {
+    name:   pitcher.fullName,
+    hand,
+    era:    stats.era    || 'N/A',
+    whip:   stats.whip   || 'N/A',
+    k9:     stats.strikeoutsPer9Inn || 'N/A',
+    bb9:    stats.walksPer9Inn      || 'N/A',
+    wins:   stats.wins   || 0,
+    losses: stats.losses || 0,
+    ip:     stats.inningsPitched || 'N/A',
+    recent: recentLines,
+  };
+}
+
+function formatSPBlock(sp, label) {
+  if (!sp) return `${label}: TBD`;
+  const record = `${sp.wins}-${sp.losses}`;
+  const recent = sp.recent.length
+    ? sp.recent.join(' | ')
+    : 'No recent starts in DB';
+  return `${label}: ${sp.name} (${sp.hand}HP) — ${record} | ERA ${sp.era} | WHIP ${sp.whip} | K/9 ${sp.k9} | BB/9 ${sp.bb9}
+  Last 5: ${recent}`;
+}
+
 // ── MLB ───────────────────────────────────────────────────────────────────────
 
 async function getMLBPlayerComplete(playerName) {
@@ -815,26 +885,32 @@ vs RHP: AVG ${vsR?.avg || 'N/A'} | OBP ${vsR?.obp || 'N/A'} | SLG ${vsR?.slg || 
   }
   const propLines = await fetchLivePropLines('MLB', pName, oddsEventId);
 
-  // 5. Tonight's opposing starter (for platoon context)
-  let spHandedness = '';
-  if (tonightGame && !isPitch) {
-    const oppSP = tonightGame.teams?.home?.team?.abbreviation === teamAbbr
-      ? tonightGame.teams?.away?.probablePitcher
-      : tonightGame.teams?.home?.probablePitcher;
-    if (oppSP) {
-      // Try to get pitcher handedness
-      const pitcherData = await fetch(`https://statsapi.mlb.com/api/v1/people/${oppSP.id}`, { signal: AbortSignal.timeout(5000) })
-        .then(r => r.ok ? r.json() : null)
-        .catch(() => null);
-      const hand = pitcherData?.people?.[0]?.pitchHand?.code;
-      if (hand) {
-        spHandedness = `Opposing SP: ${oppSP.fullName} (throws ${hand === 'L' ? 'LEFT' : 'RIGHT'})`;
-        if (platoonBlock) {
-          spHandedness += ` — see ${hand === 'L' ? 'vs LHP' : 'vs RHP'} split above for matchup context`;
-        }
-      } else {
-        spHandedness = `Opposing SP: ${oppSP.fullName}`;
-      }
+  // 5. Tonight's starting pitchers (both sides — fetched in parallel)
+  const isHomeTeam = tonightGame?.teams?.home?.team?.abbreviation === teamAbbr;
+  const rawHomeSP  = tonightGame?.teams?.home?.probablePitcher || null;
+  const rawAwaySP  = tonightGame?.teams?.away?.probablePitcher || null;
+
+  const [homeSPStats, awaySPStats] = tonightGame
+    ? await Promise.all([getSPStats(rawHomeSP), getSPStats(rawAwaySP)])
+    : [null, null];
+
+  const opposingSP = isHomeTeam ? awaySPStats : homeSPStats;
+  const teamSP     = isHomeTeam ? homeSPStats : awaySPStats;
+
+  let spBlock = '';
+  if (tonightGame) {
+    const homeAbbr = tonightGame.teams?.home?.team?.abbreviation || 'HOME';
+    const awayAbbr = tonightGame.teams?.away?.team?.abbreviation || 'AWAY';
+    spBlock = `STARTING PITCHERS TONIGHT:
+${formatSPBlock(homeSPStats, homeAbbr)}
+${formatSPBlock(awaySPStats, awayAbbr)}`;
+
+    // Platoon matchup note for batters
+    if (!isPitch && opposingSP && opposingSP.hand !== '?') {
+      const matchupSide = bats === opposingSP.hand ? '⚠ SAME-SIDE MATCHUP' : '✓ OPPOSITE-SIDE MATCHUP';
+      const splitRef    = bats === 'L' ? 'vs LHP' : 'vs RHP';
+      spBlock += `\n\nMATCHUP: ${pName} (Bats ${bats}) vs ${opposingSP.name} (${opposingSP.hand}HP) — ${matchupSide}`;
+      if (platoonBlock) spBlock += ` — see ${splitRef} split above`;
     }
   }
 
@@ -845,10 +921,12 @@ vs RHP: AVG ${vsR?.avg || 'N/A'} | OBP ${vsR?.obp || 'N/A'} | SLG ${vsR?.slg || 
       return `  ${(g.date || '').slice(0, 10)} vs ${g.opponent?.name || '?'}: ${s.inningsPitched || '?'}IP ${s.earnedRuns ?? '?'}ER ${s.strikeOuts || 0}K ${s.baseOnBalls || 0}BB`;
     }).join('\n');
 
+    const gameTimeET = tonightGame
+      ? new Date(tonightGame.gameDate).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' }) + ' ET'
+      : '';
+
     const tonightBlock = tonightGame
-      ? `TONIGHT: ${tonightGame.teams?.away?.team?.name} @ ${tonightGame.teams?.home?.team?.name}
-${new Date(tonightGame.gameDate).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' })} ET
-${weatherBlock}`
+      ? [`TONIGHT: ${tonightGame.teams?.away?.team?.name} @ ${tonightGame.teams?.home?.team?.name} — ${gameTimeET}`, weatherBlock, spBlock].filter(Boolean).join('\n')
       : 'NOT SCHEDULED TONIGHT';
 
     return `MLB PITCHER DATA: ${pName} (${teamAbbr}, ${pos}) — Throws: ${throws}
@@ -879,10 +957,13 @@ L5 avg: ${avg(dbL5, 'hits')}H / ${avg(dbL5, 'hr')}HR / ${avg(dbL5, 'rbi')}RBI pe
 L10 avg: ${avg(dbL10, 'hits')}H / ${avg(dbL10, 'hr')}HR / ${avg(dbL10, 'rbi')}RBI per game
 Last 5: ${dbL5.map(g => `${fmtDate(g.game_date)}: ${g.hits}H ${g.hr}HR`).join(', ')}` : '';
 
-  const tonightBlock = tonightGame ? `TONIGHT: ${tonightGame.teams?.away?.team?.name} @ ${tonightGame.teams?.home?.team?.name}
-${new Date(tonightGame.gameDate).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' })} ET
-${spHandedness}
-${weatherBlock}` : 'NOT SCHEDULED TONIGHT';
+  const gameTimeET = tonightGame
+    ? new Date(tonightGame.gameDate).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' }) + ' ET'
+    : '';
+
+  const tonightBlock = tonightGame
+    ? [`TONIGHT: ${tonightGame.teams?.away?.team?.name} @ ${tonightGame.teams?.home?.team?.name} — ${gameTimeET}`, weatherBlock, spBlock].filter(Boolean).join('\n')
+    : 'NOT SCHEDULED TONIGHT';
 
   return `MLB BATTER DATA: ${pName} (${teamAbbr}, ${pos}) — Bats: ${bats}
 ${season} Season Stats:

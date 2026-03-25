@@ -71,14 +71,14 @@ async function mlbFetch(path, params = {}) {
  * Cache: 5min
  */
 async function getSchedule(date) {
-  const key = `schedule:${date}`;
+  const key = `schedule_sp:${date}`;
   const cached = cacheGet(key);
   if (cached) return cached;
 
   const json = await mlbFetch('/schedule', {
     sportId: 1,
     date,
-    hydrate: 'team,linescore',
+    hydrate: 'team,linescore,probablePitcher,person',
   });
 
   const games = (json?.dates || []).flatMap(d => d.games || []);
