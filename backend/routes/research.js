@@ -222,9 +222,116 @@ RESPONSE FORMAT — return valid JSON only, nothing else:
   "response": "Your analytical answer as a string.",
   "hasPick": false,
   "components": [],
-  "visualData": null,
+  "visualData": <see VISUAL DATA RULES below>,
   "followUpSuggestions": ["Short follow-up", "Another one"]
 }
+
+═══════════════════════════════════════
+VISUAL DATA RULES — READ CAREFULLY
+═══════════════════════════════════════
+
+You MUST populate visualData every time you call a player stats tool or matchup tool.
+Do NOT set it to null when you have player or game data. The app renders a visual card below your text.
+
+────────────────────────────────────────
+WHEN get_nba_player_stats / get_nhl_player_stats / get_mlb_player_stats was called:
+────────────────────────────────────────
+
+CASE A — question mentions "prop", "over", "under", "line", "bet", "hit", "last 10":
+Use type "last10_grid". Extract each game from the LAST 10 GAMES section of the tool result.
+Each line looks like: "2025-03-22 away DAL: 29pts 7reb 14ast FG 54% 35min +12"
+Extract: date (MM/DD), opp (last word before colon), value (the stat they asked about).
+Set overLine: true if value > propLine, false if value <= propLine.
+If no propLine available use the L10 average as the reference.
+
+{"type":"last10_grid","data":{
+  "playerName":"Nikola Jokic","statLabel":"Points","propLine":26.5,
+  "games":[
+    {"date":"03/24","opp":"PHX","value":23,"overLine":false},
+    {"date":"03/22","opp":"DAL","value":34,"overLine":true}
+  ],
+  "average":29.4,"overCount":7,"underCount":3
+}}
+
+CASE B — question mentions "trend", "streak", "run", "hot", "cold", "last X games", "lately":
+Use type "trend_chart". Same game log extraction, but put oldest game first (reverse the list).
+
+{"type":"trend_chart","data":{
+  "playerName":"Nikola Jokic","statLabel":"Points","propLine":null,
+  "dataPoints":[
+    {"game":1,"value":24,"date":"03/05","opp":"LAL"},
+    {"game":2,"value":31,"date":"03/07","opp":"GSW"}
+  ],
+  "seasonAvg":25.2,"l10Avg":29.4,"l5Avg":31.2
+}}
+
+CASE C — general player stats question (default):
+Use type "stat_card".
+For NBA: stats = PPG, RPG, APG, FG% all from L10.
+For NHL skater: stats = G/g, A/g, PTS/g, SOG/g all from L10.
+For NHL goalie: stats = SV%, GAA, Saves/g, Record all from L10.
+For MLB hitter: stats = AVG, HR, RBI, OPS from season.
+For MLB pitcher: stats = ERA, K, WHIP, W-L from season.
+trend = "up" if L5 > L20 avg, "down" if L5 < L20 avg, else "neutral".
+
+{"type":"stat_card","data":{
+  "playerName":"Nikola Jokic","team":"DEN","sport":"NBA",
+  "stats":[
+    {"label":"PPG","value":"29.4","context":"L10"},
+    {"label":"RPG","value":"13.1","context":"L10"},
+    {"label":"APG","value":"9.2","context":"L10"},
+    {"label":"FG%","value":"58.3%","context":"L10"}
+  ],
+  "trend":"up","trendLabel":"4.2 above L20 avg"
+}}
+
+────────────────────────────────────────
+WHEN get_matchup_stats was called:
+────────────────────────────────────────
+
+If question is about game context / what to expect / is this a good game:
+Use type "game_card". Extract spread, total, moneyline from the tool result.
+keyStats = 3 bullet facts pulled from pace context and situation splits in the data.
+
+{"type":"game_card","data":{
+  "sport":"NBA","awayTeam":"DAL Mavericks","homeTeam":"DEN Nuggets",
+  "gameTime":"10:00 PM ET","spread":"DEN -11.5","total":"O/U 244.5",
+  "moneyline":"DEN -650 / DAL +470",
+  "keyStats":["DEN 120.7 PPG last 30 days","DAL allows 123.0 PPG","DEN 3-0 in last 3 vs DAL"]
+}}
+
+If question compares teams or asks which team is better:
+Use type "comparison_bar". Each stat needs awayTeam, homeTeam, awayValue (number), homeValue (number).
+
+{"type":"comparison_bar","data":{
+  "label":"DAL @ DEN — Tonight",
+  "stats":[
+    {"label":"Pts/Game","awayTeam":"DAL","homeTeam":"DEN","awayValue":111.2,"homeValue":120.7,"higherIsBetter":true},
+    {"label":"Pts Allowed","awayTeam":"DAL","homeTeam":"DEN","awayValue":123.0,"homeValue":116.9,"higherIsBetter":false}
+  ]
+}}
+
+────────────────────────────────────────
+WHEN get_prop_lines was called (and no player stats tool was called):
+────────────────────────────────────────
+
+Use type "odds_table". Parse the DraftKings / FanDuel odds lines from the tool result.
+best = the book with the better odds for each side (higher number = better).
+
+{"type":"odds_table","data":{
+  "title":"Jokic Points O/U 26.5",
+  "rows":[
+    {"label":"Over 26.5","dk":"-115","fd":"-112","best":"FanDuel"},
+    {"label":"Under 26.5","dk":"-105","fd":"-108","best":"DraftKings"}
+  ]
+}}
+
+────────────────────────────────────────
+WHEN no relevant visual applies:
+────────────────────────────────────────
+Set visualData to null.
+
+═══════════════════════════════════════
 
 hasPick must ALWAYS be false. followUpSuggestions: 1-2 short questions (under 6 words each). Return ONLY valid JSON. No markdown. No code blocks. No text outside the JSON object.`;
 
@@ -236,7 +343,7 @@ async function runWithTools(messages) {
   for (let i = 0; i < MAX_ITERATIONS; i++) {
     const response = await client.messages.create({
       model:      'claude-sonnet-4-6',
-      max_tokens: 2000,
+      max_tokens: 3500,
       system:     SYSTEM_PROMPT,
       tools:      TOOLS,
       messages,
