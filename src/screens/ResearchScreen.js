@@ -34,8 +34,8 @@ const RL_DATE_KEY = 'chalk_rl_date';
 // Static fallback questions used before API suggestions load
 const FALLBACK_SUGGESTIONS = [
   'How has Nikola Jokic been playing this month?',
-  "Break down tonight's best NBA matchup",
-  'Who are the best value plays on tonight\'s NHL board?',
+  "What are Jokic's prop lines tonight?",
+  'Who is starting in goal for the Oilers tonight?',
   'What does line movement tell you before a game?',
 ];
 
@@ -364,7 +364,7 @@ export default function ResearchScreen() {
             <Image source={CHALKY_PNG} style={styles.emptyAvatar} resizeMode="contain" />
             <Text style={styles.emptyTitle}>Research</Text>
             <Text style={styles.emptySubtitle}>
-              Ask Chalky anything about players, teams, stats, matchups, or betting markets. This is your personal research tool — Chalky gives you the data, you make the call.
+              Research is your personal sports analyst — stats, trends, matchups, and betting lines. For today's picks powered by Chalky's Proprietary Model, head to the Picks tab.
             </Text>
             <View style={styles.suggestionsWrap}>
               {suggestions.map((q, i) => (

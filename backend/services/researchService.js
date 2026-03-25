@@ -1064,16 +1064,21 @@ async function buildDataContext(question, conversationHistory = []) {
  * Generate 4 dynamic suggestion pills based on tonight's actual slate.
  * Uses free APIs only: BallDontLie (NBA), NHL API, MLB Stats API.
  */
+// Words that indicate a pick recommendation — filter these out of suggestions
+const PICK_WORDS = [
+  'best play', 'best bet', 'good bet', 'should i bet', 'worth betting',
+  'best pick', 'chalky likes', 'good value', 'worth a look',
+  'play tonight', 'plays tonight', 'bet tonight', 'best value',
+];
+
+function isPickQuestion(s) {
+  const lower = s.toLowerCase();
+  return PICK_WORDS.some(w => lower.includes(w));
+}
+
 async function generateSuggestions() {
   const today    = new Date().toISOString().split('T')[0];
   const mlbDate  = toMLBDate(today);
-
-  const fallback = [
-    'How has Nikola Jokic been playing this month?',
-    "Break down tonight's best NBA matchup",
-    "Who are the best value plays on tonight's NHL board?",
-    'What does line movement tell you before a game?',
-  ];
 
   const suggestions = [];
 
@@ -1084,7 +1089,7 @@ async function generateSuggestions() {
     mlbStats.getSchedule(mlbDate).catch(() => []),
   ]);
 
-  // NBA suggestion
+  // NBA suggestion — matchup breakdown
   const nbaGames = nbaResult.status === 'fulfilled' ? (nbaResult.value || []) : [];
   if (nbaGames.length > 0) {
     const g = nbaGames[0];
@@ -1093,7 +1098,8 @@ async function generateSuggestions() {
     if (home && visitor) {
       const homeShort    = home.split(' ').pop();
       const visitorShort = visitor.split(' ').pop();
-      suggestions.push(`Break down tonight's ${visitorShort} vs ${homeShort} matchup`);
+      const s = `Break down tonight's ${visitorShort} vs ${homeShort} matchup`;
+      if (!isPickQuestion(s)) suggestions.push(s);
     }
   }
 
@@ -1101,12 +1107,14 @@ async function generateSuggestions() {
   const nhlGames = nhlResult.status === 'fulfilled' ? (nhlResult.value || []) : [];
   if (nhlGames.length > 0) {
     const g = nhlGames[0];
-    const home    = g.homeTeam?.placeName?.default || g.homeTeam?.abbrev || '';
-    const away    = g.awayTeam?.placeName?.default || g.awayTeam?.abbrev || '';
+    const home = g.homeTeam?.placeName?.default || g.homeTeam?.abbrev || '';
+    const away = g.awayTeam?.placeName?.default || g.awayTeam?.abbrev || '';
     if (home) {
-      suggestions.push(`Who is starting in goal for the ${home} tonight?`);
+      const s = `Who is starting in goal for the ${home} tonight?`;
+      if (!isPickQuestion(s)) suggestions.push(s);
     } else if (away) {
-      suggestions.push(`Break down tonight's ${away} vs ${home || 'opponent'} matchup`);
+      const s = `How has the ${away} been scoring lately?`;
+      if (!isPickQuestion(s)) suggestions.push(s);
     }
   }
 
@@ -1119,19 +1127,21 @@ async function generateSuggestions() {
     if (home && away) {
       const homeShort = home.split(' ').pop();
       const awayShort = away.split(' ').pop();
-      suggestions.push(`What are the conditions for the ${awayShort} vs ${homeShort} game tonight?`);
+      const s = `What are the conditions for the ${awayShort} vs ${homeShort} game tonight?`;
+      if (!isPickQuestion(s)) suggestions.push(s);
     }
   }
 
-  // Round out to 4 with a general education/betting question
+  // Round out to 4 with pure research/data questions — no pick language
   const generals = [
     'What does line movement tell you before a game?',
     'How do I read a puck line vs moneyline for NHL?',
-    'What makes a good value bet on player props?',
     'How do park factors affect MLB totals?',
     'What is sharp money and how does it move lines?',
     'How do back-to-back situations affect NBA totals?',
     'What is the difference between spread and moneyline?',
+    'How has Nikola Jokic been playing this month?',
+    'What are the prop lines for Connor McDavid tonight?',
   ];
   while (suggestions.length < 4) {
     const idx = (new Date().getDay() + suggestions.length) % generals.length;
