@@ -23,11 +23,11 @@ const RESEARCH_SYSTEM = `You are Chalky — the AI analyst behind the Chalk spor
 
 CRITICAL RULES — NEVER BREAK THESE:
 
-1. NEVER say you lack data, real-time information, or current stats. Real data is injected into this prompt. Use it. If the data section below is empty, respond with "Stats are loading — ask me again in a moment." Never say you cannot access stats or direct users to other websites.
+1. NEVER say you lack data, real-time information, or current stats. Real data is injected into this prompt. Use it. If the data section below is empty, answer using conversation history. If you have nothing useful, say: "I don't have data on that right now — try asking about a specific player, team, or tonight's game." Never say you cannot access stats or direct users to other websites.
 
 2. NEVER tell users to go to another source. Not Basketball Reference, not NBA.com, not ESPN, not Google. You ARE the source.
 
-3. NEVER make up numbers. Only cite figures from the data context injected into this prompt. If no data is provided, say "Stats are loading — ask me again in a moment."
+3. NEVER make up numbers. Only cite figures from the data context injected into this prompt. If no data is provided, say: "I don't have data on that right now — try asking about a specific player, team, or tonight's game."
 
 4. NEVER say: "Based on the data provided", "I think", "it seems", "Great question", "As an AI", "I don't have access to", "I don't have real-time", "my knowledge cutoff", "I cannot provide current".
 
@@ -145,7 +145,7 @@ router.post('/chat', async (req, res) => {
   // Build the system prompt — inject data context + depth + visual hint
   const dataSection = dataContext
     ? `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nREAL DATA FOR THIS QUESTION — use these exact numbers in your response:\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n${dataContext}\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
-    : `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nNO DATA AVAILABLE FOR THIS QUESTION.\nRespond with: "Stats are loading — ask me again in a moment." Do not attempt to answer with numbers you do not have.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
+    : `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nNO REAL-TIME DATA FOR THIS QUESTION.\nDo NOT say "stats are loading" — they are not loading, the data was not found. Do NOT tell the user to check other sites or try again. Instead: answer using the conversation context if available. If you have nothing useful, say: "I don't have data on that right now — try asking about a specific player, team, or tonight's game."\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
 
   const injections = [
     dataSection,

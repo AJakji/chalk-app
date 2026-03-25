@@ -8,12 +8,13 @@
  *   Odds   — The Odds API (via Chalk backend — not called here, context only)
  */
 
-const db         = require('../db');
-const nba        = require('./nba');
-const bdl        = require('./ballDontLie');
-const nhlApi     = require('./nhlApi');
-const mlbStats   = require('./mlbStats');
-const weather    = require('./weatherService');
+const db          = require('../db');
+const nba         = require('./nba');
+const bdl         = require('./ballDontLie');
+const nhlApi      = require('./nhlApi');
+const mlbStats    = require('./mlbStats');
+const weather     = require('./weatherService');
+const oddsService = require('./oddsService');
 
 // ── Season year helper ────────────────────────────────────────────────────────
 
@@ -272,6 +273,12 @@ function detectIntent(q) {
        'game-time decision', 'injury status', 'player status'].some(t => lower.includes(t))) return 'availability';
   if (['injur', 'hurt', 'out tonight', 'questionable', 'gtd', 'will he play', 'is he playing',
        'starting in goal', 'who starts', 'who is starting', 'starter'].some(t => lower.includes(t))) return 'injury';
+  // Prop lines lookup — "Jokic prop lines", "what are the lines", "LaMelo props"
+  // Must come BEFORE generic 'prop' so line-fetching questions don't fall through to analysis
+  if (['prop lines', 'prop line', 'props tonight', 'props today', 'props',
+       'lines tonight', 'lines today', 'what are the lines', 'what is the line',
+       "what's the line", "what's his line", 'what is his line', 'betting lines',
+       'betting line', 'over/under', 'o/u'].some(t => lower.includes(t))) return 'prop_lines';
   if (['over', 'under', 'should i bet', 'good bet', 'worth it', 'prop', 'points prop',
        'rebounds prop', 'assists prop', 'pra'].some(t => lower.includes(t))) return 'prop';
   if (['matchup', 'game tonight', "tonight's game", 'who wins', 'both teams', 'head to head',
@@ -567,6 +574,108 @@ async function buildDataContext(question, conversationHistory = []) {
       }
     } catch (err) {
       console.log('NBA microservice error (non-fatal):', err.message);
+    }
+
+    // ── NBA Prop Lines: "Jokic prop lines tonight", "LaMelo props" ───────────
+    if (intent === 'prop_lines' && bdlSearchTerm) {
+      const NBA_PROP_MARKETS = [
+        'player_points', 'player_rebounds', 'player_assists', 'player_threes',
+        'player_points_rebounds_assists', 'player_points_rebounds', 'player_points_assists',
+      ].join(',');
+      const MARKET_LABELS = {
+        player_points:                     'Points',
+        player_rebounds:                   'Rebounds',
+        player_assists:                    'Assists',
+        player_threes:                     'Threes',
+        player_points_rebounds_assists:    'PRA',
+        player_points_rebounds:            'P+R',
+        player_points_assists:             'P+A',
+      };
+
+      try {
+        console.log('NBA prop lines check — player:', bdlSearchTerm);
+        const found = await bdl.searchPlayers(bdlSearchTerm);
+
+        if (!found?.[0]) {
+          parts.push(
+            `PROP LINES: Could not find a player matching "${displayName}" in the database. ` +
+            `Try using their full name — e.g. "Nikola Jokic" instead of just the nickname.`
+          );
+        } else {
+          const pName    = `${found[0].first_name} ${found[0].last_name}`;
+          const teamName = found[0].team?.full_name || '';
+          const teamAbbr = found[0].team?.abbreviation || '';
+          const teamWord = teamName.split(' ').pop().toLowerCase(); // "nuggets"
+
+          // Find tonight's Odds API event for this team
+          const events  = await oddsService.fetchEvents('NBA').catch(() => []);
+          const event   = events?.find(e =>
+            e.home_team?.toLowerCase().includes(teamWord) ||
+            e.away_team?.toLowerCase().includes(teamWord)
+          );
+
+          if (!event) {
+            parts.push(
+              `PROP LINES — ${pName} (${teamAbbr}):\n` +
+              `NO GAME TONIGHT: ${teamName} is not on tonight's NBA schedule. ` +
+              `Want me to pull their recent stats or check when they play next?`
+            );
+            console.log(`Prop lines: no game tonight for ${teamName}`);
+          } else {
+            const isHome  = event.home_team?.toLowerCase().includes(teamWord);
+            const opp     = isHome ? event.away_team : event.home_team;
+            const ha      = isHome ? 'home' : 'away';
+            const gameTimeET = event.commence_time
+              ? new Date(event.commence_time).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' }) + ' ET'
+              : '';
+
+            console.log(`Prop lines: found event ${pName} — ${teamAbbr} (${ha}) vs ${opp} at ${gameTimeET}`);
+
+            // Fetch props from Odds API
+            const propsData  = await oddsService.fetchEventProps('NBA', event.id, NBA_PROP_MARKETS).catch(() => null);
+            const pNameLower = pName.toLowerCase();
+            const propLines  = [];
+
+            if (propsData?.bookmakers?.length) {
+              // Prefer DraftKings → FanDuel → first available
+              const bm = propsData.bookmakers.find(b => b.key === 'draftkings')
+                      || propsData.bookmakers.find(b => b.key === 'fanduel')
+                      || propsData.bookmakers[0];
+
+              if (bm) {
+                for (const mkt of (bm.markets || [])) {
+                  const label = MARKET_LABELS[mkt.key];
+                  if (!label) continue;
+                  const fmt  = n => n > 0 ? `+${n}` : `${n}`;
+                  const over  = mkt.outcomes?.find(o => o.description === 'Over'  && o.name?.toLowerCase() === pNameLower);
+                  const under = mkt.outcomes?.find(o => o.description === 'Under' && o.name?.toLowerCase() === pNameLower);
+                  if (over?.point != null && under?.price != null) {
+                    propLines.push(`${label}: ${over.point} (Over ${fmt(over.price)} / Under ${fmt(under.price)}) [${bm.title}]`);
+                  } else if (over?.point != null) {
+                    propLines.push(`${label}: ${over.point} Over ${fmt(over.price)} [${bm.title}]`);
+                  }
+                }
+              }
+            }
+
+            let propCtx = `PROP LINES FOR ${pName.toUpperCase()} — Tonight (${ha}) vs ${opp}${gameTimeET ? ' at ' + gameTimeET : ''}:\n`;
+            if (propLines.length > 0) {
+              propCtx += propLines.join('\n');
+              console.log(`Prop lines: ${propLines.length} markets found for ${pName}`);
+            } else {
+              propCtx +=
+                `Lines not posted yet for this game. ` +
+                `Prop lines typically appear 2-4 hours before tip-off. ` +
+                `Here are the recent averages to reference when lines do post:`;
+              console.log(`Prop lines: game found but no lines posted yet for ${pName}`);
+            }
+            parts.push(propCtx);
+          }
+        }
+      } catch (err) {
+        console.error('NBA prop lines error:', err.message);
+        // Don't push anything — fall through so BDL stats still run and give Claude something useful
+      }
     }
 
     // ── NBA Availability: "Is X playing tonight?" ─────────────────────────────
@@ -1080,6 +1189,7 @@ function buildVisualHint(intent, depth) {
   if (intent === 'education')    return 'Set visualData to null — educational answers need no visual.';
   if (intent === 'injury')       return 'Set visualData to null — roster/availability answers need no visual.';
   if (intent === 'availability') return 'Set visualData to null — availability answers need no visual.';
+  if (intent === 'prop_lines')   return 'Set visualData to null — prop lines are presented as formatted text, no visual chart needed.';
   if (intent === 'weather')      return 'Set visualData to null — weather text answer only.';
 
   if (intent === 'prop') {
