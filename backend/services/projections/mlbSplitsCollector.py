@@ -67,12 +67,11 @@ def get_qualified_batters(conn, season):
         SELECT DISTINCT player_name, player_id
         FROM player_game_logs
         WHERE sport = 'MLB'
-        AND season = %s
+        AND season = %s::text
         AND fg_att IS NOT NULL
-        AND points IS NULL OR fg_att > 0
         GROUP BY player_name, player_id
         HAVING SUM(fg_att) >= 50
-        AND player_id IS NOT NULL
+        AND MAX(player_id::text) IS NOT NULL
     """, (season,))
     return cur.fetchall()
 
