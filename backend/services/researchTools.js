@@ -268,28 +268,48 @@ async function get_prop_lines({ player_name, sport }) {
     };
 
     const propsData = await oddsService.fetchEventProps('NBA', event.id, MARKETS).catch(() => null);
-    const pLower    = pName.toLowerCase();
-    const lines     = [];
+
+    // Normalize for accent-insensitive matching (Jokić vs Jokic etc.)
+    const normName = s => (s || '').toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z\s]/g, '').trim();
+    const pNorm = normName(pName);
+
+    const lines = [];
 
     if (propsData?.bookmakers?.length) {
-      const bm = propsData.bookmakers.find(b => b.key === 'draftkings')
-              || propsData.bookmakers.find(b => b.key === 'fanduel')
-              || propsData.bookmakers[0];
+      // Prefer DraftKings, fallback to FanDuel, fallback to first bookmaker
+      const dk = propsData.bookmakers.find(b => b.key === 'draftkings');
+      const fd = propsData.bookmakers.find(b => b.key === 'fanduel');
+      const bm = dk || fd || propsData.bookmakers[0];
+
       if (bm) {
         for (const mkt of (bm.markets || [])) {
           const label = LABELS[mkt.key];
           if (!label) continue;
-          const over  = mkt.outcomes?.find(o => o.description === 'Over'  && o.name?.toLowerCase() === pLower);
-          const under = mkt.outcomes?.find(o => o.description === 'Under' && o.name?.toLowerCase() === pLower);
-          if (over?.point != null && under?.price != null) {
-            lines.push(`  ${label}: O/U ${over.point} — Over ${fmt(over.price)} / Under ${fmt(under.price)} [${bm.title}]`);
+          // Odds API: name = "Over"/"Under", description = player name
+          const over  = mkt.outcomes?.find(o => o.name === 'Over'  && normName(o.description) === pNorm);
+          const under = mkt.outcomes?.find(o => o.name === 'Under' && normName(o.description) === pNorm);
+          if (over?.point != null && over?.price != null && under?.price != null) {
+            // Include both books when available
+            let oddsStr = `Over ${fmt(over.price)} / Under ${fmt(under.price)} [${bm.title}]`;
+            if (dk && fd) {
+              const otherBm  = bm.key === 'draftkings' ? fd : dk;
+              const otherMkt = otherBm.markets?.find(m => m.key === mkt.key);
+              const o2 = otherMkt?.outcomes?.find(o => o.name === 'Over'  && normName(o.description) === pNorm);
+              const u2 = otherMkt?.outcomes?.find(o => o.name === 'Under' && normName(o.description) === pNorm);
+              if (o2?.price != null && u2?.price != null) {
+                oddsStr += ` | Over ${fmt(o2.price)} / Under ${fmt(u2.price)} [${otherBm.title}]`;
+              }
+            }
+            lines.push(`  ${label}: O/U ${over.point} — ${oddsStr}`);
           }
         }
       }
     }
 
     if (lines.length === 0) {
-      return `${pName} — Tonight (${isHome ? 'home' : 'away'}) vs ${opp} at ${gameTimeET}.\nProp lines not posted yet. Lines typically appear 2-4 hours before tip-off.`;
+      return `${pName} — Tonight (${isHome ? 'home' : 'away'}) vs ${opp} at ${gameTimeET}.\nNo prop lines found yet for this player. Lines may not be posted until closer to tip-off.`;
     }
 
     return [`${pName} PROP LINES — Tonight vs ${opp} at ${gameTimeET}:`, ...lines].join('\n');
