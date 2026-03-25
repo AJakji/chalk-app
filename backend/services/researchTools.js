@@ -457,6 +457,9 @@ async function get_tonight_schedule({ sport }) {
 
 // ── Tool 5: Matchup stats + odds ──────────────────────────────────────────────
 
+const { Pool: PgPool } = require('pg');
+const _matchupDb = new PgPool({ connectionString: process.env.DATABASE_URL });
+
 async function get_matchup_stats({ team1, team2, sport }) {
   const fmt  = n => (n > 0 ? `+${n}` : `${n}`);
   const t1   = (team1 || '').toLowerCase();
@@ -508,6 +511,40 @@ async function get_matchup_stats({ team1, team2, sport }) {
         }
       }
     }
+  }
+
+  // Team situation splits — query for both teams
+  if (sport === 'NBA') {
+    const addSplits = async (teamName) => {
+      try {
+        const result = await _matchupDb.query(`
+          SELECT split_type, wins, games, win_pct, pts_scored, pts_allowed
+          FROM team_situation_splits
+          WHERE sport = 'NBA' AND team_name ILIKE $1
+          AND split_type IN ('home', 'away', 'rest_1', 'rest_2')
+          ORDER BY split_type
+        `, [`%${teamName.split(' ').pop()}%`]);
+        const rows = result.rows;
+        if (!rows.length) return null;
+        const fmt2 = (r) => r ? `${r.wins}-${r.games - r.wins} (${(parseFloat(r.win_pct) * 100).toFixed(0)}%) ${parseFloat(r.pts_scored).toFixed(1)} PPG` : 'N/A';
+        const home  = rows.find(r => r.split_type === 'home');
+        const away  = rows.find(r => r.split_type === 'away');
+        const b2b   = rows.find(r => r.split_type === 'rest_1');
+        const rest  = rows.find(r => r.split_type === 'rest_2');
+        return `${teamName} situation record:
+  Home: ${fmt2(home)} | Away: ${fmt2(away)}
+  B2B (rest_1): ${fmt2(b2b)} | With rest (2+ days): ${fmt2(rest)}`;
+      } catch {
+        return null;
+      }
+    };
+
+    const [awaySplits, homeSplits] = await Promise.all([
+      addSplits(event.away_team),
+      addSplits(event.home_team),
+    ]);
+    if (awaySplits) lines.push('\n' + awaySplits);
+    if (homeSplits) lines.push(homeSplits);
   }
 
   return lines.join('\n');
