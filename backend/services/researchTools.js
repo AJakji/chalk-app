@@ -174,53 +174,15 @@ const MLB_TEAM_ABBR = {
   'diamondbacks': 'ARI', 'dbacks': 'ARI', 'athletics': 'OAK',
 };
 
-// ── Tool 1: NBA player stats ───────────────────────────────────────────────────
+// ── Tool 1: NBA player stats (delegates to masterDataFetch) ───────────────────
 
 async function get_nba_player_stats({ player_name }) {
-  const season   = getCurrentNBASeason();
+  const { getNBAPlayerComplete } = require('./masterDataFetch');
   const resolved = resolveAlias(player_name);
-  const bdlTerm  = resolved?.searchTerm || player_name.split(' ').pop().toLowerCase();
-  const dName    = resolved?.displayName || player_name;
-
-  console.log(`[tool:nba_stats] BDL search: "${bdlTerm}"`);
-  let found = await bdl.searchPlayers(bdlTerm);
-  // fallback: try raw last name if alias didn't work
-  if (!found?.[0]) {
-    const lastName = player_name.trim().split(' ').pop().toLowerCase();
-    if (lastName !== bdlTerm) found = await bdl.searchPlayers(lastName);
-  }
-  if (!found?.[0]) return `No NBA player found matching "${dName}". Try their full last name.`;
-
-  const player = found[0];
-  const pName  = `${player.first_name} ${player.last_name}`;
-  const abbr   = player.team?.abbreviation || '';
-
-  const gameStats = await bdl.getPlayerStats([player.id], [season]);
-  const played = (gameStats || [])
-    .filter(g => g.min && g.min !== '0' && g.min !== '00' && (g.pts > 0 || g.reb > 0 || g.ast > 0))
-    .sort((a, b) => (b.game?.date || '') > (a.game?.date || '') ? 1 : -1);
-
-  if (played.length < 3) return `${pName} (${abbr}) — only ${played.length} games with data this season.`;
-
-  const avg  = (arr, f) => (arr.reduce((s, g) => s + (Number(g[f]) || 0), 0) / arr.length).toFixed(1);
-  const l10  = played.slice(0, 10);
-  const l5   = played.slice(0, 5);
-
-  const logLines = l10.map(g => {
-    const date = (g.game?.date || '').slice(0, 10);
-    const fg   = g.fg_pct != null ? `${(g.fg_pct * 100).toFixed(0)}%` : '?%';
-    return `  ${date}: ${g.pts}pts ${g.reb}reb ${g.ast}ast FG:${fg}`;
-  });
-
-  return [
-    `${pName} (${abbr}) — ${season}-${String(season + 1).slice(2)} Season (${played.length} GP):`,
-    `Season: ${avg(played,'pts')} PTS / ${avg(played,'reb')} REB / ${avg(played,'ast')} AST`,
-    `L10:    ${avg(l10,'pts')} PTS / ${avg(l10,'reb')} REB / ${avg(l10,'ast')} AST`,
-    `L5:     ${avg(l5,'pts')} PTS / ${avg(l5,'reb')} REB / ${avg(l5,'ast')} AST`,
-    '',
-    'Last 10 games:',
-    ...logLines,
-  ].join('\n');
+  const searchName = resolved?.searchTerm || player_name;
+  const result = await getNBAPlayerComplete(searchName);
+  if (!result) return `No NBA player found matching "${player_name}". Try their full last name.`;
+  return result;
 }
 
 // ── Tool 2: Prop lines ─────────────────────────────────────────────────────────
@@ -597,123 +559,30 @@ async function get_weather({ venue_name, team_name }) {
   ].join('\n');
 }
 
-// ── Tool 7: NHL player stats ───────────────────────────────────────────────────
+// ── Tool 7: NHL player stats (delegates to masterDataFetch) ───────────────────
 
 async function get_nhl_player_stats({ player_name }) {
-  const lower    = (player_name || '').toLowerCase();
-  const resolved = resolveAlias(lower);
-  const pName    = resolved?.displayName || player_name;
-  const teamAbbr = NHL_PLAYER_TEAMS[lower] || null;
-
-  if (!teamAbbr) {
-    return `${pName} — Could not determine NHL team. Try asking about the team directly (e.g. "How are the Oilers playing?").`;
-  }
-
-  const roster = await nhlApi.getTeamRoster(teamAbbr).catch(() => null);
-  if (!roster) return `Could not fetch ${teamAbbr} roster.`;
-
-  const allPlayers = [
-    ...(roster.forwards   || []),
-    ...(roster.defensemen || []),
-    ...(roster.goalies    || []),
-  ];
-
-  const pParts = pName.toLowerCase().split(' ');
-  const found  = allPlayers.find(p => {
-    const fn = (p.firstName?.default || '').toLowerCase();
-    const ln = (p.lastName?.default  || '').toLowerCase();
-    return pParts.some(part => part.length > 3 && (fn.includes(part) || ln.includes(part)));
-  });
-
-  if (!found) return `${pName} not found on ${teamAbbr} active roster.`;
-
-  const fullName = `${found.firstName?.default || ''} ${found.lastName?.default || ''}`.trim();
-  const now      = new Date();
-  const yr       = now.getMonth() >= 9 ? now.getFullYear() : now.getFullYear() - 1;
-  const seasonStr = `${yr}${yr + 1}`;
-
-  const logData = await nhlApi.getPlayerGameLog(found.id, seasonStr).catch(() => null);
-  const gameLog = logData?.gameLog || [];
-
-  if (gameLog.length < 3) {
-    return `${fullName} (${teamAbbr}) — limited game log data this season (${gameLog.length} games).`;
-  }
-
-  const recent   = gameLog.slice(0, 10);
-  const avgG     = (recent.reduce((s, g) => s + (Number(g.goals)   || 0), 0) / recent.length).toFixed(2);
-  const avgA     = (recent.reduce((s, g) => s + (Number(g.assists) || 0), 0) / recent.length).toFixed(2);
-  const avgPts   = (recent.reduce((s, g) => s + (Number(g.points)  || 0), 0) / recent.length).toFixed(2);
-
-  const logLines = recent.map(g => {
-    const date = (g.gameDate || '').slice(0, 10);
-    const ha   = g.homeRoadFlag === 'H' ? 'vs' : '@';
-    const toi  = g.timeOnIce ? ` TOI:${g.timeOnIce}` : '';
-    return `  ${date}: ${ha} ${g.opponentAbbrev || '?'} — ${g.goals}G ${g.assists}A ${g.points}pts ${g.shots || 0}SOG${toi}`;
-  });
-
-  return [
-    `${fullName} (${teamAbbr}) — NHL ${yr}-${String(yr + 1).slice(2)} Season:`,
-    `L10 avg: ${avgG}G / ${avgA}A / ${avgPts} PTS per game`,
-    '',
-    `Last ${recent.length} games:`,
-    ...logLines,
-  ].join('\n');
+  const { getNHLPlayerComplete } = require('./masterDataFetch');
+  const result = await getNHLPlayerComplete(player_name);
+  if (!result) return `No NHL player found matching "${player_name}". Try their full last name.`;
+  return result;
 }
 
-// ── Tool 8: MLB player stats ───────────────────────────────────────────────────
+// ── Tool 8: MLB player stats (delegates to masterDataFetch) ───────────────────
 
 async function get_mlb_player_stats({ player_name }) {
-  const lower    = (player_name || '').toLowerCase();
-  const resolved = resolveAlias(lower);
-  const pName    = resolved?.displayName || player_name;
-  const season   = new Date().getFullYear();
-
-  console.log(`[tool:mlb_stats] searching for "${pName}"`);
-
-  const allPlayers = await mlbStats.getActivePlayers(season).catch(() => []);
-  const pParts     = pName.toLowerCase().split(' ');
-
-  const found = allPlayers.find(p => {
-    const nameLower = (p.fullName || '').toLowerCase();
-    return pParts.every(part => nameLower.includes(part)) ||
-      pParts.some(part => part.length > 4 && nameLower.includes(part));
-  });
-
-  if (!found) return `No active MLB player found matching "${pName}". Try their full name.`;
-
-  const teamAbbr = found.currentTeam?.abbreviation || '';
-  const pos      = found.primaryPosition?.abbreviation || '';
-  const isPitch  = found.primaryPosition?.type?.description === 'Pitcher';
-  const group    = isPitch ? 'pitching' : 'hitting';
-
-  const [seasonStats, gameLog] = await Promise.all([
-    mlbStats.getPlayerSeasonStats(found.id, season, group).catch(() => []),
-    mlbStats.getPlayerGameLog(found.id, season, group).catch(() => []),
-  ]);
-
-  const stats  = seasonStats?.[0]?.stat || {};
-  const recent = gameLog.slice(0, 10);
-  let result   = `${found.fullName} (${teamAbbr}, ${pos}) — ${season} Season:\n`;
-
-  if (isPitch) {
-    result += `ERA: ${stats.era || '?'} | WHIP: ${stats.whip || '?'} | K: ${stats.strikeOuts || 0} | IP: ${stats.inningsPitched || '?'} | W-L: ${stats.wins || 0}-${stats.losses || 0}\n`;
-    if (recent.length) {
-      result += '\nRecent starts:\n' + recent.map(g => {
-        const s = g.stat || {};
-        return `  ${(g.date || '').slice(0, 10)} vs ${g.opponent?.name || '?'}: ${s.inningsPitched || '?'}IP ${s.earnedRuns ?? '?'}ER ${s.strikeOuts || 0}K`;
-      }).join('\n');
-    }
-  } else {
-    result += `AVG: ${stats.avg || '?'} | OPS: ${stats.ops || '?'} | HR: ${stats.homeRuns || 0} | RBI: ${stats.rbi || 0} | SB: ${stats.stolenBases || 0}\n`;
-    if (recent.length) {
-      result += '\nRecent games:\n' + recent.map(g => {
-        const s = g.stat || {};
-        return `  ${(g.date || '').slice(0, 10)} vs ${g.opponent?.name || '?'}: ${s.atBats || 0}AB ${s.hits || 0}H ${s.homeRuns || 0}HR ${s.rbi || 0}RBI`;
-      }).join('\n');
-    }
-  }
-
+  const { getMLBPlayerComplete } = require('./masterDataFetch');
+  const result = await getMLBPlayerComplete(player_name);
+  if (!result) return `No active MLB player found matching "${player_name}". Try their full name.`;
   return result;
+}
+
+// ── Tool 9: Comparative stats across tonight's slate ─────────────────────────
+
+async function get_comparative_stats({ sport, stat_category, scope }) {
+  const { getComparativeStats } = require('./masterDataFetch');
+  const result = await getComparativeStats(sport, stat_category, scope || 'last_10');
+  return result || `No comparative data available for ${sport} ${stat_category}.`;
 }
 
 // ── Tool dispatcher ───────────────────────────────────────────────────────────
@@ -729,6 +598,7 @@ async function executeTool(name, input) {
     get_weather,
     get_nhl_player_stats,
     get_mlb_player_stats,
+    get_comparative_stats,
   };
   const fn = handlers[name];
   if (!fn) return `Unknown tool: ${name}`;
