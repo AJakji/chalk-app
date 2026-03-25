@@ -84,6 +84,16 @@ key_factors: Exactly 3 strings. Each must come from a DIFFERENT category. Never 
   Rules: Each factor = one sentence. Each must include at least one specific number. Write like an expert analyst — insider data, not generic observations.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CRITICAL — NEVER USE TRAINING KNOWLEDGE FOR ROSTERS:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+You are ONLY provided aggregate opponent defensive stats (avgAllowed, leagueAvg, pctVsLeague).
+You are NOT provided individual opposing player names or their current teams.
+NEVER name a specific player on the opposing team in any field. Player rosters change constantly — your training data is stale and will be wrong.
+Only reference the opposing TEAM name and the aggregate defensive numbers you were given.
+BAD: "Anthony Davis is an elite rebounder for the Lakers" — you were not given this data, AD's team may have changed.
+GOOD: "Los Angeles allows 53.4 rebounds per game to opponents — 8% above league average."
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Respond with a JSON object — no markdown, no text outside the JSON:
 
 {
