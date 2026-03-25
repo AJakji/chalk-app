@@ -264,6 +264,12 @@ function detectIntent(q) {
   // Player stats must be checked BEFORE education — "what is X averaging" is player, not education
   if (['averaging', 'averages', 'avg', 'how many points', 'how many goals', 'how many rebounds',
        'per game', 'ppg', 'rpg', 'apg', 'season stats'].some(t => lower.includes(t))) return 'player';
+  // Availability: "is X playing tonight/today", "will X play tonight" — needs schedule + injury check
+  if (['playing tonight', 'playing today', 'play tonight', 'play today',
+       'playing tomorrow', 'play tomorrow', 'active tonight', 'active today',
+       'is he playing', 'is she playing', 'will he play', 'will she play',
+       'available tonight', 'available today', 'suiting up',
+       'game-time decision', 'injury status', 'player status'].some(t => lower.includes(t))) return 'availability';
   if (['injur', 'hurt', 'out tonight', 'questionable', 'gtd', 'will he play', 'is he playing',
        'starting in goal', 'who starts', 'who is starting', 'starter'].some(t => lower.includes(t))) return 'injury';
   if (['over', 'under', 'should i bet', 'good bet', 'worth it', 'prop', 'points prop',
@@ -563,10 +569,74 @@ async function buildDataContext(question, conversationHistory = []) {
       console.log('NBA microservice error (non-fatal):', err.message);
     }
 
+    // ── NBA Availability: "Is X playing tonight?" ─────────────────────────────
+    if (intent === 'availability' && bdlSearchTerm) {
+      try {
+        const today = new Date().toISOString().split('T')[0];
+        console.log('NBA availability check — player:', bdlSearchTerm, 'date:', today);
+
+        // Find player to get their team abbreviation
+        const found = await bdl.searchPlayers(bdlSearchTerm);
+        if (found?.[0]) {
+          const pName   = `${found[0].first_name} ${found[0].last_name}`;
+          const teamAbbr = found[0].team?.abbreviation || '';
+          const teamName = found[0].team?.full_name || found[0].team?.name || teamAbbr;
+
+          // Check tonight's schedule
+          const games = await bdl.getGames(today);
+          const game = (games || []).find(g =>
+            g.home_team?.abbreviation === teamAbbr ||
+            g.visitor_team?.abbreviation === teamAbbr
+          );
+
+          // Check injury report
+          const injuries = await bdl.getInjuries();
+          const playerInjury = (injuries || []).find(i => {
+            const name = `${i.player?.first_name || ''} ${i.player?.last_name || ''}`.toLowerCase();
+            return name.includes(found[0].last_name?.toLowerCase() || '');
+          });
+
+          let availContext = `NBA AVAILABILITY — ${pName} (${teamAbbr}):\n`;
+
+          if (playerInjury) {
+            availContext += `INJURY REPORT: ${playerInjury.status?.toUpperCase() || 'LISTED'} — ${playerInjury.description || 'no additional detail'}\n`;
+          } else {
+            availContext += `INJURY REPORT: No injury designation — assumed healthy.\n`;
+          }
+
+          if (game) {
+            const isHome = game.home_team?.abbreviation === teamAbbr;
+            const opp = isHome ? game.visitor_team?.full_name || game.visitor_team?.abbreviation : game.home_team?.full_name || game.home_team?.abbreviation;
+            const ha  = isHome ? 'home' : 'away';
+            // BDL game.status is ISO timestamp for upcoming games, "Final" etc for completed
+            const rawStatus = game.status || '';
+            const gameTimeET = rawStatus && rawStatus.includes('T')
+              ? new Date(rawStatus).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' }) + ' ET'
+              : (rawStatus || 'scheduled');
+            availContext += `TONIGHT'S GAME: ${teamName} (${ha}) vs ${opp} — ${gameTimeET}\n`;
+            if (playerInjury?.status?.toLowerCase().includes('out')) {
+              availContext += `SUMMARY: ${pName} is listed as OUT and will NOT play tonight.`;
+            } else if (playerInjury) {
+              availContext += `SUMMARY: ${pName} is ${playerInjury.status} — game-time decision. Watch for lineup update ~1 hour before tip.`;
+            } else {
+              availContext += `SUMMARY: ${pName} is expected to play tonight. No injury designation on the report.`;
+            }
+          } else {
+            availContext += `TONIGHT'S SCHEDULE: ${teamName} does NOT play tonight.`;
+          }
+
+          parts.push(availContext);
+          console.log('NBA availability context built for', pName);
+        }
+      } catch (err) {
+        console.error('NBA availability check error:', err.message);
+      }
+    }
+
     // BallDontLie — per-game stats → compute season/L10/L5 averages
     // NOTE: getSeasonAverages endpoint returns HTTP 400 (API limitation).
     // Per-game stats (getPlayerStats) work correctly and give us all the data we need.
-    if (bdlSearchTerm) {
+    if (bdlSearchTerm && intent !== 'availability') {
       try {
         console.log('BDL: searching for player fragment:', bdlSearchTerm);
         const found = await bdl.searchPlayers(bdlSearchTerm);
@@ -636,8 +706,9 @@ async function buildDataContext(question, conversationHistory = []) {
     }
 
     // DB game logs — supplement or fallback when BDL data is unavailable
+    // Skip for availability questions — we only need schedule + injury data
     const dbSearchName = resolved?.displayName || players[0];
-    if (dbSearchName) {
+    if (dbSearchName && intent !== 'availability') {
       const log = await getPlayerGameLog(dbSearchName, 'NBA', 10);
       console.log('DB game log rows for', dbSearchName, ':', log.length);
       if (log.length >= 3) {
@@ -679,6 +750,42 @@ async function buildDataContext(question, conversationHistory = []) {
   // ── NHL ─────────────────────────────────────────────────────────────────────
   if (effectiveSport === 'NHL') {
     const teamAbbr = detectNHLTeamAbbr(question);
+
+    // ── NHL Availability: "Is McDavid playing tonight?" ──────────────────────
+    if (intent === 'availability') {
+      const resolved = resolvePlayerAlias(question);
+      const pName    = resolved?.displayName || 'the player';
+      const today    = new Date().toISOString().split('T')[0];
+      try {
+        const games = await nhlApi.getSchedule(today);
+        const game  = teamAbbr
+          ? (games || []).find(g =>
+              g.homeTeam?.abbrev === teamAbbr || g.awayTeam?.abbrev === teamAbbr)
+          : null;
+
+        let availContext = `NHL AVAILABILITY — ${pName}${teamAbbr ? ` (${teamAbbr})` : ''}:\n`;
+
+        if (game) {
+          const isHome = game.homeTeam?.abbrev === teamAbbr;
+          const opp    = isHome ? (game.awayTeam?.placeName?.default || game.awayTeam?.abbrev) : (game.homeTeam?.placeName?.default || game.homeTeam?.abbrev);
+          const ha     = isHome ? 'home' : 'away';
+          // NHL start time is UTC — convert to ET for display
+          const startUTC = game.startTimeUTC ? new Date(game.startTimeUTC) : null;
+          const timeET   = startUTC ? startUTC.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' }) + ' ET' : '';
+          availContext += `TONIGHT'S GAME: ${teamAbbr} (${ha}) vs ${opp} — ${timeET}\n`;
+          availContext += `SUMMARY: Check lineup ~90 minutes before puck drop for official scratch list. If no injury report, ${pName} is expected to play.`;
+        } else if (teamAbbr) {
+          availContext += `TONIGHT'S SCHEDULE: ${teamAbbr} does NOT play tonight.`;
+        } else {
+          availContext += `Could not detect team for ${pName} — check the NHL schedule directly.`;
+        }
+
+        parts.push(availContext);
+        console.log('NHL availability context built for', pName);
+      } catch (err) {
+        console.error('NHL availability check error:', err.message);
+      }
+    }
 
     // Goalie/injury/roster question → get the actual roster
     if (intent === 'injury' || lower.includes('goalie') || lower.includes('starting') || lower.includes('who starts')) {
@@ -734,6 +841,51 @@ async function buildDataContext(question, conversationHistory = []) {
   if (effectiveSport === 'MLB') {
     const teamAbbr = detectMLBTeamAbbr(question);
     const today    = new Date().toISOString().split('T')[0];
+
+    // ── MLB Availability: "Is Ohtani playing today?" ─────────────────────────
+    if (intent === 'availability') {
+      const resolved = resolvePlayerAlias(question);
+      const pName    = resolved?.displayName || 'the player';
+      const mlbDateStr = toMLBDate(today);
+      try {
+        const games = await mlbStats.getSchedule(mlbDateStr);
+        const game  = teamAbbr
+          ? (games || []).find(g => {
+              const homeAbbr = g.teams?.home?.team?.abbreviation || '';
+              const awayAbbr = g.teams?.away?.team?.abbreviation || '';
+              const homeName = (g.teams?.home?.team?.name || '').toLowerCase();
+              const awayName = (g.teams?.away?.team?.name || '').toLowerCase();
+              // Match by abbreviation OR by team name keyword from MLB_KEYWORD_TO_ABBR
+              return homeAbbr === teamAbbr || awayAbbr === teamAbbr ||
+                     homeName.includes(teamAbbr.toLowerCase()) || awayName.includes(teamAbbr.toLowerCase());
+            })
+          : null;
+
+        let availContext = `MLB AVAILABILITY — ${pName}${teamAbbr ? ` (${teamAbbr})` : ''}:\n`;
+
+        if (game) {
+          const homeName = game.teams?.home?.team?.name || '';
+          const awayName = game.teams?.away?.team?.name || '';
+          const homeAbbr = game.teams?.home?.team?.abbreviation || '';
+          const isHome   = homeAbbr === teamAbbr;
+          const opp      = isHome ? awayName : homeName;
+          const ha       = isHome ? 'home' : 'away';
+          const status   = game.status?.detailedState || 'scheduled';
+          const gameTime = game.gameDate ? new Date(game.gameDate).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' }) + ' ET' : '';
+          availContext += `TODAY'S GAME: ${teamAbbr} (${ha}) vs ${opp} — ${gameTime} (${status})\n`;
+          availContext += `SUMMARY: ${pName} is on the active roster. Check lineup cards ~1 hour before first pitch for batting order confirmation.`;
+        } else if (teamAbbr) {
+          availContext += `TODAY'S SCHEDULE: ${teamAbbr} does NOT play today.`;
+        } else {
+          availContext += `Could not detect team for ${pName} — check the MLB schedule directly.`;
+        }
+
+        parts.push(availContext);
+        console.log('MLB availability context built for', pName);
+      } catch (err) {
+        console.error('MLB availability check error:', err.message);
+      }
+    }
 
     // Weather — always fetch for MLB questions when team/venue detected
     if (teamAbbr) {
@@ -925,9 +1077,10 @@ function buildVisualHint(intent, depth) {
   if (depth === 'brief' && (intent === 'injury' || intent === 'education')) {
     return 'Set visualData to null — text only answer, no visual needed.';
   }
-  if (intent === 'education') return 'Set visualData to null — educational answers need no visual.';
-  if (intent === 'injury')    return 'Set visualData to null — roster/availability answers need no visual.';
-  if (intent === 'weather')   return 'Set visualData to null — weather text answer only.';
+  if (intent === 'education')    return 'Set visualData to null — educational answers need no visual.';
+  if (intent === 'injury')       return 'Set visualData to null — roster/availability answers need no visual.';
+  if (intent === 'availability') return 'Set visualData to null — availability answers need no visual.';
+  if (intent === 'weather')      return 'Set visualData to null — weather text answer only.';
 
   if (intent === 'prop') {
     return (
