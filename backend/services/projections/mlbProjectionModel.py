@@ -1,14 +1,12 @@
 """
-Chalk MLB Projection Model
-==========================
-Morning script (runs at 10:00 AM via cron) that generates player and team
-projections for every MLB game tonight. Reads historical data from our
-PostgreSQL database (populated by mlbDataCollector.py), fetches weather
-from Open-Meteo, and writes projections to chalk_projections and
-team_projections tables.
+Chalk MLB Projection Model  v3.0
+=================================
+Runs at 10:00 AM ET daily. Generates player + team projections for every
+MLB game tonight. Reads from PostgreSQL, fetches weather from Open-Meteo,
+writes to chalk_projections and team_projections.
 
-Column mapping from mlbDataCollector (shared player_game_logs table):
-  Hitters
+DB column mappings (shared player_game_logs table):
+  Batters
   -------
   points        = runs
   fg_made       = hits
@@ -62,57 +60,56 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-DATABASE_URL  = os.getenv('DATABASE_URL', '')
-MODEL_VERSION = 'v2.0'
+DATABASE_URL   = os.getenv('DATABASE_URL', '')
+MODEL_VERSION  = 'v3.0'
 CURRENT_SEASON = '2025'
 
-# League-average baselines — calibrated to 2024 MLB season
+# ── League-average baselines (2024 MLB) ─────────────────────────────────────────
 LEAGUE_AVG = {
-    'hits_per_game':      0.87,   # per batter per game
+    # Batter per-game averages
+    'hits_per_game':      0.87,
     'tb_per_game':        1.30,
     'hr_per_game':        0.147,
     'rbi_per_game':       0.50,
     'runs_per_game':      0.50,
-    'sb_per_game':        0.08,
-    'ba':                 0.243,
-    'obp':                0.312,
+    'sb_per_game':        0.09,
+    # Batter rates
+    'ba':                 0.248,
+    'baa':                0.248,
+    'obp':                0.317,
     'slg':                0.411,
-    'ops':                0.723,
-    'babip':              0.297,
-    'k_pct':              0.224,
+    'ops':                0.728,
+    'babip':              0.300,
+    'iso':                0.155,
+    'k_pct':              0.233,
     'bb_pct':             0.085,
-    'ld_pct':             0.210,
-    'hard_contact_pct':   0.380,
-    'barrel_pct':         0.078,
-    'iso':                0.168,
-    'hr_fb_ratio':        0.143,
-    'pull_pct':           0.400,
-    'sprint_speed':       27.0,   # ft/s
-    # Pitcher baselines
+    # Pitcher
+    'era':                4.20,
+    'whip':               1.30,
+    'fip':                4.15,
     'k_per_9':            8.7,
     'bb_per_9':           3.1,
-    'hr_per_9':           1.20,
-    'era':                4.20,
-    'whip':               1.27,
-    'fip':                4.15,
-    'swstr_pct':          0.110,  # swinging strike %
-    'zone_pct':           0.495,
-    'gb_pct':             0.435,
-    'fb_pct':             0.360,
+    'hr_per_9':           1.35,
     'h_per_9':            8.5,
-    'baa':                0.243,
     # Team
     'team_runs_per_game': 4.6,
-    'team_ops':           0.723,
     'team_era':           4.20,
-    'team_whip':          1.27,
+    'team_whip':          1.30,
+    'team_ops':           0.728,
+    # Game-level
+    'game_total':         8.8,
+    'k_per_game':         16.2,   # both teams combined
+    'bb_per_game_team':   3.35,   # per team per game
+    'risp_rbi_per_pa':    0.085,
+    # SB
+    'sb_rate':            0.09,
 }
 
-# Standard deviations for probability calculations
-TOTAL_STD_DEV  = 2.8   # runs (MLB totals)
-SPREAD_STD_DEV = 2.2   # runs (MLB run line)
+# Standard deviations for CDF calculations
+TOTAL_STD_DEV  = 2.8   # MLB game totals
+SPREAD_STD_DEV = 3.2   # MLB run line
 
-# MLB venue coordinates for weather lookup — keyed by venue name substring
+# ── Venue coordinates for weather lookup ────────────────────────────────────────
 VENUE_COORDS = {
     'Yankee Stadium':           (40.8296, -73.9262),
     'Fenway Park':              (42.3467, -71.0972),
@@ -148,19 +145,7 @@ VENUE_COORDS = {
     'LoanDepot Park':           (25.7781, -80.2197),
 }
 
-
-def get_venue_coords(venue_name: str) -> Optional[tuple]:
-    """Find coordinates for venue by name substring match."""
-    if not venue_name:
-        return None
-    vl = venue_name.lower()
-    for key, coords in VENUE_COORDS.items():
-        if key.lower() in vl or vl in key.lower():
-            return coords
-    return None
-
-# HR factor, Runs factor, Hits factor for all 30 MLB parks
-# Source: 3-year rolling park factor data
+# ── Park factors (3-year rolling) ───────────────────────────────────────────────
 MLB_PARK_FACTORS = {
     'coors_field':              {'hr': 1.35, 'runs': 1.28, 'hits': 1.14, 'altitude_ft': 5183},
     'great_american_ballpark':  {'hr': 1.25, 'runs': 1.18, 'hits': 1.08, 'altitude_ft': 489},
@@ -189,14 +174,13 @@ MLB_PARK_FACTORS = {
     'truist_park':              {'hr': 1.05, 'runs': 1.02, 'hits': 1.01, 'altitude_ft': 1050},
     'loandepot_park':           {'hr': 0.85, 'runs': 0.93, 'hits': 0.96, 'altitude_ft': 6},
     'busch_stadium':            {'hr': 0.92, 'runs': 0.95, 'hits': 0.98, 'altitude_ft': 455},
-    'american_airlines_center': {'hr': 1.03, 'runs': 1.01, 'hits': 1.00, 'altitude_ft': 551},
-    'rogers_centre':            {'hr': 1.06, 'runs': 1.04, 'hits': 1.02, 'altitude_ft': 251},
     'globe_life_field':         {'hr': 1.08, 'runs': 1.05, 'hits': 1.03, 'altitude_ft': 551},
+    'rogers_centre':            {'hr': 1.06, 'runs': 1.04, 'hits': 1.02, 'altitude_ft': 251},
     'default':                  {'hr': 1.00, 'runs': 1.00, 'hits': 1.00, 'altitude_ft': 100},
 }
 
 
-# ── Helpers ─────────────────────────────────────────────────────────────────────
+# ── Core helpers ────────────────────────────────────────────────────────────────
 
 def get_db():
     if not DATABASE_URL:
@@ -213,14 +197,37 @@ def safe(val, default=0.0):
         return default
 
 
+def _normal_cdf(z: float) -> float:
+    """Standard normal CDF via math.erfc."""
+    return 0.5 * math.erfc(-z / math.sqrt(2))
+
+
+# ── Venue / park helpers ────────────────────────────────────────────────────────
+
+def get_venue_coords(venue_name: str) -> Optional[tuple]:
+    if not venue_name:
+        return None
+    vl = venue_name.lower()
+    for key, coords in VENUE_COORDS.items():
+        if key.lower() in vl or vl in key.lower():
+            return coords
+    return None
+
+
+def get_park_factors(venue_name: str) -> dict:
+    name_lower = venue_name.lower().replace(' ', '_').replace("'", '').replace('.', '')
+    for key, factors in MLB_PARK_FACTORS.items():
+        if key == 'default':
+            continue
+        key_words = key.replace('_', ' ')
+        if key in name_lower or key_words in venue_name.lower():
+            return factors
+    return MLB_PARK_FACTORS['default']
+
+
 # ── Weather ──────────────────────────────────────────────────────────────────────
 
 def fetch_weather(lat: float, lon: float) -> dict:
-    """
-    Fetch current weather from Open-Meteo (no API key required).
-    Returns dict with temp_f, wind_mph, wind_dir_deg.
-    Returns empty dict on failure — model continues without weather factors.
-    """
     url = (
         f'https://api.open-meteo.com/v1/forecast'
         f'?latitude={lat}&longitude={lon}'
@@ -244,207 +251,206 @@ def fetch_weather(lat: float, lon: float) -> dict:
 
 
 def wind_direction_label(degrees: float) -> str:
-    """Convert wind direction degrees to compass label."""
     dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
     idx = round(degrees / 45) % 8
     return dirs[idx]
 
 
-def weather_hits_factor(weather: dict) -> float:
+def _wind_out(wind_dir_deg: float, park_name: str) -> bool:
+    """True if wind is blowing toward outfield (bad for pitchers, good for hitters)."""
+    label = wind_direction_label(wind_dir_deg)
+    if 'wrigley' in park_name.lower():
+        return label in ('E', 'SE', 'NE')
+    return label in ('S', 'SW', 'SE')
+
+
+def _wind_in(wind_dir_deg: float, park_name: str) -> bool:
+    """True if wind is blowing from outfield toward home plate."""
+    label = wind_direction_label(wind_dir_deg)
+    if 'wrigley' in park_name.lower():
+        return label in ('W', 'SW', 'NW')
+    return label in ('N', 'NW', 'NE')
+
+
+# ── Per-spec weather factor functions ───────────────────────────────────────────
+
+def weather_hits_factor(weather: dict, park_name: str = '') -> float:
     """
-    Calculate hits multiplier from temperature.
-    Cold weather (below 50F) reduces hits by up to 4%.
-    Hot weather (above 85F) adds 2%.
-    Returns 1.0 if no weather data.
+    Hits multiplier per spec:
+      wind blowing out > 12mph: ×1.02
+      temp < 50F: ×0.97
+      temp > 80F: ×1.02
+    """
+    if not weather:
+        return 1.0
+    temp     = weather.get('temp_f', 72)
+    wind_mph = weather.get('wind_mph', 0)
+    wind_dir = weather.get('wind_dir_deg', 0)
+
+    f = 1.0
+    if temp < 50:
+        f *= 0.97
+    elif temp > 80:
+        f *= 1.02
+
+    if wind_mph > 12 and _wind_out(wind_dir, park_name):
+        f *= 1.02
+
+    return round(f, 4)
+
+
+def weather_tb_wind_factor(weather: dict, park_name: str = '') -> float:
+    """
+    Total-bases wind factor per spec:
+      blowing out 15-19mph: ×1.08  |  20+mph: ×1.14
+      blowing in  15-19mph: ×0.91  |  20+mph: ×0.86
+      crosswind: ×1.01
+    """
+    if not weather:
+        return 1.0
+    wind_mph = weather.get('wind_mph', 0)
+    wind_dir = weather.get('wind_dir_deg', 0)
+
+    out = _wind_out(wind_dir, park_name)
+    inn = _wind_in(wind_dir, park_name)
+
+    if out:
+        if wind_mph >= 20:   return 1.14
+        if wind_mph >= 15:   return 1.08
+    elif inn:
+        if wind_mph >= 20:   return 0.86
+        if wind_mph >= 15:   return 0.91
+    elif wind_mph >= 10:
+        return 1.01
+    return 1.0
+
+
+def weather_tb_temp_factor(weather: dict) -> float:
+    """
+    Total-bases temperature factor per spec:
+      < 45F: 0.88  |  45-55: 0.93  |  55-65: 0.97
+      65-75: 1.00  |  75-85: 1.04  |  > 85: 1.08
     """
     if not weather:
         return 1.0
     temp = weather.get('temp_f', 72)
-    if temp < 40:   return 0.95
-    if temp < 50:   return 0.97
-    if temp < 60:   return 0.99
-    if temp >= 90:  return 1.02
-    if temp >= 85:  return 1.01
-    return 1.0
+    if temp < 45:   return 0.88
+    if temp < 55:   return 0.93
+    if temp < 65:   return 0.97
+    if temp < 75:   return 1.00
+    if temp < 85:   return 1.04
+    return 1.08
 
 
-def weather_tb_factor(weather: dict, park_name: str) -> float:
+def weather_hr_wind_factor(weather: dict, park_name: str = '') -> float:
     """
-    Calculate total bases multiplier from weather + park.
-    Wind-out at Wrigley is the most extreme positive case.
-    Opposing wind suppresses TB significantly.
-    Returns 1.0 if no weather data.
-    """
-    if not weather:
-        return 1.0
-    wind_mph = weather.get('wind_mph', 0)
-    wind_dir = weather.get('wind_dir_deg', 0)
-    temp_f   = weather.get('temp_f', 72)
-
-    # Wrigley wind-out (blowing out to center ~E or SE)
-    is_wrigley = 'wrigley' in park_name.lower()
-    wind_label = wind_direction_label(wind_dir)
-    wrigley_out = is_wrigley and wind_label in ('E', 'SE', 'NE')
-    wrigley_in  = is_wrigley and wind_label in ('W', 'SW', 'NW')
-
-    # Base wind factor by speed
-    if wind_mph >= 20:
-        wind_f = 1.07 if wrigley_out else (0.90 if wrigley_in else 1.03)
-    elif wind_mph >= 15:
-        wind_f = 1.05 if wrigley_out else (0.93 if wrigley_in else 1.01)
-    elif wind_mph >= 10:
-        wind_f = 1.02 if wrigley_out else (0.96 if wrigley_in else 1.00)
-    else:
-        wind_f = 1.0
-
-    # Temperature effect on ball carry
-    if temp_f >= 90:   temp_f_mod = 1.03
-    elif temp_f >= 80: temp_f_mod = 1.01
-    elif temp_f < 50:  temp_f_mod = 0.97
-    elif temp_f < 40:  temp_f_mod = 0.94
-    else:              temp_f_mod = 1.0
-
-    return max(0.88, min(1.15, wind_f * temp_f_mod))
-
-
-def weather_hr_factor(weather: dict, park_name: str) -> float:
-    """
-    Calculate HR rate multiplier from weather + park altitude.
-    Most critical weather factor in MLB modeling.
-    High altitude + warm + wind-out = significantly elevated HR rate.
+    HR wind factor per spec (most important HR swing factor):
+      blowing out 10-14mph: ×1.10  |  15-19: ×1.18  |  20+: ×1.28
+      blowing in  any speed: ×0.82
     """
     if not weather:
         return 1.0
     wind_mph = weather.get('wind_mph', 0)
     wind_dir = weather.get('wind_dir_deg', 0)
-    temp_f   = weather.get('temp_f', 72)
 
-    park_lower = park_name.lower()
-    park_data  = get_park_factors(park_name)
-    altitude   = park_data.get('altitude_ft', 100)
+    if _wind_in(wind_dir, park_name):
+        return 0.82
 
-    wind_label = wind_direction_label(wind_dir)
-    # Wind out = blowing to center/outfield = ball carries
-    is_wrigley      = 'wrigley' in park_lower
-    wind_out_dirs   = ('E', 'SE', 'NE') if is_wrigley else ('S', 'SE', 'SW')
-    wind_in_dirs    = ('W', 'SW', 'NW') if is_wrigley else ('N', 'NE', 'NW')
-    blowing_out = wind_label in wind_out_dirs
-    blowing_in  = wind_label in wind_in_dirs
+    if _wind_out(wind_dir, park_name):
+        if wind_mph >= 20:   return 1.28
+        if wind_mph >= 15:   return 1.18
+        if wind_mph >= 10:   return 1.10
 
-    # Wind component
-    if wind_mph >= 20:
-        wind_f = 1.10 if blowing_out else (0.88 if blowing_in else 1.02)
-    elif wind_mph >= 15:
-        wind_f = 1.06 if blowing_out else (0.92 if blowing_in else 1.01)
-    elif wind_mph >= 10:
-        wind_f = 1.03 if blowing_out else (0.96 if blowing_in else 1.00)
-    else:
-        wind_f = 1.0
-
-    # Temperature component — warm air is less dense, ball travels farther
-    if temp_f >= 90:   temp_f_mod = 1.06
-    elif temp_f >= 80: temp_f_mod = 1.03
-    elif temp_f >= 70: temp_f_mod = 1.01
-    elif temp_f < 50:  temp_f_mod = 0.94
-    elif temp_f < 40:  temp_f_mod = 0.90
-    else:              temp_f_mod = 1.0
-
-    # Altitude bonus on top of park factor (Coors gets double hit: park_factor + altitude)
-    if altitude >= 5000:   alt_f = 1.08   # Coors Field
-    elif altitude >= 1000: alt_f = 1.02
-    else:                  alt_f = 1.0
-
-    return max(0.82, min(1.20, wind_f * temp_f_mod * alt_f))
-
-
-def weather_walks_factor(weather: dict) -> float:
-    """
-    Cold weather increases walks — grip issues cause pitchers to miss zone.
-    Below 45F: +5% walks. Below 35F: +9% walks.
-    """
-    if not weather:
-        return 1.0
-    temp_f = weather.get('temp_f', 72)
-    if temp_f < 35:  return 1.09
-    if temp_f < 45:  return 1.05
-    if temp_f < 55:  return 1.02
     return 1.0
 
 
-# ── Park factor lookup ──────────────────────────────────────────────────────────
-
-def get_park_factors(venue_name: str) -> dict:
+def weather_hr_temp_factor(weather: dict) -> float:
     """
-    Case-insensitive substring match against MLB_PARK_FACTORS keys.
-    Falls back to 'default' if no match found.
+    HR temperature factor per spec:
+      < 45F: 0.82  |  45-55: 0.89  |  55-65: 0.95
+      65-75: 1.00  |  75-85: 1.06  |  > 85: 1.12
     """
-    name_lower = venue_name.lower().replace(' ', '_').replace("'", '').replace('.', '')
-    for key, factors in MLB_PARK_FACTORS.items():
-        if key == 'default':
-            continue
-        # Try both directions: key in name or name contains key words
-        key_words = key.replace('_', ' ')
-        if key in name_lower or key_words in venue_name.lower():
-            return factors
-    return MLB_PARK_FACTORS['default']
+    if not weather:
+        return 1.0
+    temp = weather.get('temp_f', 72)
+    if temp < 45:   return 0.82
+    if temp < 55:   return 0.89
+    if temp < 65:   return 0.95
+    if temp < 75:   return 1.00
+    if temp < 85:   return 1.06
+    return 1.12
 
 
-# ── Rolling averages ────────────────────────────────────────────────────────────
+def weather_cold_grip_factor(weather: dict) -> float:
+    """Cold weather increases walks — grip issues. Used in pitcher walks."""
+    if not weather:
+        return 1.0
+    temp = weather.get('temp_f', 72)
+    if temp < 45:   return 1.10
+    if temp < 55:   return 1.05
+    return 1.0
 
-def rolling_avg(rows: list[dict], col: str, n: int) -> float:
+
+def weather_scoring_factor(weather: dict, park_name: str = '') -> float:
+    """Combined wind+temp run environment factor for RBI/runs."""
+    if not weather:
+        return 1.0
+    wind_f = weather_tb_wind_factor(weather, park_name)
+    temp_f = weather_tb_temp_factor(weather)
+    return round(wind_f * temp_f, 4)
+
+
+# ── Rolling averages ─────────────────────────────────────────────────────────────
+
+def rolling_avg(rows: list, col: str, n: int) -> float:
     vals = [safe(r[col]) for r in rows[:n] if r.get(col) is not None]
     return sum(vals) / len(vals) if vals else 0.0
 
 
-def weighted_avg(rows: list[dict], col: str) -> float:
+def new_weighted_avg(rows: list, col: str) -> float:
     """
-    MLB weighted rolling average:
-      L10 × 0.40 + L20 × 0.30 + L30 × 0.20 + season × 0.10
-    Falls back gracefully when fewer games exist.
-    More games needed than NBA for statistical stability.
+    L5 × 0.35  +  L10 × 0.30  +  L20 × 0.20  +  season × 0.15
+    Gracefully degrades with fewer games.
     """
     n = len(rows)
     if n == 0:
         return 0.0
-
+    l5  = rolling_avg(rows, col, min(5,  n))
     l10 = rolling_avg(rows, col, min(10, n))
     l20 = rolling_avg(rows, col, min(20, n))
-    l30 = rolling_avg(rows, col, min(30, n))
     szn = rolling_avg(rows, col, n)
-
-    if n >= 30:
-        return l10 * 0.40 + l20 * 0.30 + l30 * 0.20 + szn * 0.10
-    elif n >= 20:
-        return l10 * 0.50 + l20 * 0.35 + szn * 0.15
-    elif n >= 10:
-        return l10 * 0.65 + szn * 0.35
-    else:
-        return szn
+    if n >= 20:
+        return l5 * 0.35 + l10 * 0.30 + l20 * 0.20 + szn * 0.15
+    if n >= 10:
+        return l5 * 0.45 + l10 * 0.35 + szn * 0.20
+    if n >= 5:
+        return l5 * 0.60 + szn * 0.40
+    return szn
 
 
-def home_away_avg(rows: list[dict], col: str, location: str) -> float:
-    filtered = [r for r in rows if r.get('home_away') == location]
-    return rolling_avg(filtered, col, len(filtered)) if filtered else 0.0
-
-
-def home_away_factor(logs: list[dict], col: str, location: str) -> float:
-    """Ratio of player's performance at given location vs overall baseline."""
-    home_a = home_away_avg(logs, col, 'home')
-    away_a = home_away_avg(logs, col, 'away')
-    baseline = (home_a + away_a) / 2 if (home_a + away_a) > 0 else 1.0
-    if baseline == 0:
+def home_away_factor_for_col(logs: list, col: str, tonight_location: str) -> float:
+    """
+    Ratio of player's home (or away) average vs overall season average.
+    Cap: 0.85 to 1.20.
+    """
+    home_vals = [safe(r[col]) for r in logs if r.get('home_away') == 'home' and r.get(col) is not None]
+    away_vals = [safe(r[col]) for r in logs if r.get('home_away') == 'away' and r.get(col) is not None]
+    all_vals  = [safe(r[col]) for r in logs if r.get(col) is not None]
+    if not all_vals:
         return 1.0
-    loc_avg = home_a if location == 'home' else away_a
-    if loc_avg == 0:
+    season_avg = sum(all_vals) / len(all_vals)
+    if season_avg <= 0:
         return 1.0
-    ratio = loc_avg / baseline
-    return max(0.82, min(1.18, ratio))
+    loc_vals = home_vals if tonight_location == 'home' else away_vals
+    if not loc_vals:
+        return 1.0
+    loc_avg = sum(loc_vals) / len(loc_vals)
+    return max(0.85, min(1.20, loc_avg / season_avg))
 
 
-# ── DB queries ──────────────────────────────────────────────────────────────────
+# ── DB query functions ───────────────────────────────────────────────────────────
 
-def get_batter_logs(conn, player_id: int, limit: int = 50) -> list[dict]:
-    """Most recent `limit` batter game logs for a player (MLB, current season)."""
+def get_batter_logs(conn, player_id: int, limit: int = 50) -> list:
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
             """SELECT * FROM player_game_logs
@@ -456,34 +462,20 @@ def get_batter_logs(conn, player_id: int, limit: int = 50) -> list[dict]:
         return cur.fetchall()
 
 
-def get_pitcher_logs(conn, player_id: int, limit: int = 30) -> list[dict]:
-    """Most recent `limit` pitcher game logs (starts preferred) — MLB current season."""
-    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute(
-            """SELECT * FROM player_game_logs
-               WHERE player_id = %s AND sport = 'MLB' AND season = %s
-                 AND minutes IS NOT NULL AND minutes > 0
-               ORDER BY game_date DESC LIMIT %s""",
-            (player_id, CURRENT_SEASON, limit)
-        )
-        return cur.fetchall()
-
-
-def get_sp_logs(conn, sp_player_id: int, limit: int = 10) -> list[dict]:
-    """Last `limit` starts for an opposing SP (only outings >= 1 IP)."""
+def get_sp_logs(conn, player_id: int, limit: int = 15) -> list:
+    """Pitcher game logs — only outings with >= 1 IP."""
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
             """SELECT * FROM player_game_logs
                WHERE player_id = %s AND sport = 'MLB' AND season = %s
                  AND minutes >= 1
                ORDER BY game_date DESC LIMIT %s""",
-            (sp_player_id, CURRENT_SEASON, limit)
+            (player_id, CURRENT_SEASON, limit)
         )
         return cur.fetchall()
 
 
-def get_team_logs(conn, team_name: str, limit: int = 20) -> list[dict]:
-    """Most recent team game logs for an MLB team."""
+def get_team_logs(conn, team_name: str, limit: int = 20) -> list:
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
             """SELECT * FROM team_game_logs
@@ -495,7 +487,6 @@ def get_team_logs(conn, team_name: str, limit: int = 20) -> list[dict]:
 
 
 def get_rest_days(conn, player_id: int, game_date: date) -> int:
-    """Days since the player's last MLB game."""
     with conn.cursor() as cur:
         cur.execute(
             """SELECT MAX(game_date) FROM player_game_logs
@@ -505,1333 +496,1534 @@ def get_rest_days(conn, player_id: int, game_date: date) -> int:
         row = cur.fetchone()
         if row and row[0]:
             return (game_date - row[0]).days
-        return 2  # assume normal rest if no history
+        return 5
 
 
-def get_todays_games(conn, game_date: date) -> list[dict]:
-    """
-    Fetch today's MLB schedule directly from the MLB Stats API via statsapi.
-    Returns a list of game dicts with gamePk, away/home team info, and venue.
-    """
+def get_todays_games(conn, game_date: date) -> list:
     try:
         schedule = statsapi.schedule(date=str(game_date), sportId=1)
     except Exception as exc:
         log.error(f'  statsapi.schedule() failed: {exc}')
         return []
-
     games = []
     for game in schedule:
-        game_pk   = game.get('game_id')
-        status    = game.get('status', '')
+        status = game.get('status', '')
         if status in ('Final', 'Cancelled', 'Postponed'):
             continue
         games.append({
-            'game_pk':          game_pk,
-            'away_team':        game.get('away_name', ''),
-            'away_team_id':     game.get('away_id', 0),
-            'home_team':        game.get('home_name', ''),
-            'home_team_id':     game.get('home_id', 0),
-            'venue_name':       game.get('venue_name', ''),
-            'venue_id':         game.get('venue_id', 0),
-            'game_time':        game.get('game_datetime', ''),
-            'status':           status,
+            'game_pk':       game.get('game_id'),
+            'away_team':     game.get('away_name', ''),
+            'away_team_id':  game.get('away_id', 0),
+            'home_team':     game.get('home_name', ''),
+            'home_team_id':  game.get('home_id', 0),
+            'venue_name':    game.get('venue_name', ''),
+            'game_time':     game.get('game_datetime', ''),
+            'status':        status,
         })
-
-    log.info(f'  Found {len(games)} MLB games scheduled for {game_date}')
+    log.info(f'  Found {len(games)} MLB games for {game_date}')
     return games
 
 
-# ── SP factor helpers ───────────────────────────────────────────────────────────
+# ── New v3 DB factor queries ─────────────────────────────────────────────────────
 
-def sp_strikeout_factor(sp_logs: list[dict]) -> float:
-    """
-    Opposing SP's K rate as a suppression factor for batter K props.
-    High SP K/9 => batters are projected down.
-    Falls back to 1.0 if SP has fewer than 5 starts.
-    """
-    if len(sp_logs) < 5:
-        return 1.0
-    # assists = strikeOuts in pitcher game logs
-    # minutes = inningsPitched
-    total_k  = sum(safe(r.get('assists', 0)) for r in sp_logs)
-    total_ip = sum(safe(r.get('minutes', 0)) for r in sp_logs)
-    if total_ip < 1:
-        return 1.0
-    sp_k9 = (total_k / total_ip) * 9
-    factor = sp_k9 / LEAGUE_AVG['k_per_9']
-    return max(0.75, min(1.30, factor))
+def get_batter_splits_db(conn, player_id: int) -> dict:
+    """Full row from player_splits for this batter."""
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            """SELECT * FROM player_splits
+               WHERE player_id = %s AND sport = 'MLB' AND season = %s
+               LIMIT 1""",
+            (player_id, CURRENT_SEASON)
+        )
+        row = cur.fetchone()
+        return dict(row) if row else {}
 
 
-def sp_hits_allowed_factor(sp_logs: list[dict]) -> float:
-    """
-    Opposing SP's hits-allowed rate as batter hits suppression factor.
-    Low SP BAA => batters project down on hits.
-    """
-    if len(sp_logs) < 5:
-        return 1.0
+def get_career_matchup_db(conn, pitcher_id: int, batter_id: int) -> dict:
+    """Career matchup row from pitcher_batter_matchups."""
+    if not pitcher_id or not batter_id:
+        return {}
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            """SELECT career_ab, career_hits, career_hr, career_bb,
+                      career_k, career_avg, career_ops
+               FROM pitcher_batter_matchups
+               WHERE pitcher_id = %s AND batter_id = %s
+               ORDER BY season DESC LIMIT 1""",
+            (pitcher_id, batter_id)
+        )
+        row = cur.fetchone()
+        return dict(row) if row else {}
+
+
+def get_arsenal_data(conn, pitcher_id: int) -> list:
+    """All pitch types from pitcher_arsenal for this pitcher."""
+    if not pitcher_id:
+        return []
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            """SELECT pitch_type, velocity, usage_pct, whiff_rate,
+                      ba_against, slg_against, spin_rate
+               FROM pitcher_arsenal
+               WHERE pitcher_id = %s
+               AND season = (SELECT MAX(season) FROM pitcher_arsenal WHERE pitcher_id = %s)""",
+            (pitcher_id, pitcher_id)
+        )
+        return cur.fetchall()
+
+
+def get_arsenal_weighted_whiff(arsenal: list) -> float:
+    """Compute usage-weighted whiff rate from arsenal rows. Returns None if no data."""
+    rows = [r for r in arsenal if r.get('usage_pct') and r.get('whiff_rate')]
+    if not rows:
+        return None
+    total_usage  = sum(safe(r['usage_pct']) for r in rows)
+    if total_usage <= 0:
+        return None
+    weighted = sum(safe(r['usage_pct']) * safe(r['whiff_rate']) for r in rows) / total_usage
+    return weighted
+
+
+def get_arsenal_primary_velocity(arsenal: list) -> Optional[float]:
+    """Velocity of the most-used pitch (primary pitch)."""
+    rows = [r for r in arsenal if r.get('usage_pct') and r.get('velocity')]
+    if not rows:
+        return None
+    primary = max(rows, key=lambda r: safe(r['usage_pct']))
+    return safe(primary['velocity'])
+
+
+def get_bullpen_tired(conn, team_id: int, game_date: date) -> bool:
+    """True if 2+ top relievers pitched 50+ pitches in the last 3 days."""
+    if not team_id:
+        return False
+    collected = str(game_date)
+    with conn.cursor() as cur:
+        cur.execute(
+            """SELECT pitches_last_3, innings_last_3
+               FROM bullpen_usage
+               WHERE team_id = %s AND collected_date = %s
+               ORDER BY pitches_last_3 DESC LIMIT 5""",
+            (team_id, collected)
+        )
+        rows = cur.fetchall()
+    if not rows:
+        return False
+    tired_count = sum(1 for r in rows if safe(r[0]) >= 50 or safe(r[1]) >= 2.0)
+    return tired_count >= 2
+
+
+def get_umpire_data(conn, game_pk: int) -> dict:
+    """K/BB/runs factors for tonight's home plate umpire."""
+    if not game_pk:
+        return {}
+    with conn.cursor() as cur:
+        cur.execute(
+            """SELECT ut.avg_k_per_game, ut.avg_bb_per_game,
+                      ut.avg_runs_per_game, ut.umpire_name
+               FROM game_umpires gu
+               JOIN umpire_tendencies ut ON gu.hp_umpire_id = ut.umpire_id
+               WHERE gu.game_pk = %s""",
+            (game_pk,)
+        )
+        row = cur.fetchone()
+    if not row or not row[0]:
+        return {}
+    return {
+        'k_per_game':    safe(row[0]),
+        'bb_per_game':   safe(row[1]),
+        'runs_per_game': safe(row[2]),
+        'ump_name':      row[3] or 'Unknown',
+    }
+
+
+def get_team_k_rate(conn, team_name: str) -> float:
+    """Team batter strikeout rate from recent game logs."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """SELECT SUM(turnovers), SUM(fg_att)
+               FROM player_game_logs
+               WHERE team ILIKE %s AND sport = 'MLB' AND season = %s
+                 AND fg_att > 0
+                 AND game_date >= CURRENT_DATE - INTERVAL '30 days'""",
+            (f'%{team_name[:3]}%', CURRENT_SEASON)
+        )
+        row = cur.fetchone()
+        if row and row[0] is not None and row[1] and float(row[1]) > 0:
+            return max(0.150, min(0.320, float(row[0]) / float(row[1])))
+    return LEAGUE_AVG['k_pct']
+
+
+def get_team_sb_allowed(conn, team_name: str) -> float:
+    """Approximate opponent SB allowed per game (for catcher factor)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """SELECT AVG(steals) FROM team_game_logs
+               WHERE opponent ILIKE %s AND sport = 'MLB' AND season = %s
+               LIMIT 20""",
+            (f'%{team_name[:3]}%', CURRENT_SEASON)
+        )
+        row = cur.fetchone()
+        if row and row[0]:
+            return max(0.0, float(row[0]))
+    return LEAGUE_AVG['sb_rate'] * 9  # fallback: league avg per game
+
+
+# ── SP stat helpers (computed from game logs) ────────────────────────────────────
+
+def compute_sp_season_h9(sp_logs: list) -> float:
     total_h  = sum(safe(r.get('fg_made', 0)) for r in sp_logs)
     total_ip = sum(safe(r.get('minutes', 0)) for r in sp_logs)
-    if total_ip < 1:
-        return 1.0
-    sp_h9 = (total_h / total_ip) * 9
-    factor = sp_h9 / LEAGUE_AVG['h_per_9']
-    return max(0.75, min(1.30, factor))
+    if total_ip <= 0:
+        return LEAGUE_AVG['h_per_9']
+    return max(1.0, min(15.0, total_h / total_ip * 9))
 
 
-def sp_hr_allowed_factor(sp_logs: list[dict]) -> float:
-    """Opposing SP's HR-per-9 vs league average as a batter HR multiplier."""
-    if len(sp_logs) < 5:
-        return 1.0
-    total_hr = sum(safe(r.get('three_made', 0)) for r in sp_logs)
-    total_ip = sum(safe(r.get('minutes', 0)) for r in sp_logs)
-    if total_ip < 1:
-        return 1.0
-    sp_hr9 = (total_hr / total_ip) * 9
-    factor = sp_hr9 / LEAGUE_AVG['hr_per_9']
-    return max(0.60, min(1.50, factor))
+def compute_sp_l5_h9(sp_logs: list) -> float:
+    recent = sp_logs[:min(5, len(sp_logs))]
+    return compute_sp_season_h9(recent)
 
 
-def sp_bb_allowed_factor(sp_logs: list[dict]) -> float:
-    """Opposing SP's BB-per-9 — high walk rate means more OBP for batters."""
-    if len(sp_logs) < 5:
-        return 1.0
-    total_bb = sum(safe(r.get('turnovers', 0)) for r in sp_logs)
-    total_ip = sum(safe(r.get('minutes', 0)) for r in sp_logs)
-    if total_ip < 1:
-        return 1.0
-    sp_bb9 = (total_bb / total_ip) * 9
-    factor = sp_bb9 / LEAGUE_AVG['bb_per_9']
-    return max(0.70, min(1.40, factor))
+def compute_sp_season_era(sp_logs: list) -> float:
+    return rolling_avg(sp_logs, 'offensive_rating', len(sp_logs)) if sp_logs else LEAGUE_AVG['era']
 
 
-def sp_era_factor(sp_logs: list[dict]) -> float:
-    """
-    Opposing SP quality as a multiplicative factor for run environment.
-    High ERA SP => more run-scoring environment for batting team.
-    """
-    if len(sp_logs) < 5:
-        return 1.0
-    # offensive_rating = ERA in pitcher logs
-    recent_era = rolling_avg(sp_logs, 'offensive_rating', min(5, len(sp_logs)))
-    if recent_era <= 0:
-        return 1.0
-    factor = recent_era / LEAGUE_AVG['era']
-    return max(0.70, min(1.50, factor))
+def compute_sp_l5_era(sp_logs: list) -> float:
+    return rolling_avg(sp_logs, 'offensive_rating', min(5, len(sp_logs))) if sp_logs else LEAGUE_AVG['era']
 
 
-def lineup_position_factor(lineup_pos: int) -> float:
-    """
-    Lineup position multiplier for RBI/runs projections.
-    Top of order (1-2): high runs, fewer RBI.
-    Middle (3-5): power/RBI.
-    Bottom (6-9): lower across the board.
-    """
-    if lineup_pos <= 2:   return 1.05  # lead off / 2-hole: see more PA, score runs
-    if lineup_pos <= 5:   return 1.10  # heart of order: RBI opportunities
-    if lineup_pos <= 7:   return 0.95
-    return 0.88  # 8-9 hole
+def compute_sp_season_whip(sp_logs: list) -> float:
+    return rolling_avg(sp_logs, 'true_shooting_pct', len(sp_logs)) if sp_logs else LEAGUE_AVG['whip']
 
 
-# ── BABIP / ISO computed from existing game log columns ─────────────────────────
+def compute_sp_k9(sp_logs: list, n: int = None) -> float:
+    rows = sp_logs[:n] if n else sp_logs
+    total_k  = sum(safe(r.get('assists', 0)) for r in rows)
+    total_ip = sum(safe(r.get('minutes', 0)) for r in rows)
+    if total_ip <= 0:
+        return LEAGUE_AVG['k_per_9']
+    return max(0.0, total_k / total_ip * 9)
 
-def compute_babip(logs: list[dict]) -> float:
-    """
-    BABIP = (H - HR) / (AB - K - HR)
-    Uses game log column mappings:
-      fg_made   = hits
-      three_made = home_runs
-      fg_att    = at_bats
-      turnovers = strikeouts (batter K)
-    """
-    total_h  = sum(safe(r.get('fg_made', 0)) for r in logs)
-    total_hr = sum(safe(r.get('three_made', 0)) for r in logs)
-    total_ab = sum(safe(r.get('fg_att', 0)) for r in logs)
-    total_k  = sum(safe(r.get('turnovers', 0)) for r in logs)
+
+def compute_sp_bb9(sp_logs: list, n: int = None) -> float:
+    rows = sp_logs[:n] if n else sp_logs
+    total_bb = sum(safe(r.get('turnovers', 0)) for r in rows)
+    total_ip = sum(safe(r.get('minutes', 0)) for r in rows)
+    if total_ip <= 0:
+        return LEAGUE_AVG['bb_per_9']
+    return max(0.0, total_bb / total_ip * 9)
+
+
+def compute_sp_hr9(sp_logs: list, n: int = None) -> float:
+    rows = sp_logs[:n] if n else sp_logs
+    total_hr = sum(safe(r.get('three_made', 0)) for r in rows)
+    total_ip = sum(safe(r.get('minutes', 0)) for r in rows)
+    if total_ip <= 0:
+        return LEAGUE_AVG['hr_per_9']
+    return max(0.0, total_hr / total_ip * 9)
+
+
+def compute_sp_fip(sp_logs: list) -> float:
+    """FIP = (13×HR + 3×BB − 2×K) / IP + 3.10"""
+    recent = sp_logs[:min(10, len(sp_logs))]
+    if not recent:
+        return LEAGUE_AVG['fip']
+    total_hr = sum(safe(r.get('three_made', 0)) for r in recent)
+    total_bb = sum(safe(r.get('turnovers', 0)) for r in recent)
+    total_k  = sum(safe(r.get('assists', 0)) for r in recent)
+    total_ip = sum(safe(r.get('minutes', 0)) for r in recent)
+    if total_ip <= 0:
+        return LEAGUE_AVG['fip']
+    return max(2.0, min(7.0, (13 * total_hr + 3 * total_bb - 2 * total_k) / total_ip + 3.10))
+
+
+def compute_sp_avg_ip(sp_logs: list, n: int = 5) -> float:
+    recent = sp_logs[:min(n, len(sp_logs))]
+    if not recent:
+        return 5.0
+    avg = rolling_avg(recent, 'minutes', len(recent))
+    return avg if avg > 0 else 5.0
+
+
+def compute_days_rest(sp_logs: list, game_date: date) -> int:
+    if not sp_logs:
+        return 5
+    last_date = sp_logs[0].get('game_date')
+    if not last_date:
+        return 5
+    try:
+        return max(0, (game_date - last_date).days)
+    except Exception:
+        return 5
+
+
+def compute_babip(logs: list, n: int = 20) -> float:
+    """BABIP = (H - HR) / (AB - K - HR)"""
+    recent   = logs[:min(n, len(logs))]
+    total_h  = sum(safe(r.get('fg_made', 0)) for r in recent)
+    total_hr = sum(safe(r.get('three_made', 0)) for r in recent)
+    total_ab = sum(safe(r.get('fg_att', 0)) for r in recent)
+    total_k  = sum(safe(r.get('turnovers', 0)) for r in recent)
     denom = total_ab - total_k - total_hr
     if denom <= 0:
         return LEAGUE_AVG['babip']
-    babip = (total_h - total_hr) / denom
-    return max(0.200, min(0.450, babip))
+    return max(0.200, min(0.450, (total_h - total_hr) / denom))
 
 
-def compute_iso(logs: list[dict]) -> float:
-    """
-    ISO = (2B + 2*3B + 3*HR) / AB
-    Uses game log column mappings:
-      off_reb    = doubles
-      def_reb    = triples
-      three_made = home_runs
-      fg_att     = at_bats
-    """
+def compute_iso(logs: list, n: int = 20) -> float:
+    """ISO = (2B + 2×3B + 3×HR) / AB"""
+    recent   = logs[:min(n, len(logs))]
+    total_2b = sum(safe(r.get('off_reb', 0)) for r in recent)
+    total_3b = sum(safe(r.get('def_reb', 0)) for r in recent)
+    total_hr = sum(safe(r.get('three_made', 0)) for r in recent)
+    total_ab = sum(safe(r.get('fg_att', 0)) for r in recent)
+    if total_ab <= 0:
+        return LEAGUE_AVG['iso']
+    return max(0.050, min(0.400, (total_2b + 2 * total_3b + 3 * total_hr) / total_ab))
+
+
+def compute_obp(logs: list, n: int = 20) -> float:
+    """OBP = (H + BB) / (AB + BB)"""
+    recent   = logs[:min(n, len(logs))]
+    total_h  = sum(safe(r.get('fg_made', 0)) for r in recent)
+    total_bb = sum(safe(r.get('fouls', 0)) for r in recent)
+    total_ab = sum(safe(r.get('fg_att', 0)) for r in recent)
+    denom = total_ab + total_bb
+    if denom <= 0:
+        return LEAGUE_AVG['obp']
+    return max(0.200, min(0.500, (total_h + total_bb) / denom))
+
+
+def compute_season_ba(logs: list) -> float:
+    total_h  = sum(safe(r.get('fg_made', 0)) for r in logs)
+    total_ab = sum(safe(r.get('fg_att', 0)) for r in logs)
+    if total_ab <= 0:
+        return LEAGUE_AVG['ba']
+    return max(0.100, min(0.450, total_h / total_ab))
+
+
+def compute_season_slg(logs: list) -> float:
+    total_h  = sum(safe(r.get('fg_made', 0)) for r in logs)
     total_2b = sum(safe(r.get('off_reb', 0)) for r in logs)
     total_3b = sum(safe(r.get('def_reb', 0)) for r in logs)
     total_hr = sum(safe(r.get('three_made', 0)) for r in logs)
     total_ab = sum(safe(r.get('fg_att', 0)) for r in logs)
     if total_ab <= 0:
-        return LEAGUE_AVG['iso']
-    iso = (total_2b + 2 * total_3b + 3 * total_hr) / total_ab
-    return max(0.050, min(0.350, iso))
+        return LEAGUE_AVG['slg']
+    tb = total_h + total_2b + 2 * total_3b + 3 * total_hr
+    return max(0.100, min(0.900, tb / total_ab))
 
 
-# ── New helper functions (v2.0 tuning) ──────────────────────────────────────────
-
-def compute_ba_trend_factor(logs: list[dict]) -> float:
-    """L10 BA vs season BA — most important batter factor."""
-    if len(logs) < 5:
-        return 1.0
-    l10_h  = rolling_avg(logs, 'fg_made', min(10, len(logs)))
-    l10_ab = rolling_avg(logs, 'fg_att',  min(10, len(logs)))
-    szn_h  = rolling_avg(logs, 'fg_made', len(logs))
-    szn_ab = rolling_avg(logs, 'fg_att',  len(logs))
-    l10_ba = l10_h / l10_ab if l10_ab > 0 else 0
-    szn_ba = szn_h / szn_ab if szn_ab > 0 else 0
-    if szn_ba <= 0:
-        return 1.0
-    ratio = l10_ba / szn_ba
-    return max(0.75, min(1.30, ratio))
-
-
-def compute_contact_rate_factor(logs: list[dict]) -> float:
-    """(1 - K_pct) / (1 - league_avg_K_pct). Uses turnovers=K, fg_att=AB."""
-    recent = logs[:min(20, len(logs))]
-    total_k  = sum(safe(r.get('turnovers', 0)) for r in recent)
-    total_ab = sum(safe(r.get('fg_att', 0)) for r in recent)
+def compute_season_hr_rate(logs: list) -> float:
+    total_hr = sum(safe(r.get('three_made', 0)) for r in logs)
+    total_ab = sum(safe(r.get('fg_att', 0)) for r in logs)
     if total_ab <= 0:
+        return LEAGUE_AVG['hr_per_game']
+    return max(0.0, min(0.200, total_hr / total_ab))
+
+
+# ── Factor helper functions ──────────────────────────────────────────────────────
+
+def lineup_pa_factor(pos: int, confirmed: bool) -> float:
+    """Plate-appearance rate by lineup position (per spec)."""
+    if not confirmed:
+        return 1.00
+    if pos == 1:              return 1.12
+    if pos == 2:              return 1.08
+    if pos == 3:              return 1.05
+    if pos == 4:              return 1.03
+    if pos == 5:              return 1.00
+    if pos in (6, 7):         return 0.96
+    return 0.90  # 8-9
+
+
+def lineup_rbi_factor(pos: int) -> float:
+    """RBI opportunity weight by lineup position (per spec)."""
+    if pos == 4:              return 1.25
+    if pos == 3:              return 1.20
+    if pos == 5:              return 1.15
+    if pos in (6, 7):         return 0.95
+    if pos in (8, 9):         return 0.85
+    return 0.80  # 1-2 leadoff
+
+
+def lineup_runs_factor(pos: int) -> float:
+    """Runs-scored weight by lineup position (per spec)."""
+    if pos == 1:              return 1.32
+    if pos == 2:              return 1.18
+    if pos == 3:              return 1.08
+    if pos in (4, 5):         return 1.00
+    if pos in (6, 7, 8):      return 0.88
+    return 0.78  # 9
+
+
+def lineup_sb_factor(pos: int) -> float:
+    """SB likelihood by lineup position (per spec)."""
+    if pos == 1:              return 1.20
+    if pos == 2:              return 1.10
+    return 0.80
+
+
+def babip_regression_f(logs: list) -> float:
+    """Per spec: BABIP regression factor from last-20 games."""
+    babip = compute_babip(logs, 20)
+    if babip > 0.350:   return 0.93
+    if babip > 0.320:   return 0.97
+    if babip < 0.260:   return 1.07
+    if babip < 0.280:   return 1.03
+    return 1.00
+
+
+def platoon_hits_f(splits: dict, sp_hand: str, season_avg: float) -> float:
+    """vs_rhp_avg or vs_lhp_avg / season_avg. Cap 0.75-1.35."""
+    if not splits or season_avg <= 0:
         return 1.0
-    player_k_pct = total_k / total_ab
-    league_k_pct = LEAGUE_AVG['k_pct']  # 0.224
-    numerator   = max(0.1, 1.0 - player_k_pct)
-    denominator = max(0.1, 1.0 - league_k_pct)
-    return max(0.80, min(1.25, numerator / denominator))
-
-
-def compute_obp_factor(logs: list[dict]) -> float:
-    """Player OBP (H + BB) / (AB + BB) vs league avg 0.317."""
-    recent = logs[:min(20, len(logs))]
-    total_h  = sum(safe(r.get('fg_made', 0)) for r in recent)
-    total_bb = sum(safe(r.get('fouls', 0)) for r in recent)   # fouls = BB
-    total_ab = sum(safe(r.get('fg_att', 0)) for r in recent)
-    denom = total_ab + total_bb
-    if denom <= 0:
+    key = 'vs_lhp_avg' if sp_hand == 'L' else 'vs_rhp_avg'
+    split_val = splits.get(key)
+    if not split_val or float(split_val) <= 0:
         return 1.0
-    player_obp = (total_h + total_bb) / denom
-    return max(0.75, min(1.35, player_obp / LEAGUE_AVG['obp']))
+    return max(0.75, min(1.35, float(split_val) / season_avg))
 
 
-def compute_hr_rate_factor(logs: list[dict]) -> float:
-    """Player HR/AB vs league avg (0.034)."""
-    recent = logs[:min(30, len(logs))]
-    total_hr = sum(safe(r.get('three_made', 0)) for r in recent)
-    total_ab = sum(safe(r.get('fg_att', 0)) for r in recent)
-    if total_ab <= 0:
+def platoon_slg_f(splits: dict, sp_hand: str, season_slg: float) -> float:
+    """vs_rhp_slg or vs_lhp_slg / season_slg. Cap 0.70-1.40."""
+    if not splits or season_slg <= 0:
         return 1.0
-    player_hr_rate = total_hr / total_ab
-    league_hr_per_ab = 0.034
-    return max(0.20, min(2.50, player_hr_rate / league_hr_per_ab))
-
-
-def compute_sp_fip(sp_logs: list[dict]) -> float:
-    """FIP = (13xHR + 3xBB - 2xK) / IP + 3.10"""
-    recent = sp_logs[:min(10, len(sp_logs))]
-    if not recent:
-        return LEAGUE_AVG['fip']
-    total_hr = sum(safe(r.get('three_made', 0)) for r in recent)  # three_made = HR allowed
-    total_bb = sum(safe(r.get('turnovers', 0)) for r in recent)   # turnovers = BB allowed
-    total_k  = sum(safe(r.get('assists', 0)) for r in recent)     # assists = K
-    total_ip = sum(safe(r.get('minutes', 0)) for r in recent)     # minutes = IP
-    if total_ip <= 0:
-        return LEAGUE_AVG['fip']
-    fip = (13 * total_hr + 3 * total_bb - 2 * total_k) / total_ip + 3.10
-    return max(2.0, min(7.0, fip))
-
-
-def fip_vs_era_factor(sp_logs: list[dict]) -> float:
-    """
-    FIP vs ERA: if FIP < ERA by 0.5+ SP is outperforming (regression up => ERA goes down).
-    Returns ERA multiplier: < 1.0 means SP ERA likely to drop.
-    """
-    if len(sp_logs) < 5:
+    key = 'vs_lhp_slg' if sp_hand == 'L' else 'vs_rhp_slg'
+    split_val = splits.get(key)
+    if not split_val or float(split_val) <= 0:
         return 1.0
-    fip = compute_sp_fip(sp_logs)
-    recent_era = rolling_avg(sp_logs, 'offensive_rating', min(5, len(sp_logs)))
-    if recent_era <= 0:
+    return max(0.70, min(1.40, float(split_val) / season_slg))
+
+
+def platoon_hr_f(splits: dict, sp_hand: str, season_hr_rate: float) -> float:
+    """vs_rhp_hr_rate or vs_lhp_hr_rate / season_hr_rate. Cap 0.50-2.00."""
+    if not splits or season_hr_rate <= 0:
         return 1.0
-    diff = fip - recent_era  # positive = FIP higher than ERA (regression up)
-    if diff > 0.50:
-        f = 1.07   # SP ERA will rise — they've been lucky
-    elif diff < -0.50:
-        f = 0.93   # SP ERA will fall — they've been unlucky
-    else:
-        f = 1.0 + diff * 0.14  # linear in between
-    return max(0.85, min(1.15, f))
-
-
-def compute_sp_k9_trend(sp_logs: list[dict]) -> float:
-    """L5 K/9 vs season K/9 — rising or falling strikeout stuff."""
-    if len(sp_logs) < 5:
+    key = 'vs_lhp_hr_rate' if sp_hand == 'L' else 'vs_rhp_hr_rate'
+    split_val = splits.get(key)
+    if not split_val or float(split_val) <= 0:
         return 1.0
-    def k9(rows):
-        k  = sum(safe(r.get('assists',  0)) for r in rows)
-        ip = sum(safe(r.get('minutes',  0)) for r in rows)
-        return (k / ip * 9) if ip > 0 else 0
-    l5_k9  = k9(sp_logs[:5])
-    szn_k9 = k9(sp_logs)
-    if szn_k9 <= 0:
+    return max(0.50, min(2.00, float(split_val) / season_hr_rate))
+
+
+def day_night_f(splits: dict, is_day_game: bool, season_avg: float) -> float:
+    """day_avg or night_avg / season_avg. Cap 0.85-1.15."""
+    if not splits or season_avg <= 0:
         return 1.0
-    return max(0.70, min(1.30, l5_k9 / szn_k9))
-
-
-def compute_sp_bb9_trend(sp_logs: list[dict]) -> float:
-    """L5 BB/9 vs season BB/9."""
-    if len(sp_logs) < 5:
+    key = 'day_avg' if is_day_game else 'night_avg'
+    split_val = splits.get(key)
+    if not split_val or float(split_val) <= 0:
         return 1.0
-    def bb9(rows):
-        bb = sum(safe(r.get('turnovers', 0)) for r in rows)
-        ip = sum(safe(r.get('minutes',   0)) for r in rows)
-        return (bb / ip * 9) if ip > 0 else 0
-    l5  = bb9(sp_logs[:5])
-    szn = bb9(sp_logs)
-    if szn <= 0:
+    return max(0.85, min(1.15, float(split_val) / season_avg))
+
+
+def risp_rbi_f(splits: dict) -> float:
+    """risp_rbi_per_pa / 0.085. Falls back to risp_avg / 0.240. Cap 0.65-1.50."""
+    if not splits:
         return 1.0
-    ratio = l5 / szn
-    # Higher BB/9 recently = worse command = more walks
-    return max(0.70, min(1.40, ratio))
-
-
-def compute_sp_hr9(sp_logs: list[dict]) -> float:
-    """SP HR/9 vs league avg 1.20."""
-    recent = sp_logs[:min(10, len(sp_logs))]
-    if not recent:
-        return LEAGUE_AVG['hr_per_9']
-    total_hr = sum(safe(r.get('three_made', 0)) for r in recent)
-    total_ip = sum(safe(r.get('minutes', 0)) for r in recent)
-    if total_ip <= 0:
-        return LEAGUE_AVG['hr_per_9']
-    return max(0.20, min(3.0, total_hr / total_ip * 9))
-
-
-def compute_days_rest(sp_logs: list[dict], game_date) -> int:
-    """Days since SP's last appearance."""
-    if not sp_logs:
-        return 5
-    last_date = sp_logs[0].get('game_date')
-    if last_date is None:
-        return 5
-    if hasattr(last_date, 'days'):
-        return 5
-    try:
-        delta = (game_date - last_date).days
-        return max(0, delta)
-    except Exception:
-        return 5
-
-
-def days_rest_factor_k(days: int) -> float:
-    """Rest effect on strikeouts."""
-    if days <= 3:  return 0.90   # short rest
-    if days == 4:  return 0.97
-    if days == 5:  return 1.00
-    return 0.98                   # 6+ days: slight rust
-
-
-def days_rest_factor_bb(days: int) -> float:
-    """Rest effect on walks — command degrades more on short rest."""
-    if days <= 3:  return 1.15
-    if days == 4:  return 1.05
-    if days == 5:  return 1.00
-    return 1.02
-
-
-def days_rest_factor_er(days: int) -> float:
-    """Rest effect on earned runs."""
-    if days <= 3:  return 1.08
-    if days == 4:  return 1.03
-    if days == 5:  return 1.00
-    return 1.02
-
-
-def get_team_obp_real(conn, team_name: str) -> float:
-    """
-    Get team OBP from team_game_logs using runs_scored as proxy.
-    """
-    with conn.cursor() as cur:
-        try:
-            cur.execute("""
-                SELECT AVG(points_scored::float) as avg_runs
-                FROM team_game_logs
-                WHERE team_name ILIKE %s AND sport = 'MLB'
-                  AND season >= '2024'
-                ORDER BY game_date DESC
-                LIMIT 20
-            """, (f'%{team_name}%',))
-            row = cur.fetchone()
-            if row and row[0]:
-                avg_runs = float(row[0])
-                obp = LEAGUE_AVG['obp'] + (avg_runs - LEAGUE_AVG['team_runs_per_game']) * (0.01 / 0.3)
-                return max(0.270, min(0.370, obp))
-        except Exception:
-            pass
-    return LEAGUE_AVG['obp']
-
-
-def compute_lineup_pa_factor(lineup_pos: int, lineup_confirmed: bool) -> float:
-    """Plate appearance rate by lineup position."""
-    if not lineup_confirmed:
-        return 1.00  # unknown position — don't assume
-    if lineup_pos == 1:   return 1.12
-    if lineup_pos == 2:   return 1.08
-    if lineup_pos <= 5:   return 1.05
-    if lineup_pos <= 8:   return 0.97
-    return 0.90  # 9-hole
-
-
-def compute_sb_rate_factor(logs: list[dict]) -> float:
-    """SB/game vs league avg 0.09. Only meaningful for speedsters."""
-    recent = logs[:min(30, len(logs))]
-    if not recent:
-        return 1.0
-    total_sb = sum(safe(r.get('steals', 0)) for r in recent)
-    avg_sb = total_sb / len(recent)
-    return max(0.10, min(5.0, avg_sb / LEAGUE_AVG['sb_per_game']))
-
-
-def _sp_h9_trend(sp_logs: list[dict]) -> float:
-    """SP H/9 last 5 starts vs season H/9."""
-    if len(sp_logs) < 5:
-        return 1.0
-    def h9(rows):
-        h  = sum(safe(r.get('fg_made',  0)) for r in rows)  # fg_made = hits allowed
-        ip = sum(safe(r.get('minutes',   0)) for r in rows)
-        return (h / ip * 9) if ip > 0 else 0
-    l5  = h9(sp_logs[:5])
-    szn = h9(sp_logs)
-    if szn <= 0:
-        return 1.0
-    # More hits allowed recently = better for batter
-    return max(0.80, min(1.25, l5 / szn))
-
-
-def _wind_direction_tb_factor(weather: dict, park: dict) -> float:
-    """Wind direction effect on total bases."""
-    if not weather:
-        return 1.0
-    wind_mph = weather.get('wind_mph', 0)
-    wind_dir = weather.get('wind_dir_deg', 180)
-    label = wind_direction_label(wind_dir)
-    # Out = blowing toward outfield (S/SE/SW for most parks)
-    blowing_out = label in ('S', 'SW', 'SE')
-    blowing_in  = label in ('N', 'NE', 'NW')
-    if wind_mph >= 20:
-        f = 1.12 if blowing_out else (0.90 if blowing_in else 1.03)
-    elif wind_mph >= 15:
-        f = 1.08 if blowing_out else (0.93 if blowing_in else 1.01)
-    elif wind_mph >= 10:
-        f = 1.04 if blowing_out else (0.97 if blowing_in else 1.00)
-    else:
-        f = 1.0
-    return max(0.88, min(1.18, f))
-
-
-def _temperature_tb_factor(weather: dict) -> float:
-    """Temperature effect on ball carry / total bases."""
-    if not weather:
-        return 1.0
-    temp = weather.get('temp_f', 72)
-    if temp < 40:  return 0.93
-    if temp < 50:  return 0.96
-    if temp < 65:  return 0.98
-    if temp >= 85: return 1.05
-    if temp >= 75: return 1.02
+    # Prefer risp_rbi_per_pa if available; otherwise use risp_avg as proxy
+    risp_rbi = splits.get('risp_rbi_per_pa')
+    if risp_rbi and float(risp_rbi) > 0:
+        return max(0.65, min(1.50, float(risp_rbi) / LEAGUE_AVG['risp_rbi_per_pa']))
+    risp_avg = splits.get('risp_avg')
+    if risp_avg and float(risp_avg) > 0:
+        return max(0.65, min(1.50, float(risp_avg) / 0.240))
     return 1.0
 
 
-def _sp_whip_factor(sp_logs: list[dict]) -> float:
-    """league_avg_WHIP / SP WHIP last 5 — high WHIP = more runners."""
+def sp_quality_f(sp_logs: list) -> float:
+    """league_avg_H9 / sp_season_H9 → bad pitcher > 1.0 (good for batters). Cap 0.70-1.40."""
+    if len(sp_logs) < 3:
+        return 1.0
+    sp_h9 = compute_sp_season_h9(sp_logs)
+    if sp_h9 <= 0:
+        return 1.0
+    return max(0.70, min(1.40, LEAGUE_AVG['h_per_9'] / sp_h9))
+
+
+def sp_recent_form_f(sp_logs: list) -> float:
+    """sp_quality × (L5_H9 / season_H9). Cap 0.80-1.20."""
     if len(sp_logs) < 5:
         return 1.0
-    recent_whip = rolling_avg(sp_logs, 'true_shooting_pct', min(5, len(sp_logs)))  # true_shooting_pct = WHIP
-    if recent_whip <= 0:
+    szn_h9 = compute_sp_season_h9(sp_logs)
+    l5_h9  = compute_sp_l5_h9(sp_logs)
+    if szn_h9 <= 0:
         return 1.0
-    factor = LEAGUE_AVG['whip'] / recent_whip
-    return max(0.70, min(1.40, factor))
+    q_f    = sp_quality_f(sp_logs)
+    trend  = max(0.70, min(1.40, l5_h9 / szn_h9))
+    return max(0.80, min(1.20, q_f * trend))
 
 
-def _compute_bb9(rows: list[dict]) -> float:
-    bb = sum(safe(r.get('turnovers', 0)) for r in rows)
-    ip = sum(safe(r.get('minutes', 0)) for r in rows)
-    return (bb / ip * 9) if ip > 0 else 0
+def career_matchup_hits_f(matchup: dict) -> float:
+    """
+    career_avg / 0.248, weighted by AB sample. Cap 0.65-1.50.
+    < 10 AB → 1.0 (ignore)
+    10-19 AB → 50% weight
+    20+ AB → full weight
+    """
+    ab  = int(safe(matchup.get('career_ab', 0)))
+    avg = safe(matchup.get('career_avg', 0))
+    if ab < 10 or avg <= 0:
+        return 1.0
+    raw = max(0.65, min(1.50, avg / LEAGUE_AVG['baa']))
+    weight = 1.0 if ab >= 20 else 0.5
+    return 1.0 + (raw - 1.0) * weight
 
 
-def get_team_k_rate_from_logs(team_logs: list[dict]) -> float:
-    """Compute team batter K rate from team_game_logs if turnovers/fg_att available."""
-    total_k = sum(safe(r.get('turnovers', 0) or r.get('strikeouts', 0)) for r in team_logs)
-    total_ab = sum(safe(r.get('fg_att', 0) or r.get('at_bats', 0)) for r in team_logs)
-    if total_ab > 0:
-        return max(0.150, min(0.320, total_k / total_ab))
-    # If columns not available, use points_scored as rough proxy
-    avg_runs = sum(safe(r.get('points_scored', 4.6)) for r in team_logs) / len(team_logs) if team_logs else 4.6
-    # High scoring = low K% (contact hitters), roughly
-    return max(0.180, min(0.290, 0.233 + (4.6 - avg_runs) * 0.01))
+def career_matchup_ops_f(matchup: dict) -> float:
+    """career_ops / 0.728. Cap 0.65-1.50. Used for TB."""
+    ab  = int(safe(matchup.get('career_ab', 0)))
+    ops = safe(matchup.get('career_ops', 0))
+    if ab < 20 or ops <= 0:
+        return 1.0
+    return max(0.65, min(1.50, ops / LEAGUE_AVG['ops']))
 
 
-# ── Batter projection functions ─────────────────────────────────────────────────
+def career_matchup_hr_f(matchup: dict, season_hr_rate: float) -> float:
+    """(career_hr / career_ab) vs season_hr_rate. Cap 0.50-2.00."""
+    ab       = int(safe(matchup.get('career_ab', 0)))
+    career_hr = safe(matchup.get('career_hr', 0))
+    if ab < 20 or season_hr_rate <= 0:
+        return 1.0
+    career_hr_rate = career_hr / ab
+    return max(0.50, min(2.00, career_hr_rate / season_hr_rate))
+
+
+def sp_hr9_factor(sp_logs: list) -> float:
+    """sp_hr9 / 1.35 → fly-ball pitcher > 1.0. Cap 0.60-1.80."""
+    if len(sp_logs) < 3:
+        return 1.0
+    sp_hr9 = compute_sp_hr9(sp_logs)
+    return max(0.60, min(1.80, sp_hr9 / LEAGUE_AVG['hr_per_9']))
+
+
+def sp_whip_rbi_f(sp_logs: list) -> float:
+    """
+    SP WHIP as RBI factor: high WHIP = more runners = more RBI chances.
+    Per spec: > 1.50 → 1.12  |  < 1.10 → 0.88  |  else ratio. Cap 0.80-1.25.
+    """
+    if len(sp_logs) < 3:
+        return 1.0
+    whip = compute_sp_season_whip(sp_logs)
+    if whip <= 0:
+        return 1.0
+    if whip > 1.50:
+        return min(1.25, 1.12 * (whip / 1.50))
+    if whip < 1.10:
+        return max(0.80, 0.88 * (whip / 1.10))
+    return max(0.80, min(1.25, whip / LEAGUE_AVG['whip']))
+
+
+def fip_vs_era_f(sp_logs: list) -> float:
+    """
+    FIP vs ERA regression factor.
+    FIP < ERA − 0.75 → ×0.87 (ERA will drop — been lucky)
+    FIP < ERA − 0.40 → ×0.93
+    FIP > ERA + 0.75 → ×1.10 (ERA will rise)
+    FIP > ERA + 0.40 → ×1.06
+    """
+    if len(sp_logs) < 5:
+        return 1.0
+    fip  = compute_sp_fip(sp_logs)
+    era  = compute_sp_l5_era(sp_logs)
+    if era <= 0:
+        return 1.0
+    diff = fip - era   # positive = FIP higher than ERA
+    if diff > 0.75:    return 1.10
+    if diff > 0.40:    return 1.06
+    if diff < -0.75:   return 0.87
+    if diff < -0.40:   return 0.93
+    return max(0.85, min(1.15, 1.0 + diff * 0.14))
+
+
+def arsenal_whiff_k_f(whiff_rate: Optional[float]) -> float:
+    """weighted_whiff / 0.245. Cap 0.65-1.45."""
+    if whiff_rate is None:
+        return 1.0
+    return max(0.65, min(1.45, whiff_rate / 0.245))
+
+
+def arsenal_fb_proxy_f(whiff_rate: Optional[float]) -> float:
+    """
+    Contact vs fly-ball pitcher proxy from whiff rate.
+    Low whiff (<0.20) = contact pitcher = more balls in play, more TB/HR risk.
+    High whiff (>0.30) = strikeout pitcher = fewer balls in play.
+    """
+    if whiff_rate is None:
+        return 1.0
+    if whiff_rate > 0.30:   return 0.90
+    if whiff_rate < 0.20:   return 1.12
+    return 1.00
+
+
+def arsenal_tb_f(whiff_rate: Optional[float]) -> float:
+    """TB arsenal factor: high whiff = 0.95 (fewer balls), low = 1.05."""
+    if whiff_rate is None:
+        return 1.0
+    if whiff_rate > 0.30:   return 0.95
+    if whiff_rate < 0.20:   return 1.05
+    return 1.00
+
+
+def arsenal_gb_proxy_f(whiff_rate: Optional[float]) -> float:
+    """ER ground-ball proxy: low whiff = GB pitcher = fewer HR."""
+    if whiff_rate is None:
+        return 1.0
+    if whiff_rate > 0.30:   return 1.08   # fly-ball → more HR risk
+    if whiff_rate < 0.20:   return 0.90   # GB → fewer HR
+    return 1.00
+
+
+def arsenal_velo_trend_f(arsenal: list) -> float:
+    """
+    Primary pitch velocity vs league-average per pitch type.
+    Rough league avgs: FF=94, SI=93, CH=86, SL=86, CU=79, KC=82.
+    −1.5 mph below → ×0.91 (fatigue)  |  +1.0 above → ×1.05
+    """
+    PITCH_AVG_VELO = {'FF': 94.0, 'FT': 93.0, 'SI': 93.0, 'FC': 89.0,
+                      'CH': 86.0, 'FS': 85.0, 'SL': 86.0, 'ST': 84.0,
+                      'CU': 79.0, 'KC': 82.0, 'SV': 82.0, 'EP': 72.0}
+    if not arsenal:
+        return 1.0
+    # Get primary pitch
+    rows = [r for r in arsenal if r.get('usage_pct') and r.get('velocity')]
+    if not rows:
+        return 1.0
+    primary = max(rows, key=lambda r: safe(r['usage_pct']))
+    ptype = primary.get('pitch_type', '')
+    velo  = safe(primary.get('velocity', 0))
+    avg   = PITCH_AVG_VELO.get(ptype, 88.0)
+    if velo <= 0 or avg <= 0:
+        return 1.0
+    diff = velo - avg
+    if diff < -1.5:   return 0.91
+    if diff > 1.0:    return 1.05
+    return 1.00
+
+
+def umpire_k_f(ump: dict) -> float:
+    """ump K/game / 16.2. Cap 0.88-1.14."""
+    k = ump.get('k_per_game', 0)
+    if k <= 0:
+        return 1.0
+    return max(0.88, min(1.14, k / LEAGUE_AVG['k_per_game']))
+
+
+def umpire_bb_f(ump: dict) -> float:
+    """ump BB/game / 3.35. Cap 0.88-1.15."""
+    bb = ump.get('bb_per_game', 0)
+    if bb <= 0:
+        return 1.0
+    return max(0.88, min(1.15, bb / LEAGUE_AVG['bb_per_game_team']))
+
+
+def umpire_runs_f(ump: dict) -> float:
+    """ump runs/game / 8.8 (combined). Cap 0.90-1.12."""
+    runs = ump.get('runs_per_game', 0)
+    if runs <= 0:
+        return 1.0
+    return max(0.90, min(1.12, runs / LEAGUE_AVG['game_total']))
+
+
+def days_rest_k_f(days: int) -> float:
+    if days <= 3:   return 0.87
+    if days == 4:   return 0.97
+    if days == 5:   return 1.00
+    return 0.97   # 6+ rust
+
+
+def days_rest_bb_f(days: int) -> float:
+    if days <= 3:   return 1.18
+    if days == 4:   return 0.98
+    if days == 5:   return 1.00
+    return 1.03
+
+
+def days_rest_er_f(days: int) -> float:
+    if days <= 3:   return 1.08
+    if days == 4:   return 1.03
+    if days == 5:   return 1.00
+    return 1.02
+
+
+def teammates_obp_factor(team_obp: float) -> float:
+    """Per spec: team OBP of batters hitting ahead → RBI multiplier."""
+    if team_obp > 0.350:   return 1.08
+    if team_obp > 0.330:   return 1.04
+    if team_obp < 0.280:   return 0.88
+    if team_obp < 0.300:   return 0.93
+    return 1.00
+
+
+def get_team_obp(team_logs: list) -> float:
+    """Approximate team OBP from runs scored (proxy)."""
+    if not team_logs:
+        return LEAGUE_AVG['obp']
+    avg_runs = new_weighted_avg(team_logs, 'points_scored') if team_logs else LEAGUE_AVG['team_runs_per_game']
+    obp = LEAGUE_AVG['obp'] + (avg_runs - LEAGUE_AVG['team_runs_per_game']) * (0.01 / 0.3)
+    return max(0.270, min(0.370, obp))
+
+
+def opp_lineup_hand_f(lineup: list, sp_hand: str) -> float:
+    """
+    Handedness advantage: if SP throws R and lineup > 55% LHB → ×1.05 K bonus.
+    We don't have batter handedness, so neutral for now.
+    """
+    return 1.00   # placeholder — batter handedness not in our schema
+
+
+def is_day_game(game_time: str) -> bool:
+    """True if game starts before 5pm ET (rough heuristic)."""
+    try:
+        # game_datetime from statsapi is ISO8601 UTC
+        hour_utc = int(game_time[11:13]) if len(game_time) >= 13 else 20
+        # ET = UTC - 4 (EDT summer)
+        hour_et = (hour_utc - 4) % 24
+        return hour_et < 17
+    except Exception:
+        return False
+
+
+# ── Pitcher hand lookup ──────────────────────────────────────────────────────────
+
+def get_pitcher_hand(player_id: int) -> str:
+    try:
+        resp = requests.get(
+            f'https://statsapi.mlb.com/api/v1/people/{player_id}',
+            timeout=10,
+        )
+        data = resp.json()
+        for person in data.get('people', []):
+            return person.get('pitchHand', {}).get('code', 'R')
+    except Exception:
+        pass
+    return 'R'
+
+
+# ── Batter projection functions ──────────────────────────────────────────────────
 
 def project_hits(
-    batter_logs: list[dict],
-    sp_logs: list[dict],
-    weather: dict,
-    park: dict,
-    home_away: str,
-    lineup_pos: int,
-    lineup_confirmed: bool = True,
-    batter_splits: dict = None,
-    sp_hand: str = 'R',
-) -> tuple[float, dict]:
+    batter_logs: list,
+    sp_logs:     list,
+    weather:     dict,
+    park:        dict,
+    home_away:   str,
+    lineup_pos:  int,
+    confirmed:   bool,
+    splits:      dict,
+    sp_hand:     str,
+    matchup:     dict,
+    day_game:    bool,
+) -> tuple:
     """
-    Project hits for one batter in one game.
-    v2.0: adds BA trend, contact rate, platoon splits, lineup PA factor.
+    proj_hits = base × platoon × sp_quality × sp_recent × matchup
+                      × babip × pa × park_hit × weather × day_night × home_away
     """
-    if not batter_logs:
+    base = new_weighted_avg(batter_logs, 'fg_made') if batter_logs else LEAGUE_AVG['hits_per_game']
+    if base <= 0:
         base = LEAGUE_AVG['hits_per_game']
-        ba_trend_f = contact_f = babip_f = 1.0
-        platoon_f = home_f = lp_f = 1.0
-    else:
-        base = weighted_avg(batter_logs, 'fg_made')
-        if base == 0:
-            base = LEAGUE_AVG['hits_per_game']
-        ba_trend_f = compute_ba_trend_factor(batter_logs)
-        contact_f  = compute_contact_rate_factor(batter_logs)
-        babip      = compute_babip(batter_logs[:30])
-        if babip > 0.350:   babip_f = 0.93
-        elif babip < 0.270: babip_f = 1.07
-        else:               babip_f = 1.0
-        home_f  = home_away_factor(batter_logs, 'fg_made', home_away)
 
-        # Platoon split
-        season_avg = rolling_avg(batter_logs, 'fg_made', len(batter_logs)) / max(1, rolling_avg(batter_logs, 'fg_att', len(batter_logs))) if batter_logs else LEAGUE_AVG['ba']
-        platoon_f = platoon_split_factor(batter_splits or {}, sp_hand, season_avg) if batter_splits else 1.0
+    season_avg = compute_season_ba(batter_logs) if batter_logs else LEAGUE_AVG['ba']
 
-        lp_f = compute_lineup_pa_factor(lineup_pos, lineup_confirmed)
+    pt_f    = platoon_hits_f(splits, sp_hand, season_avg)
+    spq_f   = sp_quality_f(sp_logs)
+    spr_f   = sp_recent_form_f(sp_logs)
+    match_f = career_matchup_hits_f(matchup)
+    babip_f = babip_regression_f(batter_logs)
+    pa_f    = lineup_pa_factor(lineup_pos, confirmed)
+    park_f  = park.get('hits', 1.0)
+    wx_f    = weather_hits_factor(weather, park.get('name', ''))
+    dn_f    = day_night_f(splits, day_game, season_avg)
+    ha_f    = home_away_factor_for_col(batter_logs, 'fg_made', home_away)
 
-    sp_f      = sp_hits_allowed_factor(sp_logs)
-    sp_trend_f = _sp_h9_trend(sp_logs)
-    park_f    = park.get('hits', 1.0)
-    weather_f = weather_hits_factor(weather)
+    proj = base * pt_f * spq_f * spr_f * match_f * babip_f * pa_f * park_f * wx_f * dn_f * ha_f
 
-    projection = base * ba_trend_f * contact_f * babip_f * sp_f * sp_trend_f * park_f * weather_f * home_f * lp_f * platoon_f
     factors = {
-        'base':              round(base, 3),
-        'ba_trend_f':        round(ba_trend_f, 3),
-        'contact_f':         round(contact_f, 3),
-        'babip_f':           round(babip_f, 3),
-        'babip':             round(compute_babip(batter_logs[:30]) if batter_logs else LEAGUE_AVG['babip'], 3),
-        'sp_hits_f':         round(sp_f, 3),
-        'sp_h9_trend_f':     round(sp_trend_f, 3),
-        'park_f':            round(park_f, 3),
-        'weather_f':         round(weather_f, 3),
-        'home_away_f':       round(home_f, 3),
-        'lineup_pa_f':       round(lp_f, 3),
-        'platoon_f':         round(platoon_f, 3),
-        'sp_hand':           sp_hand,
-        'lineup_confirmed':  lineup_confirmed,
-        'weather_available': bool(weather),
+        'base': round(base, 3),
+        'platoon_f': round(pt_f, 3),
+        'sp_quality_f': round(spq_f, 3),
+        'sp_recent_f': round(spr_f, 3),
+        'matchup_f': round(match_f, 3),
+        'career_ab': int(safe(matchup.get('career_ab', 0))),
+        'babip_f': round(babip_f, 3),
+        'babip': round(compute_babip(batter_logs), 3) if batter_logs else None,
+        'lineup_pa_f': round(pa_f, 3),
+        'park_hit_f': round(park_f, 3),
+        'weather_f': round(wx_f, 3),
+        'day_night_f': round(dn_f, 3),
+        'home_away_f': round(ha_f, 3),
+        'sp_hand': sp_hand,
+        'lineup_confirmed': confirmed,
     }
-    return round(max(0.0, projection), 3), factors
+    return round(max(0.0, proj), 3), factors
 
 
 def project_total_bases(
-    batter_logs: list[dict],
-    sp_logs: list[dict],
-    weather: dict,
-    park: dict,
-    home_away: str,
-    lineup_pos: int,
-    lineup_confirmed: bool = True,
-    batter_splits: dict = None,
-    sp_hand: str = 'R',
-) -> tuple[float, dict]:
+    batter_logs: list,
+    sp_logs:     list,
+    weather:     dict,
+    park:        dict,
+    home_away:   str,
+    lineup_pos:  int,
+    splits:      dict,
+    sp_hand:     str,
+    matchup:     dict,
+    whiff_rate:  object,  # float or None
+) -> tuple:
     """
-    Project total bases (1B + 2x2B + 3x3B + 4xHR).
-    v2.0: adds ISO, HR/FB proxy, wind direction, temperature, platoon SLG split.
+    proj_tb = base × iso × platoon_slg × sp_hr9 × matchup_ops
+                   × wind × temp × park_hr × altitude × home_away × arsenal_tb
     """
-    if not batter_logs:
-        base = LEAGUE_AVG['tb_per_game']
-        iso_f = hr_fb_f = home_f = lp_f = platoon_f = 1.0
-    else:
-        hits = weighted_avg(batter_logs, 'fg_made')
-        dbls = weighted_avg(batter_logs, 'off_reb')
-        trpl = weighted_avg(batter_logs, 'def_reb')
-        hrs  = weighted_avg(batter_logs, 'three_made')
-        singles = max(0, hits - dbls - trpl - hrs)
-        base = singles + 2*dbls + 3*trpl + 4*hrs
-        if base == 0:
+    if batter_logs:
+        hits = new_weighted_avg(batter_logs, 'fg_made')
+        dbls = new_weighted_avg(batter_logs, 'off_reb')
+        trpl = new_weighted_avg(batter_logs, 'def_reb')
+        hrs  = new_weighted_avg(batter_logs, 'three_made')
+        sg   = max(0, hits - dbls - trpl - hrs)
+        base = sg + 2*dbls + 3*trpl + 4*hrs
+        if base <= 0:
             base = LEAGUE_AVG['tb_per_game']
+    else:
+        base = LEAGUE_AVG['tb_per_game']
 
-        iso   = compute_iso(batter_logs[:30])
-        iso_f = max(0.55, min(1.65, iso / LEAGUE_AVG['iso']))
+    iso       = compute_iso(batter_logs, 20) if batter_logs else LEAGUE_AVG['iso']
+    iso_f     = max(0.50, min(2.00, iso / LEAGUE_AVG['iso']))
+    szn_slg   = compute_season_slg(batter_logs) if batter_logs else LEAGUE_AVG['slg']
+    pt_slg_f  = platoon_slg_f(splits, sp_hand, szn_slg)
+    sp_hr_f   = sp_hr9_factor(sp_logs)
+    match_f   = career_matchup_ops_f(matchup)
+    wind_f    = weather_tb_wind_factor(weather, park.get('name', ''))
+    temp_f    = weather_tb_temp_factor(weather)
+    park_hr_f = park.get('hr', 1.0)
+    alt       = park.get('altitude_ft', 100)
+    alt_f     = 1.12 if alt >= 5000 else (1.02 if alt >= 1000 else 1.00)
+    ha_f      = home_away_factor_for_col(batter_logs, 'three_made', home_away) if batter_logs else 1.0
+    arsen_f   = arsenal_tb_f(whiff_rate)
 
-        # HR/FB proxy from HR rate
-        hr_rate_f = compute_hr_rate_factor(batter_logs)
-        hr_fb_f   = max(0.70, min(1.40, 0.70 + hr_rate_f * 0.30))  # dampened
+    proj = base * iso_f * pt_slg_f * sp_hr_f * match_f * wind_f * temp_f * park_hr_f * alt_f * ha_f * arsen_f
 
-        home_f  = home_away_factor(batter_logs, 'three_made', home_away)
-        lp_f    = lineup_position_factor(lineup_pos)
-
-        # Platoon SLG split
-        season_slg = base / max(1, rolling_avg(batter_logs, 'fg_att', len(batter_logs)))
-        if batter_splits and sp_hand:
-            key = 'vs_lhp_slg' if sp_hand == 'L' else 'vs_rhp_slg'
-            split_slg = batter_splits.get(key)
-            if split_slg and season_slg > 0:
-                platoon_f = max(0.70, min(1.40, float(split_slg) / season_slg))
-            else:
-                platoon_f = 1.0
-        else:
-            platoon_f = 1.0
-
-    sp_hits_f = sp_hits_allowed_factor(sp_logs)
-    sp_hr_f   = sp_hr_allowed_factor(sp_logs)
-    sp_f      = sp_hits_f * 0.5 + sp_hr_f * 0.5
-    park_f    = park.get('hr', 1.0) * 0.5 + park.get('hits', 1.0) * 0.5
-
-    # Wind direction factor for total bases
-    wind_dir_f = _wind_direction_tb_factor(weather, park)
-
-    temp_f = _temperature_tb_factor(weather)
-
-    # Altitude bonus
-    alt_ft = park.get('altitude_ft', 100)
-    alt_f  = 1.08 if alt_ft >= 5000 else (1.02 if alt_ft >= 1000 else 1.0)
-
-    projection = base * iso_f * hr_fb_f * sp_f * park_f * wind_dir_f * temp_f * alt_f * home_f * (0.9 + lp_f * 0.1) * platoon_f
     factors = {
-        'base':          round(base, 3),
-        'iso':           round(compute_iso(batter_logs[:30]) if batter_logs else LEAGUE_AVG['iso'], 3),
-        'iso_f':         round(iso_f if batter_logs else 1.0, 3),
-        'hr_fb_f':       round(hr_fb_f if batter_logs else 1.0, 3),
-        'sp_hits_f':     round(sp_hits_f, 3),
-        'sp_hr_f':       round(sp_hr_f, 3),
-        'park_f':        round(park_f, 3),
-        'wind_dir_f':    round(wind_dir_f, 3),
-        'temp_f':        round(temp_f, 3),
-        'altitude_f':    round(alt_f, 3),
-        'home_away_f':   round(home_f if batter_logs else 1.0, 3),
-        'lineup_pos_f':  round(lp_f if batter_logs else 1.0, 3),
-        'platoon_slg_f': round(platoon_f, 3),
-        'sp_hand':       sp_hand,
-        'weather_available': bool(weather),
+        'base': round(base, 3),
+        'iso_f': round(iso_f, 3),
+        'iso': round(iso, 3),
+        'platoon_slg_f': round(pt_slg_f, 3),
+        'sp_hr9_f': round(sp_hr_f, 3),
+        'matchup_ops_f': round(match_f, 3),
+        'wind_f': round(wind_f, 3),
+        'temp_f': round(temp_f, 3),
+        'park_hr_f': round(park_hr_f, 3),
+        'altitude_f': round(alt_f, 3),
+        'home_away_f': round(ha_f, 3),
+        'arsenal_tb_f': round(arsen_f, 3),
+        'sp_hand': sp_hand,
     }
-    return round(max(0.0, projection), 3), factors
+    return round(max(0.0, proj), 3), factors
 
 
 def project_home_runs(
-    batter_logs: list[dict],
-    sp_logs: list[dict],
-    weather: dict,
-    park: dict,
-    home_away: str,
-    lineup_pos: int,
-    batter_splits: dict = None,
-    sp_hand: str = 'R',
-) -> tuple[float, dict]:
+    batter_logs: list,
+    sp_logs:     list,
+    weather:     dict,
+    park:        dict,
+    home_away:   str,
+    lineup_pos:  int,
+    splits:      dict,
+    sp_hand:     str,
+    matchup:     dict,
+    whiff_rate:  object,
+    ump:         dict,
+) -> tuple:
     """
-    Project HR probability for one batter.
-    v2.0: adds HR rate factor, GB/FB proxy via SP HR/9, platoon SLG split.
+    proj_hr = base × iso × platoon_hr × sp_hr9 × fb_proxy
+                   × matchup_hr × wind_out × temp × park_hr × altitude × ump
     """
-    if not batter_logs:
+    base = new_weighted_avg(batter_logs, 'three_made') if batter_logs else LEAGUE_AVG['hr_per_game']
+    if base <= 0:
         base = LEAGUE_AVG['hr_per_game']
-        hr_rate_f = iso_f = home_f = lp_f = platoon_f = 1.0
-    else:
-        base = weighted_avg(batter_logs, 'three_made')
-        if base == 0:
-            base = LEAGUE_AVG['hr_per_game']
 
-        hr_rate_f = compute_hr_rate_factor(batter_logs)
-        iso_f     = max(0.40, min(2.0, compute_iso(batter_logs[:30]) / LEAGUE_AVG['iso']))
-        home_f    = home_away_factor(batter_logs, 'three_made', home_away)
-        lp_f      = 1.08 if 3 <= lineup_pos <= 5 else (0.88 if lineup_pos >= 8 else 0.95)
+    iso       = compute_iso(batter_logs, 20) if batter_logs else LEAGUE_AVG['iso']
+    iso_f     = max(0.40, min(2.50, iso / LEAGUE_AVG['iso']))
+    szn_hr_r  = compute_season_hr_rate(batter_logs) if batter_logs else 0.034
+    pt_hr_f   = platoon_hr_f(splits, sp_hand, szn_hr_r)
+    sp_hr9_f_ = sp_hr9_factor(sp_logs)
+    fb_f      = arsenal_fb_proxy_f(whiff_rate)
+    match_f   = career_matchup_hr_f(matchup, szn_hr_r)
+    wind_f    = weather_hr_wind_factor(weather, park.get('name', ''))
+    temp_f    = weather_hr_temp_factor(weather)
+    park_hr_f = park.get('hr', 1.0)
+    alt       = park.get('altitude_ft', 100)
+    alt_f     = 1.38 if alt >= 5000 else (1.04 if alt >= 1000 else 1.00)
+    ump_f_val = max(0.97, min(1.05, umpire_runs_f(ump)))  # subtle ump effect on HR
 
-        # Platoon HR split
-        season_hr_rate = weighted_avg(batter_logs, 'three_made')
-        if batter_splits and sp_hand and season_hr_rate > 0:
-            key = 'vs_lhp_slg' if sp_hand == 'L' else 'vs_rhp_slg'
-            split_slg = batter_splits.get(key)
-            szn_slg_approx = compute_iso(batter_logs[:30]) + LEAGUE_AVG['ba']
-            if split_slg and szn_slg_approx > 0:
-                platoon_f = max(0.65, min(1.50, float(split_slg) / szn_slg_approx))
-            else:
-                platoon_f = 1.0
-        else:
-            platoon_f = 1.0
+    proj = base * iso_f * pt_hr_f * sp_hr9_f_ * fb_f * match_f * wind_f * temp_f * park_hr_f * alt_f * ump_f_val
 
-    sp_hr_f   = sp_hr_allowed_factor(sp_logs)
-    sp_hr9    = compute_sp_hr9(sp_logs)
-    gb_proxy_f = 0.88 if sp_hr9 < 0.90 else (1.10 if sp_hr9 > 1.80 else 1.0)  # GB vs FB pitcher
-
-    park_f    = park.get('hr', 1.0)
-    alt_ft    = park.get('altitude_ft', 100)
-    alt_f     = 1.08 if alt_ft >= 5000 else (1.02 if alt_ft >= 1000 else 1.0)
-
-    wind_dir_f = _wind_direction_tb_factor(weather, park)  # same logic as TB
-    temp_f     = _temperature_tb_factor(weather)
-
-    projection = base * hr_rate_f * iso_f * sp_hr_f * gb_proxy_f * park_f * alt_f * wind_dir_f * temp_f * home_f * lp_f * platoon_f
     factors = {
-        'base':         round(base, 4),
-        'hr_rate_f':    round(hr_rate_f if batter_logs else 1.0, 3),
-        'iso_f':        round(iso_f if batter_logs else 1.0, 3),
-        'sp_hr_f':      round(sp_hr_f, 3),
-        'sp_hr9':       round(sp_hr9, 3),
-        'gb_proxy_f':   round(gb_proxy_f, 3),
-        'park_hr_f':    round(park_f, 3),
-        'altitude_f':   round(alt_f, 3),
-        'wind_dir_f':   round(wind_dir_f, 3),
-        'temp_f':       round(temp_f, 3),
-        'home_away_f':  round(home_f if batter_logs else 1.0, 3),
-        'lineup_pos_f': round(lp_f if batter_logs else 1.0, 3),
-        'platoon_f':    round(platoon_f, 3),
-        'sp_hand':      sp_hand,
-        'weather_available': bool(weather),
+        'base': round(base, 4),
+        'iso_f': round(iso_f, 3),
+        'platoon_hr_f': round(pt_hr_f, 3),
+        'sp_hr9_f': round(sp_hr9_f_, 3),
+        'fb_proxy_f': round(fb_f, 3),
+        'matchup_hr_f': round(match_f, 3),
+        'wind_out_f': round(wind_f, 3),
+        'temp_f': round(temp_f, 3),
+        'park_hr_f': round(park_hr_f, 3),
+        'altitude_f': round(alt_f, 3),
+        'ump_f': round(ump_f_val, 3),
+        'sp_hand': sp_hand,
     }
-    return round(max(0.0, projection), 4), factors
+    return round(max(0.0, proj), 4), factors
 
 
 def project_rbi(
-    batter_logs: list[dict],
-    sp_logs: list[dict],
-    weather: dict,
-    park: dict,
-    home_away: str,
-    lineup_pos: int,
-    teammates_obp: float,
-    lineup_confirmed: bool = True,
-) -> tuple[float, dict]:
+    batter_logs:   list,
+    sp_logs:       list,
+    weather:       dict,
+    park:          dict,
+    home_away:     str,
+    lineup_pos:    int,
+    splits:        dict,
+    sp_hand:       str,
+    matchup:       dict,
+    team_obp:      float,
+    ump:           dict,
+    bullpen_tired: bool,
+    game_total:    float = 8.8,
+) -> tuple:
     """
-    Project RBI.
-    v2.0: adds lineup position cleanup bonus, WHIP factor, blended SP quality.
-    rebounds column = RBI in mlbDataCollector mapping.
+    proj_rbi = base × risp × lineup_pos × teammates_obp × sp_whip
+                    × platoon × matchup × total_f × park_run × weather × bullpen
     """
-    if not batter_logs:
+    base = new_weighted_avg(batter_logs, 'rebounds') if batter_logs else LEAGUE_AVG['rbi_per_game']
+    if base <= 0:
         base = LEAGUE_AVG['rbi_per_game']
-        home_f = 1.0
-    else:
-        base = weighted_avg(batter_logs, 'rebounds')  # rebounds = RBI
-        if base == 0:
-            base = LEAGUE_AVG['rbi_per_game']
-        home_f = home_away_factor(batter_logs, 'rebounds', home_away)
 
-    # Lineup position — cleanup hitters have most RBI chances
-    if lineup_confirmed:
-        if lineup_pos == 4:       lp_f = 1.20
-        elif lineup_pos in (3,5): lp_f = 1.10
-        elif lineup_pos <= 2:     lp_f = 0.85   # bats with bases empty often
-        elif lineup_pos <= 6:     lp_f = 0.95
-        else:                     lp_f = 0.88
-    else:
-        lp_f = 1.0
+    risp_f_val  = risp_rbi_f(splits)
+    lp_f        = lineup_rbi_factor(lineup_pos)
+    tobp_f      = teammates_obp_factor(team_obp)
+    whip_f      = sp_whip_rbi_f(sp_logs)
+    season_avg  = compute_season_ba(batter_logs) if batter_logs else LEAGUE_AVG['ba']
+    pt_f        = platoon_hits_f(splits, sp_hand, season_avg)
+    match_f     = career_matchup_hits_f(matchup)
+    total_f     = max(0.80, min(1.30, game_total / LEAGUE_AVG['game_total']))
+    park_run_f  = park.get('runs', 1.0)
+    wx_f        = weather_scoring_factor(weather, park.get('name', ''))
+    bp_f        = 1.05 if bullpen_tired else 1.00
 
-    sp_era_f_v = sp_era_factor(sp_logs)
-    sp_whip_f  = _sp_whip_factor(sp_logs)
-    sp_f       = sp_era_f_v * 0.5 + sp_whip_f * 0.5
+    proj = base * risp_f_val * lp_f * tobp_f * whip_f * pt_f * match_f * total_f * park_run_f * wx_f * bp_f
 
-    park_f    = park.get('runs', 1.0)
-    weather_f = weather_tb_factor(weather, '') * 0.6 + weather_hits_factor(weather) * 0.4
-
-    # Men on base = RBI opportunities
-    mob_f = max(0.75, min(1.30, teammates_obp / LEAGUE_AVG['obp']))
-
-    projection = base * sp_f * park_f * weather_f * home_f * lp_f * mob_f
     factors = {
-        'base':             round(base, 3),
-        'sp_era_f':         round(sp_era_f_v, 3),
-        'sp_whip_f':        round(sp_whip_f, 3),
-        'sp_blended_f':     round(sp_f, 3),
-        'park_runs_f':      round(park_f, 3),
-        'weather_f':        round(weather_f, 3),
-        'home_away_f':      round(home_f, 3),
-        'lineup_pos_f':     round(lp_f, 3),
-        'teammates_obp':    round(teammates_obp, 3),
-        'mob_f':            round(mob_f, 3),
-        'lineup_confirmed': lineup_confirmed,
-        'weather_available': bool(weather),
+        'base': round(base, 3),
+        'risp_f': round(risp_f_val, 3),
+        'lineup_pos_f': round(lp_f, 3),
+        'teammates_obp_f': round(tobp_f, 3),
+        'team_obp': round(team_obp, 3),
+        'sp_whip_f': round(whip_f, 3),
+        'platoon_f': round(pt_f, 3),
+        'matchup_f': round(match_f, 3),
+        'total_f': round(total_f, 3),
+        'game_total': round(game_total, 2),
+        'park_run_f': round(park_run_f, 3),
+        'weather_scoring_f': round(wx_f, 3),
+        'bullpen_f': round(bp_f, 3),
+        'sp_hand': sp_hand,
     }
-    return round(max(0.0, projection), 3), factors
+    return round(max(0.0, proj), 3), factors
 
 
-def project_runs(
-    batter_logs: list[dict],
-    sp_logs: list[dict],
-    weather: dict,
-    park: dict,
-    home_away: str,
-    lineup_pos: int,
-    lineup_confirmed: bool = True,
-) -> tuple[float, dict]:
+def project_runs_scored(
+    batter_logs:   list,
+    sp_logs:       list,
+    weather:       dict,
+    park:          dict,
+    home_away:     str,
+    lineup_pos:    int,
+    splits:        dict,
+    sp_hand:       str,
+    team_rbi_avg:  float,   # avg RBI rate of batters hitting behind
+    ump:           dict,
+    game_total:    float = 8.8,
+) -> tuple:
     """
-    Project runs scored.
-    v2.0: adds OBP factor, speed/SB proxy, lineup position granularity.
-    points column = runs in mlbDataCollector hitter mapping.
+    proj_runs = base × obp × lineup_pos × speed × teammates_rbi
+                     × sp_whip × platoon × total_f × home_away × park_run
     """
-    if not batter_logs:
+    base = new_weighted_avg(batter_logs, 'points') if batter_logs else LEAGUE_AVG['runs_per_game']
+    if base <= 0:
         base = LEAGUE_AVG['runs_per_game']
-        obp_f = home_f = 1.0
-    else:
-        base = weighted_avg(batter_logs, 'points')  # points = runs
-        if base == 0:
-            base = LEAGUE_AVG['runs_per_game']
-        obp_f  = compute_obp_factor(batter_logs)
-        home_f = home_away_factor(batter_logs, 'points', home_away)
 
-    if lineup_confirmed:
-        if lineup_pos == 1:     lp_f = 1.30
-        elif lineup_pos == 2:   lp_f = 1.15
-        elif lineup_pos <= 4:   lp_f = 1.05
-        elif lineup_pos <= 6:   lp_f = 0.92
-        elif lineup_pos <= 8:   lp_f = 0.88
-        else:                   lp_f = 0.80
-    else:
-        lp_f = 1.0
+    obp_val  = compute_obp(batter_logs, 20) if batter_logs else LEAGUE_AVG['obp']
+    obp_f    = max(0.70, min(1.40, obp_val / LEAGUE_AVG['obp']))
+    lp_f     = lineup_runs_factor(lineup_pos)
 
-    # Speed proxy from SB rate
-    if batter_logs:
-        sb_f_val = compute_sb_rate_factor(batter_logs)
-        speed_f  = max(0.90, min(1.15, 0.92 + sb_f_val * 0.08))
-    else:
-        speed_f = 1.0
+    # Speed factor: 0.90 + (sb_rate / 0.09 × 0.10)
+    sb_rate  = new_weighted_avg(batter_logs, 'steals') if batter_logs else LEAGUE_AVG['sb_rate']
+    speed_f  = max(0.90, min(1.15, 0.90 + (sb_rate / LEAGUE_AVG['sb_rate']) * 0.10))
 
-    sp_bb_f    = sp_bb_allowed_factor(sp_logs)
-    sp_era_f_v = sp_era_factor(sp_logs)
-    sp_f       = sp_bb_f * 0.5 + sp_era_f_v * 0.5
-    park_f     = park.get('runs', 1.0)
-    weather_f  = weather_hits_factor(weather)
+    # Teammates RBI factor: RBI rate of batters 2-4 spots behind
+    tm_rbi_f = max(0.88, min(1.12, team_rbi_avg / LEAGUE_AVG['rbi_per_game'])) if team_rbi_avg > 0 else 1.0
 
-    projection = base * obp_f * sp_f * park_f * weather_f * home_f * lp_f * speed_f
+    whip_f   = sp_whip_rbi_f(sp_logs)
+    season_avg = compute_season_ba(batter_logs) if batter_logs else LEAGUE_AVG['ba']
+    pt_f     = platoon_hits_f(splits, sp_hand, season_avg)
+    total_f  = max(0.80, min(1.30, game_total / LEAGUE_AVG['game_total']))
+    ha_f     = home_away_factor_for_col(batter_logs, 'points', home_away) if batter_logs else 1.0
+    park_f   = park.get('runs', 1.0)
+
+    proj = base * obp_f * lp_f * speed_f * tm_rbi_f * whip_f * pt_f * total_f * ha_f * park_f
+
     factors = {
-        'base':             round(base, 3),
-        'obp_f':            round(obp_f if batter_logs else 1.0, 3),
-        'sp_bb_f':          round(sp_bb_f, 3),
-        'sp_era_f':         round(sp_era_f_v, 3),
-        'sp_blended_f':     round(sp_f, 3),
-        'park_runs_f':      round(park_f, 3),
-        'weather_f':        round(weather_f, 3),
-        'home_away_f':      round(home_f if batter_logs else 1.0, 3),
-        'lineup_pos_f':     round(lp_f, 3),
-        'speed_f':          round(speed_f, 3),
-        'lineup_confirmed': lineup_confirmed,
-        'weather_available': bool(weather),
+        'base': round(base, 3),
+        'obp_f': round(obp_f, 3),
+        'obp': round(obp_val, 3),
+        'lineup_pos_f': round(lp_f, 3),
+        'speed_f': round(speed_f, 3),
+        'sb_rate': round(sb_rate, 3),
+        'teammates_rbi_f': round(tm_rbi_f, 3),
+        'sp_whip_f': round(whip_f, 3),
+        'platoon_f': round(pt_f, 3),
+        'total_f': round(total_f, 3),
+        'home_away_f': round(ha_f, 3),
+        'park_run_f': round(park_f, 3),
+        'sp_hand': sp_hand,
     }
-    return round(max(0.0, projection), 3), factors
+    return round(max(0.0, proj), 3), factors
 
 
 def project_stolen_bases(
-    batter_logs: list[dict],
-    sp_logs: list[dict],
-    weather: dict,
-    park: dict,
-    home_away: str,
-    sp_hand: str = 'R',
-) -> tuple[float, dict]:
+    batter_logs:      list,
+    sp_logs:          list,
+    home_away:        str,
+    lineup_pos:       int,
+    sp_hand:          str,
+    opp_sb_per_game:  float,
+) -> tuple:
     """
-    Project stolen bases.
-    v2.0: adds SB rate factor, OBP factor, pitcher handedness (LHP holds runners).
-    steals column maps directly.
+    proj_sb = base × sb_rate × obp × success × pitcher_hold
+                   × catcher × game_script × lineup_pos
+    Only meaningful for players with > 8 SB or > 0.15 SB/game.
     """
-    if not batter_logs:
-        base = LEAGUE_AVG['sb_per_game']
-        sb_rate_f = home_f = obp_f = 1.0
-    else:
-        base = weighted_avg(batter_logs, 'steals')
-        if base < 0.01:
-            base = 0.01
-        sb_rate_f = compute_sb_rate_factor(batter_logs)
-        home_f    = home_away_factor(batter_logs, 'steals', home_away)
-        obp_f     = max(0.80, min(1.20, compute_obp_factor(batter_logs)))  # must reach base
+    base = new_weighted_avg(batter_logs, 'steals') if batter_logs else 0.0
+    if base <= 0:
+        return 0.0, {'base': 0.0, 'skipped': 'insufficient_sb_history'}
 
-    # LHP holds runners better
-    handedness_f = 0.88 if sp_hand == 'L' else 1.08
+    sb_rate_f  = max(0.10, min(5.0, base / LEAGUE_AVG['sb_rate']))
+    if sb_rate_f < 1.5:
+        # Only generate for players with elite SB rate per spec
+        return round(base, 3), {'base': round(base, 3), 'sb_rate_f': round(sb_rate_f, 3), 'below_threshold': True}
 
-    sp_k_f    = max(0.80, min(1.15, 1.0 / max(0.8, sp_strikeout_factor(sp_logs))))  # fewer baserunners vs K pitcher
-    temp_f_val = weather.get('temp_f', 72) if weather else 72
-    cold_f     = 0.90 if temp_f_val < 45 else (0.95 if temp_f_val < 55 else 1.0)
+    obp_val    = compute_obp(batter_logs, 20) if batter_logs else LEAGUE_AVG['obp']
+    obp_f      = max(0.70, min(1.40, obp_val / LEAGUE_AVG['obp']))
 
-    projection = base * sb_rate_f * obp_f * handedness_f * sp_k_f * cold_f * home_f
+    # Success rate factor
+    total_sb = sum(safe(r.get('steals', 0)) for r in batter_logs)
+    # CS not in schema; use fixed 78% default
+    success_f = 1.05   # assume average success until CS column added
+
+    # Pitcher hold: LHP holds runners better (harder to steal on)
+    hold_f     = 0.85 if sp_hand == 'L' else 1.10
+
+    # Catcher factor: proxy from opp SB allowed vs league avg
+    league_sb_allowed = LEAGUE_AVG['sb_rate'] * 9  # per game team total
+    catcher_f  = max(0.88, min(1.12, opp_sb_per_game / league_sb_allowed)) if league_sb_allowed > 0 else 1.0
+
+    # Game script: neutral (no live odds in projection phase)
+    gs_f       = 1.00
+
+    lp_f       = lineup_sb_factor(lineup_pos)
+
+    proj = base * sb_rate_f * obp_f * success_f * hold_f * catcher_f * gs_f * lp_f
+
     factors = {
-        'base':          round(base, 4),
-        'sb_rate_f':     round(sb_rate_f if batter_logs else 1.0, 3),
-        'obp_f':         round(obp_f if batter_logs else 1.0, 3),
-        'handedness_f':  round(handedness_f, 3),
-        'sp_k_factor':   round(sp_k_f, 3),
-        'cold_f':        round(cold_f, 3),
-        'home_away_f':   round(home_f if batter_logs else 1.0, 3),
-        'sp_hand':       sp_hand,
-        'weather_available': bool(weather),
+        'base': round(base, 3),
+        'sb_rate_f': round(sb_rate_f, 3),
+        'obp_f': round(obp_f, 3),
+        'success_f': round(success_f, 3),
+        'pitcher_hold_f': round(hold_f, 3),
+        'catcher_f': round(catcher_f, 3),
+        'game_script_f': round(gs_f, 3),
+        'lineup_pos_f': round(lp_f, 3),
+        'sp_hand': sp_hand,
     }
-    return round(max(0.0, projection), 4), factors
+    return round(max(0.0, proj), 3), factors
 
 
 # ── Pitcher projection functions ─────────────────────────────────────────────────
 
 def project_strikeouts(
-    sp_logs: list[dict],
-    opp_team_logs: list[dict],
-    weather: dict,
-    home_away: str,
-    opp_k_rate: float = None,
-    days_rest: int = 5,
-    sp_hand: str = 'R',
-) -> tuple[float, dict]:
+    sp_logs:    list,
+    opp_logs:   list,   # opponent team_game_logs
+    weather:    dict,
+    home_away:  str,
+    opp_k_rate: float,
+    days_rest:  int,
+    sp_hand:    str,
+    arsenal:    list,
+    ump:        dict,
+) -> tuple:
     """
-    Project SP strikeouts.
-    v2.0: adds K/9 trend, declining K signal, opp K% from logs fallback, days rest.
-    assists = strikeOuts in pitcher game logs.
+    proj_k = base × arsenal × trend × velo × opp_k × hand_lineup
+                  × ump_k × innings × rest × home_away × fp_proxy
     """
-    if not sp_logs:
-        base = LEAGUE_AVG['k_per_9'] * 5.5 / 9  # ~5.3 Ks in average start
+    base = new_weighted_avg(sp_logs, 'assists') if sp_logs else LEAGUE_AVG['k_per_9'] * 5.5 / 9
+    if base <= 0:
+        base = LEAGUE_AVG['k_per_9'] * 5.5 / 9
+
+    whiff_rate = get_arsenal_weighted_whiff(arsenal)
+    ars_f      = arsenal_whiff_k_f(whiff_rate)
+
+    # K/9 trend: L5 vs season
+    if len(sp_logs) >= 5:
+        l5_k9  = compute_sp_k9(sp_logs, 5)
+        szn_k9 = compute_sp_k9(sp_logs)
+        trend_f = max(0.70, min(1.30, l5_k9 / szn_k9)) if szn_k9 > 0 else 1.0
     else:
-        base = weighted_avg(sp_logs, 'assists')  # assists = strikeOuts (pitcher)
-        if base == 0:
-            base = LEAGUE_AVG['k_per_9'] * 5.5 / 9
+        trend_f = 1.0
 
-    k9_trend_f = compute_sp_k9_trend(sp_logs)
+    # Velocity trend
+    velo_f = arsenal_velo_trend_f(arsenal)
 
-    # Declining K proxy (velocity drop signal)
-    if len(sp_logs) >= 10:
-        k_l3  = rolling_avg(sp_logs, 'assists', 3)
-        k_l10 = rolling_avg(sp_logs, 'assists', 10)
-        declining_k_f = max(0.88, min(1.0, (k_l3 / k_l10) if k_l10 > 0 else 1.0))
-    else:
-        declining_k_f = 1.0
+    # Opponent K rate
+    opp_k_f = max(0.82, min(1.20, opp_k_rate / LEAGUE_AVG['k_pct']))
 
-    # Opponent K% (from DB or team logs fallback)
-    if opp_k_rate and opp_k_rate > 0:
-        opp_k_f = max(0.80, min(1.25, opp_k_rate / LEAGUE_AVG['k_pct']))
-    elif opp_team_logs:
-        opp_k_rate_computed = get_team_k_rate_from_logs(opp_team_logs)
-        opp_k_f = max(0.80, min(1.25, opp_k_rate_computed / LEAGUE_AVG['k_pct']))
-    else:
-        opp_k_f = 1.0
+    # Handedness (neutral — no batter hand data)
+    hand_f = opp_lineup_hand_f([], sp_hand)
 
-    temp_f_val = weather.get('temp_f', 72) if weather else 72
-    cold_k_f   = 0.96 if temp_f_val < 45 else (0.98 if temp_f_val < 55 else 1.0)
-    home_f     = 1.03 if home_away == 'home' else 0.98
-    rest_f     = days_rest_factor_k(days_rest)
+    # Umpire K factor
+    ump_k  = umpire_k_f(ump)
 
-    projection = base * k9_trend_f * declining_k_f * opp_k_f * cold_k_f * home_f * rest_f
+    # Innings factor: proj_ip / 6.0
+    proj_ip = compute_sp_avg_ip(sp_logs, 5)
+    inn_f   = max(0.50, min(1.40, proj_ip / 6.0))
+
+    # Rest factor
+    rest_f = days_rest_k_f(days_rest)
+
+    # Home/away K split
+    ha_f = home_away_factor_for_col(sp_logs, 'assists', home_away) if sp_logs else 1.0
+
+    # First pitch strike proxy: low BB/9 = better command
+    bb9    = compute_sp_bb9(sp_logs)
+    fp_f   = 1.04 if bb9 < 2.5 else (0.94 if bb9 > 3.5 else 1.00)
+
+    proj = base * ars_f * trend_f * velo_f * opp_k_f * hand_f * ump_k * inn_f * rest_f * ha_f * fp_f
+
     factors = {
-        'base':           round(base, 3),
-        'k9_trend_f':     round(k9_trend_f, 3),
-        'declining_k_f':  round(declining_k_f, 3),
-        'opp_k_pct_f':    round(opp_k_f, 3),
-        'opp_k_rate':     round(opp_k_rate if opp_k_rate else 0.233, 3),
-        'cold_k_f':       round(cold_k_f, 3),
-        'home_f':         round(home_f, 3),
-        'days_rest_f':    round(rest_f, 3),
-        'days_rest':      days_rest,
-        'games_used':     len(sp_logs),
-        'sp_hand':        sp_hand,
-        'weather_available': bool(weather),
+        'base': round(base, 3),
+        'arsenal_f': round(ars_f, 3),
+        'weighted_whiff': round(whiff_rate, 3) if whiff_rate else None,
+        'k9_trend_f': round(trend_f, 3),
+        'velo_trend_f': round(velo_f, 3),
+        'opp_k_rate_f': round(opp_k_f, 3),
+        'hand_lineup_f': round(hand_f, 3),
+        'ump_k_f': round(ump_k, 3),
+        'ump_name': ump.get('ump_name', None),
+        'innings_f': round(inn_f, 3),
+        'proj_ip': round(proj_ip, 2),
+        'days_rest_f': round(rest_f, 3),
+        'home_away_f': round(ha_f, 3),
+        'fp_proxy_f': round(fp_f, 3),
+        'bb9': round(bb9, 3),
     }
-    return round(max(0.0, projection), 3), factors
+    return round(max(0.0, proj), 3), factors
 
 
 def project_earned_runs(
-    sp_logs: list[dict],
-    opp_team_logs: list[dict],
-    weather: dict,
-    park: dict,
+    sp_logs:   list,
+    opp_logs:  list,
+    weather:   dict,
+    park:      dict,
     home_away: str,
-    days_rest: int = 5,
-) -> tuple[float, dict]:
+    days_rest: int,
+    whiff_rate: object,
+) -> tuple:
     """
-    Project earned runs allowed by SP.
-    v2.0: adds FIP/ERA regression, HR/9 GB-proxy, wind direction, days rest.
-    points = runs allowed in pitcher game logs.
+    proj_er = base × fip × hr9 × whip × opp_offense × park_hr
+                   × wind × temp × rest × innings × gb_proxy
     """
-    if not sp_logs:
+    base = new_weighted_avg(sp_logs, 'points') if sp_logs else LEAGUE_AVG['era'] * 5.0 / 9
+    if base <= 0:
         base = LEAGUE_AVG['era'] * 5.0 / 9
-    else:
-        base = weighted_avg(sp_logs, 'points')  # points = runs allowed (pitcher)
-        if base == 0:
-            base = LEAGUE_AVG['era'] * 5.0 / 9
 
-    fip_era_f = fip_vs_era_factor(sp_logs)
+    fip_f      = fip_vs_era_f(sp_logs)
+    hr9_f      = sp_hr9_factor(sp_logs)
+    whip_f_val = max(0.75, min(1.40, compute_sp_season_whip(sp_logs) / LEAGUE_AVG['whip'])) if sp_logs else 1.0
 
-    sp_hr9    = compute_sp_hr9(sp_logs)
-    hr9_f     = max(0.70, min(1.50, sp_hr9 / LEAGUE_AVG['hr_per_9']))
+    opp_runs   = new_weighted_avg(opp_logs, 'points_scored') if opp_logs else LEAGUE_AVG['team_runs_per_game']
+    opp_off_f  = max(0.80, min(1.25, opp_runs / LEAGUE_AVG['team_runs_per_game'])) if opp_runs > 0 else 1.0
 
-    # GB/FB proxy
-    gb_proxy_f = 0.92 if sp_hr9 < 0.90 else (1.10 if sp_hr9 > 1.80 else 1.0)
+    park_hr_f  = park.get('hr', 1.0)
+    wind_f     = weather_tb_wind_factor(weather, park.get('name', ''))
+    temp_f     = weather_tb_temp_factor(weather)
+    rest_f     = days_rest_er_f(days_rest)
 
-    if opp_team_logs:
-        opp_avg_scored = weighted_avg(opp_team_logs, 'points_scored')
-        opp_off_f = max(0.75, min(1.30, opp_avg_scored / LEAGUE_AVG['team_runs_per_game'])) if opp_avg_scored > 0 else 1.0
-    else:
-        opp_off_f = 1.0
+    # Innings exposure
+    proj_ip    = compute_sp_avg_ip(sp_logs, 5)
+    era_szn    = compute_sp_season_era(sp_logs) if sp_logs else LEAGUE_AVG['era']
+    inn_f      = max(0.50, min(1.50, proj_ip * era_szn / 9 / base)) if base > 0 else 1.0
 
-    park_f    = park.get('runs', 1.0)
-    wind_f    = _wind_direction_tb_factor(weather, park)  # same wind logic
-    temp_f    = _temperature_tb_factor(weather)
-    home_f    = 0.93 if home_away == 'home' else 1.07
-    rest_f    = days_rest_factor_er(days_rest)
+    # GB proxy from arsenal
+    gb_f       = arsenal_gb_proxy_f(whiff_rate)
 
-    if len(sp_logs) >= 5:
-        l5_er  = rolling_avg(sp_logs, 'points', 5)
-        szn_er = rolling_avg(sp_logs, 'points', len(sp_logs))
-        trend_f = max(0.60, min(1.60, l5_er / szn_er)) if szn_er > 0 else 1.0
-    else:
-        trend_f = 1.0
+    proj = base * fip_f * hr9_f * whip_f_val * opp_off_f * park_hr_f * wind_f * temp_f * rest_f * gb_f
 
-    projection = base * fip_era_f * hr9_f * gb_proxy_f * opp_off_f * park_f * wind_f * temp_f * home_f * rest_f * trend_f
     factors = {
-        'base':        round(base, 3),
-        'fip_vs_era_f':round(fip_era_f, 3),
-        'fip':         round(compute_sp_fip(sp_logs), 3) if sp_logs else None,
-        'era_recent':  round(rolling_avg(sp_logs, 'offensive_rating', min(5, len(sp_logs))), 3) if sp_logs else None,
-        'hr9_f':       round(hr9_f, 3),
-        'gb_proxy_f':  round(gb_proxy_f, 3),
-        'opp_off_f':   round(opp_off_f, 3),
-        'park_f':      round(park_f, 3),
-        'wind_f':      round(wind_f, 3),
-        'temp_f':      round(temp_f, 3),
-        'home_f':      round(home_f, 3),
+        'base': round(base, 3),
+        'fip_vs_era_f': round(fip_f, 3),
+        'fip': round(compute_sp_fip(sp_logs), 3) if sp_logs else None,
+        'era_recent': round(compute_sp_l5_era(sp_logs), 3) if sp_logs else None,
+        'hr9_f': round(hr9_f, 3),
+        'whip_f': round(whip_f_val, 3),
+        'opp_off_f': round(opp_off_f, 3),
+        'park_hr_f': round(park_hr_f, 3),
+        'wind_f': round(wind_f, 3),
+        'temp_f': round(temp_f, 3),
         'days_rest_f': round(rest_f, 3),
-        'trend_f':     round(trend_f, 3),
-        'games_used':  len(sp_logs),
-        'weather_available': bool(weather),
+        'gb_proxy_f': round(gb_f, 3),
+        'proj_ip': round(proj_ip, 2),
     }
-    return round(max(0.0, projection), 3), factors
+    return round(max(0.0, proj), 3), factors
 
 
 def project_walks(
-    sp_logs: list[dict],
-    opp_team_logs: list[dict],
-    weather: dict,
-    home_away: str,
-    days_rest: int = 5,
-) -> tuple[float, dict]:
+    sp_logs:    list,
+    opp_logs:   list,
+    weather:    dict,
+    home_away:  str,
+    days_rest:  int,
+    ump:        dict,
+    whiff_rate: object,
+) -> tuple:
     """
-    Project walks issued by SP.
-    v2.0: adds BB/9 trend, command consistency check, days rest factor.
-    turnovers = BB allowed in pitcher game logs.
+    proj_bb = base × command × patience × ump_bb × rest × cold_wx × arsenal_ctrl × innings
     """
-    if not sp_logs:
-        base = LEAGUE_AVG['bb_per_9'] * 5.5 / 9  # ~1.9 BB per average start
-    else:
-        base = weighted_avg(sp_logs, 'turnovers')  # turnovers = BB allowed (pitcher)
-        if base == 0:
-            base = LEAGUE_AVG['bb_per_9'] * 5.5 / 9
+    base = new_weighted_avg(sp_logs, 'turnovers') if sp_logs else LEAGUE_AVG['bb_per_9'] * 5.5 / 9
+    if base <= 0:
+        base = LEAGUE_AVG['bb_per_9'] * 5.5 / 9
 
-    bb9_trend_f = compute_sp_bb9_trend(sp_logs)
-
-    # Command consistency check
+    # BB/9 trend
     if len(sp_logs) >= 5:
-        l5_bb9  = _compute_bb9(sp_logs[:5])
-        szn_bb9 = _compute_bb9(sp_logs)
-        command_f = max(0.85, min(1.20, 1.0 + (l5_bb9 - szn_bb9) * 0.10)) if szn_bb9 > 0 else 1.0
+        l5_bb9  = compute_sp_bb9(sp_logs, 5)
+        szn_bb9 = compute_sp_bb9(sp_logs)
+        if szn_bb9 > 0:
+            if l5_bb9 > szn_bb9 + 0.5:  command_f = 1.12
+            elif l5_bb9 < szn_bb9 - 0.5: command_f = 0.90
+            else:                         command_f = 1.00
+        else:
+            command_f = 1.00
     else:
-        command_f = 1.0
+        command_f = 1.00
 
-    weather_f = weather_walks_factor(weather)
-    home_f    = 0.97 if home_away == 'home' else 1.03
-    rest_f    = days_rest_factor_bb(days_rest)
+    # Opponent patience (BB drawn proxy: not in team logs, use neutral)
+    patience_f = 1.00   # team_game_logs lacks BB-drawn column
 
-    projection = base * bb9_trend_f * command_f * weather_f * home_f * rest_f
+    ump_bb     = umpire_bb_f(ump)
+    rest_f     = days_rest_bb_f(days_rest)
+    cold_f     = weather_cold_grip_factor(weather)
+
+    # Arsenal control factor: elite stuff = challenge hitters
+    if whiff_rate is not None:
+        ars_ctrl_f = 0.94 if whiff_rate > 0.30 else (1.06 if whiff_rate < 0.20 else 1.00)
+    else:
+        ars_ctrl_f = 1.00
+
+    # Innings factor
+    proj_ip = compute_sp_avg_ip(sp_logs, 5)
+    inn_f   = max(0.50, min(1.40, proj_ip / 6.0))
+
+    proj = base * command_f * patience_f * ump_bb * rest_f * cold_f * ars_ctrl_f * inn_f
+
     factors = {
-        'base':        round(base, 3),
-        'bb9_trend_f': round(bb9_trend_f, 3),
-        'command_f':   round(command_f, 3),
-        'weather_f':   round(weather_f, 3),
-        'home_f':      round(home_f, 3),
+        'base': round(base, 3),
+        'command_f': round(command_f, 3),
+        'patience_f': round(patience_f, 3),
+        'ump_bb_f': round(ump_bb, 3),
         'days_rest_f': round(rest_f, 3),
-        'days_rest':   days_rest,
-        'games_used':  len(sp_logs),
-        'weather_available': bool(weather),
+        'cold_weather_f': round(cold_f, 3),
+        'arsenal_ctrl_f': round(ars_ctrl_f, 3),
+        'innings_f': round(inn_f, 3),
+        'proj_ip': round(proj_ip, 2),
     }
-    return round(max(0.0, projection), 3), factors
+    return round(max(0.0, proj), 3), factors
 
 
 def project_outs_recorded(
-    sp_logs: list[dict],
-    weather: dict,
-    bullpen_era: float,
-    days_rest: int = 5,
-    game_date=None,
-) -> tuple[float, dict]:
+    sp_logs:      list,
+    weather:      dict,
+    home_away:    str,
+    days_rest:    int,
+    bullpen_tired: bool,
+    opp_logs:     list,
+    arsenal:      list,
+) -> tuple:
     """
-    Project outs recorded by SP.
-    v2.0: adds days rest factor, tighter trend window.
-    minutes = inningsPitched (float) in pitcher game logs; 1 out = 0.333 IP.
+    proj_outs = base_outs × efficiency × game_script × bullpen
+                          × opp_quality × rest × home_away × arsenal
     """
-    if not sp_logs:
-        avg_ip = 5.0
-    else:
-        avg_ip = weighted_avg(sp_logs, 'minutes')  # minutes = IP
-        if avg_ip == 0:
-            avg_ip = 5.0
+    avg_ip = compute_sp_avg_ip(sp_logs, 5) if sp_logs else 5.0
+    base   = avg_ip * 3   # outs = IP × 3
 
-    temp_f_val = weather.get('temp_f', 72) if weather else 72
-    cold_f = 0.93 if temp_f_val < 40 else (0.97 if temp_f_val < 50 else 1.0)
-
-    # Good bullpen = manager pulls starter sooner
-    if bullpen_era > 0:
-        bp_f = min(1.05, max(0.93, bullpen_era / LEAGUE_AVG['era']))
-    else:
-        bp_f = 1.0
-
-    rest_f = 0.93 if days_rest <= 3 else (0.98 if days_rest == 4 else 1.0)
-
+    # Pitch efficiency proxy: L5 IP vs season IP
     if len(sp_logs) >= 5:
-        l5_ip  = rolling_avg(sp_logs, 'minutes', 5)
-        szn_ip = rolling_avg(sp_logs, 'minutes', len(sp_logs))
-        trend_f = max(0.80, min(1.15, l5_ip / szn_ip)) if szn_ip > 0 else 1.0
+        l5_ip   = rolling_avg(sp_logs, 'minutes', 5)
+        szn_ip  = rolling_avg(sp_logs, 'minutes', len(sp_logs))
+        eff_f   = max(0.80, min(1.15, l5_ip / szn_ip)) if szn_ip > 0 else 1.0
     else:
-        trend_f = 1.0
+        eff_f   = 1.0
 
-    proj_ip   = avg_ip * cold_f * bp_f * rest_f * trend_f
-    proj_outs = proj_ip * 3
+    # Game script: neutral in projection phase
+    gs_f    = 1.00
+
+    # Bullpen: tired pen → starter goes deeper
+    bp_f    = 1.05 if bullpen_tired else 1.00
+
+    # Opponent quality: high-OPS lineup runs up pitch counts
+    if opp_logs:
+        opp_runs = new_weighted_avg(opp_logs, 'points_scored')
+        opp_f    = max(0.90, min(1.10, LEAGUE_AVG['team_runs_per_game'] / opp_runs)) if opp_runs > 0 else 1.0
+    else:
+        opp_f    = 1.0
+
+    rest_f   = 0.93 if days_rest <= 3 else (0.97 if days_rest == 4 else 1.00)
+
+    ha_f     = home_away_factor_for_col(sp_logs, 'minutes', home_away) if sp_logs else 1.0
+
+    whiff_r  = get_arsenal_weighted_whiff(arsenal)
+    ars_f    = 1.05 if (whiff_r and whiff_r > 0.30) else (0.95 if (whiff_r and whiff_r < 0.20) else 1.00)
+
+    proj = base * eff_f * gs_f * bp_f * opp_f * rest_f * ha_f * ars_f
 
     factors = {
-        'base_ip':     round(avg_ip, 3),
-        'cold_f':      round(cold_f, 3),
-        'bullpen_f':   round(bp_f, 3),
-        'bullpen_era': round(bullpen_era, 3),
+        'base_ip': round(avg_ip, 3),
+        'efficiency_f': round(eff_f, 3),
+        'game_script_f': round(gs_f, 3),
+        'bullpen_f': round(bp_f, 3),
+        'opp_quality_f': round(opp_f, 3),
         'days_rest_f': round(rest_f, 3),
-        'trend_f':     round(trend_f, 3),
-        'proj_ip':     round(proj_ip, 2),
-        'games_used':  len(sp_logs),
-        'weather_available': bool(weather),
+        'home_away_f': round(ha_f, 3),
+        'arsenal_f': round(ars_f, 3),
     }
-    return round(max(0.0, proj_outs), 3), factors
+    return round(max(0.0, proj), 3), factors
 
 
 # ── Team projection functions ────────────────────────────────────────────────────
 
-def _normal_cdf(x: float) -> float:
-    """Standard normal CDF approximation using math.erf."""
-    return 0.5 * (1.0 + math.erf(x / math.sqrt(2)))
+def _project_team_runs(
+    batting_logs: list,   # team_game_logs for the batting team
+    opp_sp_logs:  list,   # SP logs for the opposing starter
+    weather:      dict,
+    park:         dict,
+    is_home:      bool,
+    ump:          dict,
+    opp_bullpen_tired: bool,
+) -> tuple:
+    """Projected runs scored for one team."""
+    base = new_weighted_avg(batting_logs, 'points_scored') if batting_logs else LEAGUE_AVG['team_runs_per_game']
+    if base <= 0:
+        base = LEAGUE_AVG['team_runs_per_game']
 
+    # SP quality (strongest factor)
+    sp_era_l5  = compute_sp_l5_era(opp_sp_logs) if opp_sp_logs else LEAGUE_AVG['era']
+    sp_era_szn = compute_sp_season_era(opp_sp_logs) if opp_sp_logs else LEAGUE_AVG['era']
+    sp_q_f     = max(0.65, min(1.45, sp_era_l5 / LEAGUE_AVG['era'])) if sp_era_l5 > 0 else 1.0
 
-def project_moneyline(
-    home_logs: list[dict],
-    away_logs: list[dict],
-    home_sp_logs: list[dict],
-    away_sp_logs: list[dict],
-    weather: dict,
-    park: dict,
-) -> tuple[float, dict]:
-    """
-    Project moneyline (win probability) for the home team.
-    Uses log5 formula with run-based team strength + SP quality adjustment.
-    Returns (moneyline_american_odds, factors_dict).
-    """
-    # Team win rates from recent games
-    home_w = sum(1 for r in home_logs if r.get('result') == 'W')
-    away_w = sum(1 for r in away_logs if r.get('result') == 'W')
-    home_win_pct = (home_w / len(home_logs)) if home_logs else 0.5
-    away_win_pct = (away_w / len(away_logs)) if away_logs else 0.5
+    # FIP adjustment (subtle)
+    sp_fip     = compute_sp_fip(opp_sp_logs) if opp_sp_logs else LEAGUE_AVG['fip']
+    fip_adj    = max(0.95, min(1.05, 1.0 + (sp_fip - sp_era_szn) * 0.05)) if sp_era_szn > 0 else 1.0
 
-    # SP quality adjustments — better SP boosts team's win probability
-    home_sp_era = rolling_avg(home_sp_logs, 'offensive_rating', min(5, len(home_sp_logs))) if home_sp_logs else LEAGUE_AVG['era']
-    away_sp_era = rolling_avg(away_sp_logs, 'offensive_rating', min(5, len(away_sp_logs))) if away_sp_logs else LEAGUE_AVG['era']
+    # Team offense
+    off_f      = max(0.75, min(1.35, base / LEAGUE_AVG['team_runs_per_game']))
 
-    home_sp_adj = max(0.94, min(1.06, LEAGUE_AVG['era'] / home_sp_era)) if home_sp_era > 0 else 1.0
-    away_sp_adj = max(0.94, min(1.06, LEAGUE_AVG['era'] / away_sp_era)) if away_sp_era > 0 else 1.0
+    park_f     = park.get('runs', 1.0)
+    wind_f     = weather_tb_wind_factor(weather, park.get('name', ''))
+    temp_f     = weather_tb_temp_factor(weather)
 
-    # Home field advantage in MLB (~54% historical)
-    home_hfa = 1.05
+    ump_runs   = umpire_runs_f(ump)
 
-    home_s = max(0.01, min(0.99, home_win_pct * home_sp_adj * home_hfa))
-    away_s = max(0.01, min(0.99, away_win_pct * away_sp_adj))
+    bp_f       = 1.08 if opp_bullpen_tired else 1.00   # tired opp pen → more late runs
 
-    # Log5 win probability
-    denom    = home_s + away_s - 2 * home_s * away_s
-    win_prob = (home_s - home_s * away_s) / denom if denom != 0 else 0.5
-    win_prob = max(0.05, min(0.95, win_prob))
+    hfa        = 0.15 if is_home else 0.0   # home teams score +0.3 raw per game
 
-    # Convert to American moneyline
-    if win_prob >= 0.5:
-        ml = -(win_prob / (1 - win_prob)) * 100
-    else:
-        ml = ((1 - win_prob) / win_prob) * 100
+    proj = (base * sp_q_f * fip_adj * park_f * wind_f * temp_f * ump_runs * bp_f) + hfa
 
     factors = {
-        'home_win_pct':  round(home_win_pct, 4),
-        'away_win_pct':  round(away_win_pct, 4),
-        'home_sp_era':   round(home_sp_era, 3),
-        'away_sp_era':   round(away_sp_era, 3),
-        'home_sp_adj':   round(home_sp_adj, 3),
-        'away_sp_adj':   round(away_sp_adj, 3),
-        'home_hfa':      round(home_hfa, 3),
-        'win_probability': round(win_prob, 4),
-        'home_logs_used': len(home_logs),
-        'away_logs_used': len(away_logs),
+        'base': round(base, 3),
+        'sp_quality_f': round(sp_q_f, 3),
+        'sp_era_l5': round(sp_era_l5, 3),
+        'fip_adj': round(fip_adj, 3),
+        'park_runs_f': round(park_f, 3),
+        'wind_f': round(wind_f, 3),
+        'temp_f': round(temp_f, 3),
+        'ump_runs_f': round(ump_runs, 3),
+        'bullpen_f': round(bp_f, 3),
     }
-    return round(ml, 2), factors
-
-
-def project_run_line(
-    home_logs: list[dict],
-    away_logs: list[dict],
-    home_sp_logs: list[dict],
-    away_sp_logs: list[dict],
-    weather: dict,
-    park: dict,
-) -> tuple[float, dict, float, dict]:
-    """
-    Project run differential (home - away) and return cover probabilities.
-    Standard MLB run line is -1.5 / +1.5.
-    Returns (proj_run_diff, factors_dict, run_line_cover_prob, cover_factors).
-    """
-    # Home team run production
-    home_runs_scored  = weighted_avg(home_logs, 'points_scored') if home_logs else LEAGUE_AVG['team_runs_per_game']
-    away_runs_scored  = weighted_avg(away_logs, 'points_scored') if away_logs else LEAGUE_AVG['team_runs_per_game']
-    home_runs_allowed = weighted_avg(home_logs, 'points_allowed') if home_logs else LEAGUE_AVG['team_runs_per_game']
-    away_runs_allowed = weighted_avg(away_logs, 'points_allowed') if away_logs else LEAGUE_AVG['team_runs_per_game']
-
-    # SP ERA adjustment on runs allowed
-    home_sp_era = rolling_avg(home_sp_logs, 'offensive_rating', min(5, len(home_sp_logs))) if home_sp_logs else LEAGUE_AVG['era']
-    away_sp_era = rolling_avg(away_sp_logs, 'offensive_rating', min(5, len(away_sp_logs))) if away_sp_logs else LEAGUE_AVG['era']
-    home_sp_adj = max(0.80, min(1.20, LEAGUE_AVG['era'] / home_sp_era)) if home_sp_era > 0 else 1.0
-    away_sp_adj = max(0.80, min(1.20, LEAGUE_AVG['era'] / away_sp_era)) if away_sp_era > 0 else 1.0
-
-    park_runs_f   = park.get('runs', 1.0)
-    weather_f     = weather_hits_factor(weather) * 0.5 + weather_hr_factor(weather, '') * 0.5
-    home_hfa_runs = 0.3  # home teams score ~0.3 more runs per game historically
-
-    # Projected runs each team scores
-    proj_home_runs = (home_runs_scored * away_sp_adj + (LEAGUE_AVG['team_runs_per_game'] - away_runs_allowed)) / 2
-    proj_away_runs = (away_runs_scored * home_sp_adj + (LEAGUE_AVG['team_runs_per_game'] - home_runs_allowed)) / 2
-    proj_home_runs = proj_home_runs * park_runs_f * weather_f + home_hfa_runs
-    proj_away_runs = proj_away_runs * park_runs_f * weather_f
-
-    proj_run_diff = proj_home_runs - proj_away_runs
-
-    # Run line cover probability (home team -1.5)
-    # Cover if proj_run_diff > 1.5
-    rl_cover_prob = round(_normal_cdf((proj_run_diff - 1.5) / SPREAD_STD_DEV), 4)
-
-    factors = {
-        'home_runs_scored_avg':  round(home_runs_scored, 3),
-        'away_runs_scored_avg':  round(away_runs_scored, 3),
-        'home_runs_allowed_avg': round(home_runs_allowed, 3),
-        'away_runs_allowed_avg': round(away_runs_allowed, 3),
-        'home_sp_era':           round(home_sp_era, 3),
-        'away_sp_era':           round(away_sp_era, 3),
-        'home_sp_adj':           round(home_sp_adj, 3),
-        'away_sp_adj':           round(away_sp_adj, 3),
-        'park_runs_f':           round(park_runs_f, 3),
-        'weather_f':             round(weather_f, 3),
-        'home_hfa_runs':         home_hfa_runs,
-        'proj_home_runs':        round(proj_home_runs, 3),
-        'proj_away_runs':        round(proj_away_runs, 3),
-    }
-    cover_factors = {
-        'proj_run_diff':    round(proj_run_diff, 3),
-        'run_line':         -1.5,
-        'std_dev':          SPREAD_STD_DEV,
-        'rl_cover_prob':    rl_cover_prob,
-    }
-    return round(proj_run_diff, 3), factors, rl_cover_prob, cover_factors
+    return round(max(0.0, proj), 3), factors
 
 
 def project_total(
-    home_logs: list[dict],
-    away_logs: list[dict],
-    home_sp_logs: list[dict],
-    away_sp_logs: list[dict],
-    weather: dict,
-    park: dict,
-) -> tuple[float, dict]:
+    home_logs: list, away_logs: list,
+    home_sp_logs: list, away_sp_logs: list,
+    weather: dict, park: dict, ump: dict,
+    home_bullpen_tired: bool, away_bullpen_tired: bool,
+) -> tuple:
+    proj_home, home_f = _project_team_runs(home_logs, away_sp_logs, weather, park, True,  ump, away_bullpen_tired)
+    proj_away, away_f = _project_team_runs(away_logs, home_sp_logs, weather, park, False, ump, home_bullpen_tired)
+    proj_total = proj_home + proj_away
+    factors = {
+        'home_runs_f': home_f,
+        'away_runs_f': away_f,
+        'proj_home_runs': round(proj_home, 3),
+        'proj_away_runs': round(proj_away, 3),
+        'altitude_f': 1.12 if park.get('altitude_ft', 0) >= 5000 else 1.0,
+    }
+    return round(proj_total, 3), proj_home, proj_away, factors
+
+
+def project_run_line(proj_run_diff: float) -> tuple:
     """
-    Project game total (combined runs).
-    Park factor and weather are the most powerful levers here.
+    Underdogs historically cover +1.5 at ~58% — baked into std_dev.
+    Returns (home_cover_prob, away_cover_prob).
     """
-    home_runs_scored  = weighted_avg(home_logs, 'points_scored') if home_logs else LEAGUE_AVG['team_runs_per_game']
-    away_runs_scored  = weighted_avg(away_logs, 'points_scored') if away_logs else LEAGUE_AVG['team_runs_per_game']
+    home_cover = round(_normal_cdf((proj_run_diff - 1.5) / SPREAD_STD_DEV), 4)
+    away_cover = round(1 - home_cover, 4)
+    return home_cover, away_cover
 
-    home_sp_era = rolling_avg(home_sp_logs, 'offensive_rating', min(5, len(home_sp_logs))) if home_sp_logs else LEAGUE_AVG['era']
-    away_sp_era = rolling_avg(away_sp_logs, 'offensive_rating', min(5, len(away_sp_logs))) if away_sp_logs else LEAGUE_AVG['era']
 
-    # SP quality inversely suppresses runs
-    home_sp_runs_adj = max(0.70, min(1.30, away_sp_era / LEAGUE_AVG['era'])) if away_sp_era > 0 else 1.0  # away SP faces home batters
-    away_sp_runs_adj = max(0.70, min(1.30, home_sp_era / LEAGUE_AVG['era'])) if home_sp_era > 0 else 1.0
+def project_moneyline(
+    home_logs: list, away_logs: list,
+    home_sp_logs: list, away_sp_logs: list,
+) -> tuple:
+    """
+    Log5 formula + SP quality + HFA.
+    Returns (home_win_prob, away_win_prob, home_ml, away_ml, factors).
+    """
+    def skill(logs):
+        runs_for     = new_weighted_avg(logs, 'points_scored')  if logs else LEAGUE_AVG['team_runs_per_game']
+        runs_against = new_weighted_avg(logs, 'points_allowed') if logs else LEAGUE_AVG['team_runs_per_game']
+        total = runs_for + runs_against
+        return runs_for / total if total > 0 else 0.50
 
-    park_runs_f  = park.get('runs', 1.0)
-    # Weather is the biggest swing factor for totals
-    weather_runs = weather_hr_factor(weather, '') * 0.5 + weather_hits_factor(weather) * 0.5
+    home_s = skill(home_logs)
+    away_s = skill(away_logs)
+    denom  = home_s + away_s - 2 * home_s * away_s
+    log5   = (home_s - home_s * away_s) / denom if denom > 0 else 0.54
 
-    proj_home_runs = home_runs_scored * home_sp_runs_adj * park_runs_f * weather_runs
-    proj_away_runs = away_runs_scored * away_sp_runs_adj * park_runs_f * weather_runs
-    proj_total     = proj_home_runs + proj_away_runs
+    # SP ERA adjustment
+    home_sp_era = compute_sp_l5_era(home_sp_logs) if home_sp_logs else LEAGUE_AVG['era']
+    away_sp_era = compute_sp_l5_era(away_sp_logs) if away_sp_logs else LEAGUE_AVG['era']
+    # Good SP for home team → home wins more; good SP for away → away wins more
+    sp_adj      = (away_sp_era - home_sp_era) * 0.025   # ~2.5% per ERA point
+    home_sp_adj = max(-0.10, min(0.10, sp_adj))
+
+    # HFA: home teams win 54% base
+    hfa_adj     = 0.020
+
+    home_win = max(0.30, min(0.80, log5 + home_sp_adj + hfa_adj))
+    away_win = 1 - home_win
+
+    def to_ml(p):
+        if p >= 0.5:
+            return round(-(p / (1 - p)) * 100, 0)
+        return round(((1 - p) / p) * 100, 0)
 
     factors = {
-        'home_runs_scored_avg': round(home_runs_scored, 3),
-        'away_runs_scored_avg': round(away_runs_scored, 3),
-        'home_sp_era':          round(home_sp_era, 3),
-        'away_sp_era':          round(away_sp_era, 3),
-        'home_sp_runs_adj':     round(home_sp_runs_adj, 3),
-        'away_sp_runs_adj':     round(away_sp_runs_adj, 3),
-        'park_runs_f':          round(park_runs_f, 3),
-        'weather_runs_f':       round(weather_runs, 3),
-        'proj_home_runs':       round(proj_home_runs, 3),
-        'proj_away_runs':       round(proj_away_runs, 3),
-        'weather_available':    bool(weather),
+        'home_skill': round(home_s, 4),
+        'away_skill': round(away_s, 4),
+        'log5': round(log5, 4),
+        'sp_adj': round(home_sp_adj, 4),
+        'home_sp_era_l5': round(home_sp_era, 3),
+        'away_sp_era_l5': round(away_sp_era, 3),
+        'home_win_prob': round(home_win, 4),
+        'away_win_prob': round(away_win, 4),
     }
-    return round(max(0.0, proj_total), 3), factors
+    return home_win, away_win, to_ml(home_win), to_ml(away_win), factors
+
+
+# ── Confidence scoring ───────────────────────────────────────────────────────────
+
+def compute_confidence(
+    prop_type:       str,
+    batter_pa:       int      = 100,
+    sp_starts:       int      = 10,
+    lineup_confirmed: bool    = True,
+    ump_available:   bool     = False,
+    weather_available: bool   = False,
+    career_ab:       int      = 0,
+    platoon_strong:  bool     = False,
+    sp_fip_confirms: bool     = False,
+    arsenal_extreme: bool     = False,
+    matchup_edge:    bool     = False,
+    weather_aligns:  bool     = False,
+) -> int:
+    """
+    Base 60. Add/subtract per spec. Edge bonuses applied by edge detector.
+    Soft cap > 85: 85 + (x-85)×0.40. Hard cap: 92.
+    """
+    c = 60
+
+    # Positive factors (non-edge)
+    if career_ab >= 20 and matchup_edge:   c += 5
+    if platoon_strong:                      c += 5
+    if ump_available:                       c += 4
+    if weather_aligns:                      c += 4
+    if lineup_confirmed:                    c += 4
+    if sp_fip_confirms:                     c += 3
+    if arsenal_extreme:                     c += 3
+
+    # Negative factors
+    if not lineup_confirmed:               c -= 8
+    if sp_starts < 5:                      c -= 6
+    if batter_pa < 50:                     c -= 5
+    if not ump_available:                  c -= 6
+    if not weather_available:              c -= 4
+
+    # Prop-type variance penalties
+    if prop_type == 'home_runs':           c -= 8
+    if prop_type == 'earned_runs':         c -= 6
+    if prop_type == 'stolen_bases':        c -= 10
+
+    # Soft cap
+    if c > 85:
+        c = int(85 + (c - 85) * 0.40)
+
+    return max(45, min(92, c))
 
 
 # ── DB write functions ───────────────────────────────────────────────────────────
 
 def upsert_player_projection(
-    conn,
-    player_id: int,
-    player_name: str,
-    team: str,
-    opponent: str,
-    game_date: date,
-    proj: dict,
+    conn, player_id, player_name, team, opponent, game_date, proj
 ) -> int:
-    """
-    Upsert one row per prop type into chalk_projections.
-    Architecture: ONE ROW PER PLAYER PER PROP PER GAME matching the NHL model.
-
-    For BATTERS, inserts 6 rows (hits, total_bases, home_runs, rbi, runs, stolen_bases).
-    For PITCHERS, inserts 4 rows (strikeouts, earned_runs, walks, outs_recorded).
-
-    Returns the number of rows upserted.
-    """
-    home_away   = proj.get('home_away', 'home')
-    confidence  = proj.get('confidence_score', 60)
+    home_away  = proj.get('home_away', 'home')
+    confidence = proj.get('confidence_score', 60)
     factors_all = proj.get('factors_json', {})
     rows_written = 0
 
-    # Determine batter vs pitcher by which keys are populated
     is_pitcher = proj.get('proj_k', 0) > 0 or proj.get('proj_er', 0) > 0 or proj.get('proj_outs', 0) > 0
 
     if is_pitcher:
         prop_rows = [
-            ('strikeouts',    proj.get('proj_k', 0),    factors_all.get('strikeouts', {})),
-            ('earned_runs',   proj.get('proj_er', 0),   factors_all.get('earned_runs', {})),
-            ('walks',         proj.get('proj_walks', 0), factors_all.get('walks', {})),
-            ('outs_recorded', proj.get('proj_outs', 0), factors_all.get('outs_recorded', {})),
+            ('strikeouts',    proj.get('proj_k',     0), factors_all.get('strikeouts',    {})),
+            ('earned_runs',   proj.get('proj_er',    0), factors_all.get('earned_runs',   {})),
+            ('walks',         proj.get('proj_walks', 0), factors_all.get('walks',         {})),
+            ('outs_recorded', proj.get('proj_outs',  0), factors_all.get('outs_recorded', {})),
         ]
     else:
         prop_rows = [
-            ('hits',          proj.get('proj_hits', 0), factors_all.get('hits', {})),
-            ('total_bases',   proj.get('proj_tb', 0),   factors_all.get('tb', {})),
-            ('home_runs',     proj.get('proj_hr', 0),   factors_all.get('hr', {})),
-            ('rbi',           proj.get('proj_rbi', 0),  factors_all.get('rbi', {})),
-            ('runs',          proj.get('proj_runs', 0), factors_all.get('runs', {})),
-            ('stolen_bases',  proj.get('proj_sb', 0),   factors_all.get('sb', {})),
+            ('hits',         proj.get('proj_hits', 0), factors_all.get('hits', {})),
+            ('total_bases',  proj.get('proj_tb',   0), factors_all.get('tb',   {})),
+            ('home_runs',    proj.get('proj_hr',   0), factors_all.get('hr',   {})),
+            ('rbi',          proj.get('proj_rbi',  0), factors_all.get('rbi',  {})),
+            ('runs',         proj.get('proj_runs', 0), factors_all.get('runs', {})),
+            ('stolen_bases', proj.get('proj_sb',   0), factors_all.get('sb',   {})),
         ]
 
     with conn.cursor() as cur:
         for prop_type, proj_value, prop_factors in prop_rows:
-            # Merge context into per-prop factors
-            merged_factors = dict(prop_factors)
+            merged = dict(prop_factors)
             if 'context' in factors_all:
-                merged_factors['context'] = factors_all['context']
-            merged_factors['lineup_confirmed'] = proj.get('lineup_confirmed', True)
+                merged['context'] = factors_all['context']
+            merged['lineup_confirmed'] = proj.get('lineup_confirmed', True)
 
             cur.execute(
                 """INSERT INTO chalk_projections (
@@ -1840,8 +2032,7 @@ def upsert_player_projection(
                      confidence_score, model_version, factors_json
                    ) VALUES (
                      %s, %s, %s, 'MLB', %s, %s, %s,
-                     %s, %s,
-                     %s, %s, %s
+                     %s, %s, %s, %s, %s
                    )
                    ON CONFLICT (player_id, game_date, prop_type) DO UPDATE SET
                      proj_value       = EXCLUDED.proj_value,
@@ -1851,7 +2042,7 @@ def upsert_player_projection(
                 (
                     player_id, player_name, team, game_date, opponent, home_away,
                     prop_type, proj_value,
-                    confidence, MODEL_VERSION, json.dumps(merged_factors),
+                    confidence, MODEL_VERSION, json.dumps(merged),
                 )
             )
             rows_written += 1
@@ -1859,18 +2050,7 @@ def upsert_player_projection(
     return rows_written
 
 
-def upsert_team_projection(
-    conn,
-    team_name: str,
-    opponent: str,
-    game_date: date,
-    proj: dict,
-) -> None:
-    """
-    Upsert a team projection into team_projections.
-    Uses the actual unique index: (team_name, game_date, prop_type).
-    Stores one row with prop_type='game' to hold all team game-level projections.
-    """
+def upsert_team_projection(conn, team_name, opponent, game_date, proj) -> None:
     with conn.cursor() as cur:
         cur.execute(
             """INSERT INTO team_projections (
@@ -1883,8 +2063,7 @@ def upsert_team_projection(
                  confidence_score, model_version, factors_json
                ) VALUES (
                  %(team_id)s, %(team_name)s, 'MLB', %(game_date)s,
-                 %(opponent)s, %(home_away)s,
-                 'game',
+                 %(opponent)s, %(home_away)s, 'game',
                  %(proj_points)s, %(proj_points_allowed)s, %(proj_total)s,
                  %(moneyline_projection)s, %(win_probability)s,
                  %(spread_projection)s, %(spread_cover_probability)s,
@@ -1892,7 +2071,6 @@ def upsert_team_projection(
                  %(confidence_score)s, %(model_version)s, %(factors_json)s
                )
                ON CONFLICT (team_name, game_date, prop_type) DO UPDATE SET
-                 prop_type                = EXCLUDED.prop_type,
                  proj_points              = EXCLUDED.proj_points,
                  proj_points_allowed      = EXCLUDED.proj_points_allowed,
                  proj_total               = EXCLUDED.proj_total,
@@ -1910,864 +2088,472 @@ def upsert_team_projection(
     conn.commit()
 
 
-# ── Game processing helpers ──────────────────────────────────────────────────────
+# ── Lineup fallback system (3-tier) ──────────────────────────────────────────────
 
-def get_pitcher_hand(player_id: int) -> str:
-    """Returns 'L' or 'R' for pitcher throwing hand."""
-    try:
-        resp = requests.get(
-            f'https://statsapi.mlb.com/api/v1/people/{player_id}',
-            timeout=10,
-        )
-        data = resp.json()
-        for person in data.get('people', []):
-            return person.get('pitchHand', {}).get('code', 'R')
-    except Exception:
-        pass
-    return 'R'  # default to right-handed
-
-
-def _extract_sps_from_boxscore(boxscore: dict) -> tuple[Optional[dict], Optional[dict]]:
-    """
-    Extract home and away starting pitchers from a boxscore_data response.
-    Returns (home_sp, away_sp) dicts with id, name, throws keys.
-    """
-    home_sp = None
-    away_sp = None
-
+def _extract_sps_from_boxscore(boxscore):
+    home_sp = away_sp = None
     for side_key in ('home', 'away'):
-        side_data = boxscore.get(side_key, {})
-        players   = side_data.get('players', {})
+        side_data      = boxscore.get(side_key, {})
+        players        = side_data.get('players', {})
         pitching_order = side_data.get('pitchers', [])
         if pitching_order:
             sp_id   = pitching_order[0]
-            pid_key = f'ID{sp_id}'
-            sp_info = players.get(pid_key, {}).get('person', {})
-            sp_dict = {
-                'id':     int(sp_id),
-                'name':   sp_info.get('fullName', f'Pitcher {sp_id}'),
-                'throws': 'R',  # will be fetched separately if needed
-            }
+            sp_info = players.get(f'ID{sp_id}', {}).get('person', {})
+            sp_dict = {'id': int(sp_id), 'name': sp_info.get('fullName', f'Pitcher {sp_id}'), 'throws': 'R'}
             if side_key == 'home':
                 home_sp = sp_dict
             else:
                 away_sp = sp_dict
-
     return home_sp, away_sp
 
 
 def get_batting_lineup_with_fallback(
-    conn,
-    game_pk: int,
-    home_team: str,
-    away_team: str,
-    home_team_id: int,
-    away_team_id: int,
-    game_date: date,
-) -> tuple[list[dict], list[dict], bool, Optional[dict], Optional[dict]]:
+    conn, game_pk, home_team, away_team, home_team_id, away_team_id, game_date
+):
     """
-    Three-tier fallback system for batting lineups.
-
-    Tier 1: statsapi.boxscore_data — official lineup if posted (>= 9 batters)
-    Tier 2: player_game_logs — batters who played yesterday for each team
-    Tier 3: MLB active roster API — non-pitchers, first 9
-
-    Returns:
-      (home_lineup, away_lineup, lineup_confirmed, home_sp, away_sp)
-      lineup_confirmed = True only when Tier 1 succeeds with >= 9 batters per side
+    Tier 1: statsapi.boxscore_data (official if >= 9 batters each side)
+    Tier 2: yesterday's player_game_logs
+    Tier 3: MLB active roster API (non-pitchers, first 9)
+    Returns: (home_lineup, away_lineup, lineup_confirmed, home_sp, away_sp)
     """
-    home_sp = None
-    away_sp = None
+    home_sp = away_sp = None
 
-    # ── Tier 1: Live boxscore ─────────────────────────────────────────
+    # Tier 1
     try:
         boxscore = statsapi.boxscore_data(game_pk)
-
-        home_lineup_t1 = []
-        away_lineup_t1 = []
-
-        for side_key, lineup_list in [('home', home_lineup_t1), ('away', away_lineup_t1)]:
+        home_t1 = []
+        away_t1 = []
+        for side_key, lineup_list in [('home', home_t1), ('away', away_t1)]:
             side_data     = boxscore.get(side_key, {})
             players       = side_data.get('players', {})
             batting_order = side_data.get('battingOrder', [])
-
-            for order_idx, player_id in enumerate(batting_order):
-                pid_key = f'ID{player_id}'
-                player  = players.get(pid_key, {})
-                info    = player.get('person', {})
-                pos     = player.get('position', {}).get('abbreviation', '')
+            for idx, player_id in enumerate(batting_order):
+                pinfo = players.get(f'ID{player_id}', {})
+                info  = pinfo.get('person', {})
+                pos   = pinfo.get('position', {}).get('abbreviation', '')
                 lineup_list.append({
-                    'id':            int(player_id),
-                    'name':          info.get('fullName', f'Player {player_id}'),
-                    'batting_order': order_idx + 1,
-                    'position':      pos,
+                    'id': int(player_id),
+                    'name': info.get('fullName', f'Player {player_id}'),
+                    'batting_order': idx + 1,
+                    'position': pos,
                 })
-
-        # Only accept Tier 1 if both sides have >= 9 batters
-        if len(home_lineup_t1) >= 9 and len(away_lineup_t1) >= 9:
+        if len(home_t1) >= 9 and len(away_t1) >= 9:
             home_sp, away_sp = _extract_sps_from_boxscore(boxscore)
-            log.info(f'  Lineup source: Tier 1 (boxscore) — {len(home_lineup_t1)} home / {len(away_lineup_t1)} away batters')
-            return home_lineup_t1, away_lineup_t1, True, home_sp, away_sp
-
-        log.info(f'  Tier 1 incomplete (home={len(home_lineup_t1)}, away={len(away_lineup_t1)}). Trying Tier 2.')
-        # Still extract SPs if available
-        if home_sp is None and away_sp is None:
+            log.info(f'  Lineup Tier 1: {len(home_t1)} home / {len(away_t1)} away')
+            return home_t1, away_t1, True, home_sp, away_sp
+        log.info(f'  Tier 1 incomplete ({len(home_t1)}/{len(away_t1)}). Trying Tier 2.')
+        if not home_sp and not away_sp:
             home_sp, away_sp = _extract_sps_from_boxscore(boxscore)
-
     except Exception as exc:
-        log.warning(f'  boxscore_data({game_pk}) failed: {exc}. Trying Tier 2.')
+        log.warning(f'  boxscore_data({game_pk}) failed: {exc}')
 
-    # ── Tier 2: Yesterday's player_game_logs ──────────────────────────
+    # Tier 2: yesterday's logs
     yesterday = game_date - timedelta(days=1)
 
-    def get_yesterday_lineup(team_name: str) -> list[dict]:
+    def yesterday_lineup(team_name):
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
-                """SELECT player_id, player_name, home_away
-                   FROM player_game_logs
-                   WHERE team ILIKE %s AND sport = 'MLB'
-                     AND game_date = %s
+                """SELECT player_id, player_name FROM player_game_logs
+                   WHERE team ILIKE %s AND sport = 'MLB' AND game_date = %s
                      AND fg_att IS NOT NULL
-                   ORDER BY player_id
-                   LIMIT 12""",
-                (f'%{team_name[:3]}%', yesterday),
+                   ORDER BY player_id LIMIT 12""",
+                (f'%{team_name[:3]}%', yesterday)
             )
             rows = cur.fetchall()
         if len(rows) >= 7:
-            return [
-                {
-                    'id':            r['player_id'],
-                    'name':          r['player_name'],
-                    'batting_order': idx + 1,
-                    'position':      'DH',
-                }
-                for idx, r in enumerate(rows[:9])
-            ]
+            return [{'id': r['player_id'], 'name': r['player_name'],
+                     'batting_order': i+1, 'position': 'DH'} for i, r in enumerate(rows[:9])]
         return []
 
-    home_lineup_t2 = get_yesterday_lineup(home_team)
-    away_lineup_t2 = get_yesterday_lineup(away_team)
+    home_t2 = yesterday_lineup(home_team)
+    away_t2 = yesterday_lineup(away_team)
 
-    if home_lineup_t2 and away_lineup_t2:
-        log.info(f'  Lineup source: Tier 2 (yesterday logs) — {len(home_lineup_t2)} home / {len(away_lineup_t2)} away')
-        return home_lineup_t2, away_lineup_t2, False, home_sp, away_sp
+    if len(home_t2) >= 7 and len(away_t2) >= 7:
+        log.info(f'  Lineup Tier 2: {len(home_t2)} home / {len(away_t2)} away')
+        return home_t2, away_t2, False, home_sp, away_sp
 
-    log.info(f'  Tier 2 insufficient. Trying Tier 3 (active roster).')
-
-    # ── Tier 3: Active roster API ─────────────────────────────────────
-    def get_roster_lineup(team_id: int) -> list[dict]:
+    # Tier 3: active roster
+    def roster_lineup(team_id):
         try:
             resp = requests.get(
-                f'https://statsapi.mlb.com/api/v1/teams/{team_id}/roster',
-                params={'rosterType': 'active'},
-                timeout=15,
+                f'https://statsapi.mlb.com/api/v1/teams/{team_id}/roster?rosterType=active',
+                timeout=10,
             )
-            data = resp.json()
-            batters = [
-                p for p in data.get('roster', [])
-                if p.get('position', {}).get('type', '') != 'Pitcher'
-            ]
-            return [
-                {
-                    'id':            p['person']['id'],
-                    'name':          p['person'].get('fullName', ''),
-                    'batting_order': idx + 1,
-                    'position':      p.get('position', {}).get('abbreviation', 'DH'),
-                }
-                for idx, p in enumerate(batters[:9])
-            ]
-        except Exception as exc:
-            log.warning(f'  Roster API failed for team {team_id}: {exc}')
+            roster = resp.json().get('roster', [])
+            batters = [p for p in roster
+                       if p.get('position', {}).get('type', {}).get('description', '') != 'Pitcher'][:9]
+            return [{'id': p['person']['id'], 'name': p['person']['fullName'],
+                     'batting_order': i+1, 'position': p.get('position', {}).get('abbreviation', '')}
+                    for i, p in enumerate(batters)]
+        except Exception:
             return []
 
-    home_lineup_t3 = get_roster_lineup(home_team_id) if home_team_id else []
-    away_lineup_t3 = get_roster_lineup(away_team_id) if away_team_id else []
+    home_t3 = roster_lineup(home_team_id) if home_team_id else []
+    away_t3 = roster_lineup(away_team_id) if away_team_id else []
 
-    log.info(f'  Lineup source: Tier 3 (active roster) — {len(home_lineup_t3)} home / {len(away_lineup_t3)} away')
-    return home_lineup_t3, away_lineup_t3, False, home_sp, away_sp
+    if home_t3 or away_t3:
+        log.info(f'  Lineup Tier 3 (roster): {len(home_t3)} home / {len(away_t3)} away')
 
-
-def get_platoon_splits(conn, player_id: int) -> dict:
-    """Fetch platoon splits for a batter from player_splits table."""
-    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute(
-            """SELECT vs_lhp_avg, vs_lhp_obp, vs_lhp_slg,
-                      vs_rhp_avg, vs_rhp_obp, vs_rhp_slg
-               FROM player_splits
-               WHERE player_id = %s AND sport = 'MLB' AND season = %s""",
-            (player_id, CURRENT_SEASON),
-        )
-        row = cur.fetchone()
-        return dict(row) if row else {}
-
-
-def platoon_split_factor(splits: dict, sp_throws: str, season_avg: float) -> float:
-    """
-    Returns a multiplier based on batter vs pitcher handedness.
-    sp_throws: 'L' or 'R'
-    season_avg: batter's overall batting average
-    """
-    if not splits or not sp_throws or season_avg <= 0:
-        return 1.0
-    if sp_throws == 'L':
-        split_avg = splits.get('vs_lhp_avg')
-    else:
-        split_avg = splits.get('vs_rhp_avg')
-    if not split_avg or float(split_avg) <= 0:
-        return 1.0
-    ratio = float(split_avg) / season_avg
-    return max(0.75, min(1.30, ratio))
-
-
-def get_team_k_rate(conn, team_name: str) -> float:
-    """
-    Get a team's batter strikeout rate from recent player_game_logs.
-    Uses turnovers=strikeouts (batter K) and fg_att=atBats columns.
-    Returns K rate as a fraction (e.g. 0.233 = 23.3% K rate).
-    """
-    with conn.cursor() as cur:
-        cur.execute(
-            """SELECT
-                 SUM(turnovers) AS total_k,
-                 SUM(fg_att)    AS total_ab
-               FROM player_game_logs
-               WHERE team ILIKE %s
-                 AND sport = 'MLB'
-                 AND season = %s
-                 AND fg_att > 0
-                 AND game_date >= CURRENT_DATE - INTERVAL '30 days'""",
-            (f'%{team_name[:3]}%', CURRENT_SEASON),
-        )
-        row = cur.fetchone()
-        if row and row[0] is not None and row[1] and float(row[1]) > 0:
-            k_rate = float(row[0]) / float(row[1])
-            return max(0.150, min(0.320, k_rate))
-    return 0.233  # league average
-
-
-def get_team_obp(logs: list[dict]) -> float:
-    """
-    Approximate team OBP from team game logs.
-    We don't have direct OBP in team_game_logs, so we proxy it from
-    recent offensive output: more runs/game ~ higher OBP.
-    """
-    if not logs:
-        return LEAGUE_AVG['obp']
-    avg_runs = weighted_avg(logs, 'points_scored')
-    # Rough calibration: 4.6 R/G ~ .312 OBP, linear scale ±0.01 per 0.3 runs
-    obp = LEAGUE_AVG['obp'] + (avg_runs - LEAGUE_AVG['team_runs_per_game']) * (0.01 / 0.3)
-    return max(0.270, min(0.370, obp))
-
-
-def confidence_score_batter(logs: list[dict], rest_days: int, lineup_confirmed: bool = False, sp_logs: list[dict] = None) -> int:
-    """Compute confidence score (45–95) for a batter projection. v2.0."""
-    confidence = 60
-    if len(logs) >= 50: confidence += 5
-    elif len(logs) >= 30: confidence += 3
-    if len(logs) < 15: confidence -= 6   # small sample
-    if rest_days == 0:  confidence -= 5
-    if rest_days >= 5:  confidence -= 3
-    if lineup_confirmed:  confidence += 4
-    else:                 confidence -= 8  # using roster fallback
-    if sp_logs and len(sp_logs) >= 5: confidence += 3
-    l10_hits = rolling_avg(logs, 'fg_made', min(10, len(logs)))
-    l30_hits = rolling_avg(logs, 'fg_made', min(30, len(logs)))
-    if l30_hits > 0:
-        if l10_hits > l30_hits * 1.15: confidence += 5   # hot streak
-        elif l10_hits < l30_hits * 0.80: confidence -= 8  # cold
-    return max(45, min(95, confidence))
-
-
-def confidence_score_pitcher(sp_logs: list[dict], days_rest: int = 5) -> int:
-    """Compute confidence score for a pitcher projection. v2.0."""
-    confidence = 60
-    if len(sp_logs) >= 20: confidence += 5
-    elif len(sp_logs) >= 10: confidence += 3
-    if len(sp_logs) < 5: confidence -= 8   # small sample
-    if days_rest <= 3: confidence -= 5      # short rest
-    if len(sp_logs) >= 5:
-        l5_er  = rolling_avg(sp_logs, 'points', 5)
-        szn_er = rolling_avg(sp_logs, 'points', len(sp_logs))
-        if szn_er > 0:
-            if l5_er < szn_er * 0.85: confidence += 6
-            elif l5_er > szn_er * 1.20: confidence -= 8
-    return max(45, min(92, confidence))
-
-
-# ── New v2.1 factor functions — matchup, arsenal, umpire, bullpen, splits ─────────
-
-def get_pitcher_batter_matchup_factor(conn, pitcher_id, batter_id, league_avg_ba=0.248):
-    """Career matchup factor. High weight if 20+ AB, low if <10."""
-    if not pitcher_id or not batter_id:
-        return 1.0
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT ab, avg FROM pitcher_batter_matchups
-        WHERE pitcher_id = %s AND batter_id = %s
-        ORDER BY season DESC LIMIT 1
-    """, (pitcher_id, batter_id))
-    row = cur.fetchone()
-    if not row or not row[0] or row[0] < 5:
-        return 1.0
-    ab, career_avg = row[0], float(row[1] or league_avg_ba)
-    weight = min(1.0, (ab - 5) / 15.0)  # 0 at 5 AB, 1.0 at 20+ AB
-    raw_factor = career_avg / league_avg_ba if league_avg_ba > 0 else 1.0
-    raw_factor = max(0.7, min(1.4, raw_factor))
-    return 1.0 + (raw_factor - 1.0) * weight
-
-
-def get_pitcher_arsenal_k_factor(conn, pitcher_id):
-    """Whiff-rate weighted arsenal factor for K projections."""
-    if not pitcher_id:
-        return 1.0
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT usage_pct, whiff_rate FROM pitcher_arsenal
-        WHERE pitcher_id = %s
-        AND usage_pct IS NOT NULL AND whiff_rate IS NOT NULL
-        AND season = (SELECT MAX(season) FROM pitcher_arsenal WHERE pitcher_id = %s)
-    """, (pitcher_id, pitcher_id))
-    rows = cur.fetchall()
-    if not rows:
-        return 1.0
-    weighted_whiff = sum(float(r[0]) * float(r[1]) for r in rows) / 100.0
-    total_usage = sum(float(r[0]) for r in rows)
-    if total_usage > 0:
-        weighted_whiff = weighted_whiff / (total_usage / 100.0)
-    league_avg_whiff = 0.245
-    factor = weighted_whiff / league_avg_whiff if league_avg_whiff > 0 else 1.0
-    return max(0.82, min(1.22, factor))
-
-
-def get_umpire_factors(conn, game_pk):
-    """Get umpire K/BB/runs factors for tonight's game."""
-    if not game_pk:
-        return {'k_factor': 1.0, 'bb_factor': 1.0, 'runs_factor': 1.0}
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT ut.avg_k_per_game, ut.avg_bb_per_game, ut.avg_runs_per_game, ut.zone_rating
-        FROM game_umpires gu
-        JOIN umpire_tendencies ut ON gu.hp_umpire_id = ut.umpire_id
-        WHERE gu.game_pk = %s
-    """, (game_pk,))
-    row = cur.fetchone()
-    if not row or not row[0]:
-        return {'k_factor': 1.0, 'bb_factor': 1.0, 'runs_factor': 1.0}
-    league_k, league_bb, league_runs = 17.0, 6.2, 8.8
-    return {
-        'k_factor': max(0.88, min(1.15, float(row[0]) / league_k)),
-        'bb_factor': max(0.88, min(1.15, float(row[1]) / league_bb)),
-        'runs_factor': max(0.90, min(1.12, float(row[2]) / league_runs)),
-    }
-
-
-def get_bullpen_factor(conn, team_id, collected_date=None):
-    """Return bullpen fatigue factor (>0 = tired pen = more runs allowed late)."""
-    if not team_id:
-        return 1.0
-    if not collected_date:
-        from datetime import date as dt
-        collected_date = dt.today().strftime('%Y-%m-%d')
-    cur = conn.cursor()
-    # Check if top relievers (high recent usage) are overworked
-    cur.execute("""
-        SELECT pitcher_name, pitches_last_3, innings_last_3, days_since_last_app
-        FROM bullpen_usage
-        WHERE team_id = %s AND collected_date = %s
-        ORDER BY pitches_last_3 DESC
-        LIMIT 5
-    """, (team_id, collected_date))
-    rows = cur.fetchall()
-    if not rows:
-        return 1.0
-    # Count how many top arms are fatigued (50+ pitches in 3 days or appeared 2+ times)
-    tired = sum(1 for r in rows if float(r[1] or 0) >= 50 or float(r[2] or 0) >= 2.0)
-    if tired >= 2:
-        return 1.05  # tired bullpen → more late-game runs
-    elif tired == 1:
-        return 1.02
-    return 1.0
-
-
-def get_day_night_factor(conn, player_id, is_day_game, season):
-    """Day/night split factor for batter."""
-    if player_id is None:
-        return 1.0
-    cur = conn.cursor()
-    col = 'day_avg' if is_day_game else 'night_avg'
-    cur.execute(f"""
-        SELECT {col} FROM player_splits
-        WHERE player_id = %s AND sport = 'MLB' AND season = %s
-    """, (player_id, season))
-    row = cur.fetchone()
-    if not row or not row[0]:
-        return 1.0
-    split_avg = float(row[0])
-    # Get season avg for comparison
-    cur.execute("""
-        SELECT AVG(fg_pct) FROM player_game_logs
-        WHERE player_id = %s AND sport = 'MLB' AND season = %s
-        AND fg_pct IS NOT NULL AND fg_pct > 0
-    """, (player_id, season))
-    season_row = cur.fetchone()
-    if not season_row or not season_row[0]:
-        return 1.0
-    season_avg = float(season_row[0])
-    if season_avg <= 0:
-        return 1.0
-    factor = split_avg / season_avg
-    return max(0.85, min(1.20, factor))
-
-
-def get_risp_factor(conn, player_id, season):
-    """RISP clutch factor for RBI projections."""
-    if not player_id:
-        return 1.0
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT risp_avg FROM player_splits
-        WHERE player_id = %s AND sport = 'MLB' AND season = %s
-    """, (player_id, season))
-    row = cur.fetchone()
-    if not row or not row[0]:
-        return 1.0
-    league_risp_avg = 0.240
-    factor = float(row[0]) / league_risp_avg
-    return max(0.80, min(1.25, factor))
+    return home_t3, away_t3, False, home_sp, away_sp
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description='Chalk MLB Projection Model')
+    parser = argparse.ArgumentParser(description='Chalk MLB Projection Model v3.0')
     parser.add_argument('--date', default=str(date.today()), help='Game date YYYY-MM-DD')
-    args   = parser.parse_args()
+    args      = parser.parse_args()
     game_date = date.fromisoformat(args.date)
 
     log.info('═══════════════════════════════════════════════════')
-    log.info(f'Chalk MLB Projection Model — {game_date}')
-    log.info(f'Model version: {MODEL_VERSION}')
+    log.info(f'Chalk MLB Projection Model v3.0 — {game_date}')
     log.info('═══════════════════════════════════════════════════')
 
     conn = get_db()
 
-    # ── Step 1: Fetch today's MLB schedule ────────────────────────────────────
-    log.info('\n▶ STEP 1: Fetching MLB schedule')
+    # ── Step 1: Schedule ──────────────────────────────────────────────────────
+    log.info('\n▶ STEP 1: Fetching schedule')
     games = get_todays_games(conn, game_date)
-
     if not games:
-        log.info('  No games found for today. Exiting.')
+        log.info('  No games today. Exiting.')
         conn.close()
         return
 
-    # ── Step 2: Fetch weather for each unique venue ───────────────────────────
-    log.info('\n▶ STEP 2: Fetching weather per venue')
-    weather_cache: dict[str, dict] = {}   # keyed by venue_name now
+    # ── Step 2: Weather ───────────────────────────────────────────────────────
+    log.info('\n▶ STEP 2: Fetching weather')
+    weather_cache = {}
     for game in games:
-        venue_name = game.get('venue_name', '')
-        if venue_name in weather_cache:
+        vname = game.get('venue_name', '')
+        if vname in weather_cache:
             continue
-        coords = get_venue_coords(venue_name)
+        coords = get_venue_coords(vname)
         if coords:
-            lat, lon = coords
-            log.info(f'  Fetching weather for {venue_name}')
-            w = fetch_weather(lat, lon)
+            w = fetch_weather(*coords)
             if w:
-                log.info(f'    Temp={w.get("temp_f")}°F, Wind={w.get("wind_mph")}mph, Dir={wind_direction_label(w.get("wind_dir_deg", 0))}')
-            else:
-                log.warning(f'    Weather unavailable for {venue_name} — model will run without it')
-            weather_cache[venue_name] = w
+                log.info(f'  {vname}: {w.get("temp_f")}°F wind={w.get("wind_mph")}mph {wind_direction_label(w.get("wind_dir_deg", 0))}')
+            weather_cache[vname] = w
         else:
-            log.warning(f'  No coordinates found for venue "{venue_name}". Weather skipped.')
-            weather_cache[venue_name] = {}
+            weather_cache[vname] = {}
 
-    # ── Step 3–7: Process each game ───────────────────────────────────────────
-    total_batter_projections  = 0
-    total_pitcher_projections = 0
-    total_team_projections    = 0
+    total_b = total_p = total_t = 0
 
     for game in games:
-        game_pk    = game['game_pk']
-        home_team  = game['home_team']
-        away_team  = game['away_team']
-        venue_name = game['venue_name']
-        weather    = weather_cache.get(venue_name, {})
-        park       = get_park_factors(venue_name)
+        game_pk   = game['game_pk']
+        home_team = game['home_team']
+        away_team = game['away_team']
+        vname     = game['venue_name']
+        gtime     = game.get('game_time', '')
+        weather   = weather_cache.get(vname, {})
+        park      = get_park_factors(vname)
+        park['name'] = vname   # pass park name to wind helpers
 
-        log.info(f'\n--- Game {game_pk}: {away_team} @ {home_team} ({venue_name}) ---')
-        if not weather:
-            log.info('  [Weather unavailable — park factors only]')
+        log.info(f'\n--- {away_team} @ {home_team} ({vname}) ---')
 
-        # ── Step 3: Get lineups and SPs (with 3-tier fallback) ───────────────
-        home_lineup, away_lineup, lineup_confirmed, home_sp_info, away_sp_info = (
+        # ── Step 3: Lineups and SPs ───────────────────────────────────────────
+        home_lu, away_lu, lu_confirmed, home_sp_info, away_sp_info = (
             get_batting_lineup_with_fallback(
-                conn, game_pk,
-                home_team, away_team,
+                conn, game_pk, home_team, away_team,
                 game.get('home_team_id', 0), game.get('away_team_id', 0),
                 game_date,
             )
         )
+        if not lu_confirmed:
+            log.info('  [lineup_confirmed=False]')
 
-        if not lineup_confirmed:
-            log.info('  [lineup_confirmed=False — confidence -8 applied to all batters]')
-
-        if not home_lineup and not away_lineup:
-            log.warning(f'  All lineup tiers failed for game {game_pk}. Skipping batter projections.')
-
-        # Fetch SP logs and pitcher handedness
-        home_sp_logs: list[dict] = []
-        away_sp_logs: list[dict] = []
-        home_sp_throws = 'R'
-        away_sp_throws = 'R'
+        # SP logs and hand
+        home_sp_logs = get_sp_logs(conn, home_sp_info['id']) if home_sp_info else []
+        away_sp_logs = get_sp_logs(conn, away_sp_info['id']) if away_sp_info else []
+        home_sp_hand = 'R'
+        away_sp_hand = 'R'
         if home_sp_info:
-            home_sp_logs   = get_sp_logs(conn, home_sp_info['id'])
-            home_sp_throws = get_pitcher_hand(home_sp_info['id'])
-            home_sp_info['throws'] = home_sp_throws
-            log.info(f'  Home SP: {home_sp_info["name"]} ({home_sp_throws}HB) — {len(home_sp_logs)} starts in DB')
+            home_sp_hand = get_pitcher_hand(home_sp_info['id'])
+            home_sp_info['throws'] = home_sp_hand
+            log.info(f'  Home SP: {home_sp_info["name"]} ({home_sp_hand}HP) — {len(home_sp_logs)} starts in DB')
         if away_sp_info:
-            away_sp_logs   = get_sp_logs(conn, away_sp_info['id'])
-            away_sp_throws = get_pitcher_hand(away_sp_info['id'])
-            away_sp_info['throws'] = away_sp_throws
-            log.info(f'  Away SP: {away_sp_info["name"]} ({away_sp_throws}HB) — {len(away_sp_logs)} starts in DB')
+            away_sp_hand = get_pitcher_hand(away_sp_info['id'])
+            away_sp_info['throws'] = away_sp_hand
+            log.info(f'  Away SP: {away_sp_info["name"]} ({away_sp_hand}HP) — {len(away_sp_logs)} starts in DB')
 
-        # ── Fetch team logs for run environment ───────────────────────────────
-        home_team_logs = get_team_logs(conn, home_team)
-        away_team_logs = get_team_logs(conn, away_team)
-        home_obp = get_team_obp(home_team_logs)
-        away_obp = get_team_obp(away_team_logs)
+        # ── Step 4: Team logs, umpire, bullpen ────────────────────────────────
+        home_tl = get_team_logs(conn, home_team)
+        away_tl = get_team_logs(conn, away_team)
+        ump     = get_umpire_data(conn, game_pk)
+        ump_avail = bool(ump)
+        wx_avail  = bool(weather)
 
-        # K rates for opponent K% factor in strikeout projections
+        home_bp_tired = get_bullpen_tired(conn, game.get('home_team_id', 0), game_date)
+        away_bp_tired = get_bullpen_tired(conn, game.get('away_team_id', 0), game_date)
+
         home_k_rate = get_team_k_rate(conn, home_team)
         away_k_rate = get_team_k_rate(conn, away_team)
+        home_obp    = get_team_obp(home_tl)
+        away_obp    = get_team_obp(away_tl)
+        home_sb_pg  = get_team_sb_allowed(conn, home_team)
+        away_sb_pg  = get_team_sb_allowed(conn, away_team)
 
-        # Estimate bullpen ERA from team logs (avg runs allowed minus SP ER share)
-        home_runs_allowed_avg = weighted_avg(home_team_logs, 'points_allowed') if home_team_logs else LEAGUE_AVG['team_runs_per_game']
-        away_runs_allowed_avg = weighted_avg(away_team_logs, 'points_allowed') if away_team_logs else LEAGUE_AVG['team_runs_per_game']
-        # Rough: bullpen ERA ~ (team ERA × 9 - SP ER/IP × 9) as proxy
-        home_sp_er_share = rolling_avg(home_sp_logs, 'points', min(5, len(home_sp_logs))) if home_sp_logs else LEAGUE_AVG['era'] * 5.5 / 9
-        away_sp_er_share = rolling_avg(away_sp_logs, 'points', min(5, len(away_sp_logs))) if away_sp_logs else LEAGUE_AVG['era'] * 5.5 / 9
-        home_bullpen_era = max(2.0, (home_runs_allowed_avg - home_sp_er_share) * 9 / 3.5)
-        away_bullpen_era = max(2.0, (away_runs_allowed_avg - away_sp_er_share) * 9 / 3.5)
+        day_game = is_day_game(gtime)
 
-        # ── Step 4: Batter projections ────────────────────────────────────────
-        log.info(f'  Processing batters...')
-
-        for side, lineup, opp_sp_logs, team_obp, loc, opp_sp_throws in [
-            ('home', home_lineup, away_sp_logs, away_obp, 'home', away_sp_throws),
-            ('away', away_lineup, home_sp_logs, home_obp, 'away', home_sp_throws),
+        # ── Step 5: Batter projections ────────────────────────────────────────
+        for side, lineup, opp_sp_logs, opp_sp_info, opp_sp_hand, team_obp, loc, opp_sb_pg in [
+            ('home', home_lu, away_sp_logs, away_sp_info, away_sp_hand, away_obp, 'home', away_sb_pg),
+            ('away', away_lu, home_sp_logs, home_sp_info, home_sp_hand, home_obp, 'away', home_sb_pg),
         ]:
             team_name = home_team if side == 'home' else away_team
             opponent  = away_team if side == 'home' else home_team
+            opp_sp_id = opp_sp_info['id'] if opp_sp_info else None
 
             for batter in lineup:
-                pid       = batter['id']
-                name      = batter['name']
-                lp        = batter['batting_order']
-                rest_days = get_rest_days(conn, pid, game_date)
-                bat_logs  = get_batter_logs(conn, pid)
+                pid  = batter['id']
+                name = batter['name']
+                lp   = batter['batting_order']
 
+                bat_logs = get_batter_logs(conn, pid)
                 if len(bat_logs) < 3:
-                    log.debug(f'    {name}: insufficient history ({len(bat_logs)} games), skipping')
                     continue
 
-                # Platoon splits (fetched individually for each batter)
-                batter_splits = get_platoon_splits(conn, pid)
+                splits  = get_batter_splits_db(conn, pid)
+                matchup = get_career_matchup_db(conn, opp_sp_id, pid)
+                career_ab = int(safe(matchup.get('career_ab', 0)))
 
-                # v2.1 — Fetch new enhanced factors
-                opp_sp_id = None
-                if side == 'home' and away_sp_info:
-                    opp_sp_id = away_sp_info['id']
-                elif side == 'away' and home_sp_info:
-                    opp_sp_id = home_sp_info['id']
+                batter_pa = sum(safe(r.get('fg_att', 0)) for r in bat_logs)
+                sp_starts = len(opp_sp_logs)
 
-                matchup_f  = get_pitcher_batter_matchup_factor(conn, opp_sp_id, pid)
-                ump_f      = get_umpire_factors(conn, game_pk)
-                is_day     = False  # default night; could be enhanced with schedule time
-                day_night_f = get_day_night_factor(conn, pid, is_day, CURRENT_SEASON)
-                risp_f     = get_risp_factor(conn, pid, CURRENT_SEASON)
+                # Determine platoon strength
+                season_avg = compute_season_ba(bat_logs)
+                pt_key     = 'vs_lhp_avg' if opp_sp_hand == 'L' else 'vs_rhp_avg'
+                pt_val     = float(splits.get(pt_key) or 0)
+                platoon_strong = pt_val > 0 and season_avg > 0 and abs(pt_val / season_avg - 1.0) > 0.12
 
-                # Run all batter projection functions — platoon now handled inside each function
-                proj_hits_val,  fac_hits  = project_hits(bat_logs, opp_sp_logs, weather, park, loc, lp, lineup_confirmed, batter_splits, opp_sp_throws)
-                proj_tb_val,    fac_tb    = project_total_bases(bat_logs, opp_sp_logs, weather, park, loc, lp, lineup_confirmed, batter_splits, opp_sp_throws)
-                proj_hr_val,    fac_hr    = project_home_runs(bat_logs, opp_sp_logs, weather, park, loc, lp, batter_splits, opp_sp_throws)
-                proj_rbi_val,   fac_rbi   = project_rbi(bat_logs, opp_sp_logs, weather, park, loc, lp, team_obp, lineup_confirmed)
-                proj_runs_val,  fac_runs  = project_runs(bat_logs, opp_sp_logs, weather, park, loc, lp, lineup_confirmed)
-                proj_sb_val,    fac_sb    = project_stolen_bases(bat_logs, opp_sp_logs, weather, park, loc, opp_sp_throws)
+                # FIP confirms direction for this batter context?
+                sp_fip_confirms = False
+                if len(opp_sp_logs) >= 5:
+                    fip  = compute_sp_fip(opp_sp_logs)
+                    era  = compute_sp_season_era(opp_sp_logs)
+                    sp_fip_confirms = fip > era + 0.40  # SP ERA will rise = good for batters
 
-                # Apply v2.1 factors to hit/RBI/run projections
-                proj_hits_val  = round(proj_hits_val  * matchup_f * day_night_f * ump_f['runs_factor'], 3)
-                proj_tb_val    = round(proj_tb_val    * matchup_f * ump_f['runs_factor'], 3)
-                proj_hr_val    = round(proj_hr_val    * ump_f['runs_factor'], 4)
-                proj_rbi_val   = round(proj_rbi_val   * risp_f * ump_f['runs_factor'], 3)
-                proj_runs_val  = round(proj_runs_val  * day_night_f * ump_f['runs_factor'], 3)
+                # Arsenal data for opp SP
+                arsenal  = get_arsenal_data(conn, opp_sp_id) if opp_sp_id else []
+                whiff_r  = get_arsenal_weighted_whiff(arsenal)
+                ars_ext  = whiff_r is not None and (whiff_r > 0.30 or whiff_r < 0.20)
 
-                conf = confidence_score_batter(bat_logs, rest_days, lineup_confirmed, opp_sp_logs)
+                conf = compute_confidence(
+                    prop_type       = 'hits',
+                    batter_pa       = int(batter_pa),
+                    sp_starts       = sp_starts,
+                    lineup_confirmed= lu_confirmed,
+                    ump_available   = ump_avail,
+                    weather_available = wx_avail,
+                    career_ab       = career_ab,
+                    platoon_strong  = platoon_strong,
+                    sp_fip_confirms = sp_fip_confirms,
+                    arsenal_extreme = ars_ext,
+                    matchup_edge    = career_ab >= 20,
+                    weather_aligns  = wx_avail and (weather.get('wind_mph', 0) > 12 or weather.get('temp_f', 72) > 80),
+                )
+
+                proj_hits_v,  fac_h  = project_hits(bat_logs, opp_sp_logs, weather, park, loc, lp, lu_confirmed, splits, opp_sp_hand, matchup, day_game)
+                proj_tb_v,    fac_tb = project_total_bases(bat_logs, opp_sp_logs, weather, park, loc, lp, splits, opp_sp_hand, matchup, whiff_r)
+                proj_hr_v,    fac_hr = project_home_runs(bat_logs, opp_sp_logs, weather, park, loc, lp, splits, opp_sp_hand, matchup, whiff_r, ump)
+                proj_rbi_v,   fac_r  = project_rbi(bat_logs, opp_sp_logs, weather, park, loc, lp, splits, opp_sp_hand, matchup, team_obp, ump, away_bp_tired if side == 'home' else home_bp_tired)
+                proj_runs_v,  fac_ru = project_runs_scored(bat_logs, opp_sp_logs, weather, park, loc, lp, splits, opp_sp_hand, LEAGUE_AVG['rbi_per_game'], ump)
+                proj_sb_v,    fac_sb = project_stolen_bases(bat_logs, opp_sp_logs, loc, lp, opp_sp_hand, opp_sb_pg)
 
                 all_factors = {
-                    'hits':  fac_hits,
+                    'hits':  fac_h,
                     'tb':    fac_tb,
                     'hr':    fac_hr,
-                    'rbi':   fac_rbi,
-                    'runs':  fac_runs,
+                    'rbi':   fac_r,
+                    'runs':  fac_ru,
                     'sb':    fac_sb,
                     'context': {
-                        'rest_days':        rest_days,
                         'lineup_pos':       lp,
-                        'games_used':       len(bat_logs),
-                        'team_obp':         round(team_obp, 3),
-                        'park_name':        venue_name,
-                        'lineup_confirmed': lineup_confirmed,
-                        'opp_sp_throws':    opp_sp_throws,
-                        'weather_available': bool(weather),
-                        # v2.1 new factors
-                        'matchup_f':        round(matchup_f, 3),
-                        'day_night_f':      round(day_night_f, 3),
-                        'risp_f':           round(risp_f, 3),
-                        'ump_k_f':          round(ump_f['k_factor'], 3),
-                        'ump_runs_f':       round(ump_f['runs_factor'], 3),
-                        'opp_sp_id':        opp_sp_id,
+                        'lineup_confirmed': lu_confirmed,
+                        'opp_sp_hand':      opp_sp_hand,
+                        'park_name':        vname,
+                        'day_game':         day_game,
+                        'ump_name':         ump.get('ump_name') if ump else None,
+                        'weather_available': wx_avail,
+                        'ump_available':    ump_avail,
+                        'career_ab':        career_ab,
                     },
                 }
 
                 proj_data = {
                     'home_away':        loc,
-                    'proj_hits':        proj_hits_val,
-                    'proj_tb':          proj_tb_val,
-                    'proj_hr':          proj_hr_val,
-                    'proj_rbi':         proj_rbi_val,
-                    'proj_runs':        proj_runs_val,
-                    'proj_sb':          proj_sb_val,
+                    'proj_hits':        proj_hits_v,
+                    'proj_tb':          proj_tb_v,
+                    'proj_hr':          proj_hr_v,
+                    'proj_rbi':         proj_rbi_v,
+                    'proj_runs':        proj_runs_v,
+                    'proj_sb':          proj_sb_v,
                     'proj_er':          0,
                     'proj_walks':       0,
                     'proj_outs':        0,
                     'confidence_score': conf,
-                    'lineup_confirmed': lineup_confirmed,
+                    'lineup_confirmed': lu_confirmed,
                     'factors_json':     all_factors,
                 }
 
                 try:
                     rows = upsert_player_projection(conn, pid, name, team_name, opponent, game_date, proj_data)
-                    total_batter_projections += rows
+                    total_b += rows
                     log.info(
-                        f'    [{loc}] {name} (#{lp}) — '
-                        f'H:{proj_hits_val:.2f} TB:{proj_tb_val:.2f} HR:{proj_hr_val:.3f} '
-                        f'RBI:{proj_rbi_val:.2f} R:{proj_runs_val:.2f} SB:{proj_sb_val:.3f} '
+                        f'    [{loc}] {name} (#{lp}) '
+                        f'H:{proj_hits_v:.2f} TB:{proj_tb_v:.2f} HR:{proj_hr_v:.3f} '
+                        f'RBI:{proj_rbi_v:.2f} R:{proj_runs_v:.2f} SB:{proj_sb_v:.3f} '
                         f'Conf:{conf}'
                     )
                 except Exception as exc:
-                    log.warning(f'    Could not store batter projection for {name}: {exc}')
+                    log.warning(f'    Failed batter {name}: {exc}')
                     conn.rollback()
 
-        # ── Step 5: Starting pitcher projections ──────────────────────────────
-        log.info(f'  Processing starting pitchers...')
-
-        for sp_info, sp_logs, opp_team_logs, loc, team_name, opponent, bullpen_era, opp_k_rate in [
-            (home_sp_info, home_sp_logs, away_team_logs, 'home', home_team, away_team, home_bullpen_era, away_k_rate),
-            (away_sp_info, away_sp_logs, home_team_logs, 'away', away_team, home_team, away_bullpen_era, home_k_rate),
+        # ── Step 6: Pitcher projections ───────────────────────────────────────
+        for sp_info, sp_logs, opp_tl, loc, team_name, opponent, opp_k_rate, opp_bullpen_tired in [
+            (home_sp_info, home_sp_logs, away_tl, 'home', home_team, away_team, away_k_rate, away_bp_tired),
+            (away_sp_info, away_sp_logs, home_tl, 'away', away_team, home_team, home_k_rate, home_bp_tired),
         ]:
             if not sp_info:
                 continue
             pid      = sp_info['id']
             name     = sp_info['name']
             sp_hand  = sp_info.get('throws', 'R')
+            dr       = compute_days_rest(sp_logs, game_date)
+            arsenal  = get_arsenal_data(conn, pid)
+            whiff_r  = get_arsenal_weighted_whiff(arsenal)
+            ars_ext  = whiff_r is not None and (whiff_r > 0.30 or whiff_r < 0.20)
 
-            # Compute days rest for this SP
-            sp_days_rest = compute_days_rest(sp_logs, game_date)
+            fip  = compute_sp_fip(sp_logs) if len(sp_logs) >= 5 else LEAGUE_AVG['fip']
+            era  = compute_sp_season_era(sp_logs)
+            sp_fip_confirms = abs(fip - era) > 0.40
 
-            # v2.1 — arsenal-based K factor and umpire factor
-            arsenal_k_f = get_pitcher_arsenal_k_factor(conn, pid)
-            ump_f_sp    = get_umpire_factors(conn, game_pk)
+            conf_p = compute_confidence(
+                prop_type       = 'strikeouts',
+                sp_starts       = len(sp_logs),
+                lineup_confirmed= lu_confirmed,
+                ump_available   = ump_avail,
+                weather_available = wx_avail,
+                arsenal_extreme = ars_ext,
+                sp_fip_confirms = sp_fip_confirms,
+            )
 
-            proj_k_val,    fac_k    = project_strikeouts(sp_logs, opp_team_logs, weather, loc, opp_k_rate, sp_days_rest, sp_hand)
-            proj_er_val,   fac_er   = project_earned_runs(sp_logs, opp_team_logs, weather, park, loc, sp_days_rest)
-            proj_bb_val,   fac_bb   = project_walks(sp_logs, opp_team_logs, weather, loc, sp_days_rest)
-            proj_outs_val, fac_outs = project_outs_recorded(sp_logs, weather, bullpen_era, sp_days_rest, game_date)
-
-            # Apply v2.1 factors to K and ER projections
-            proj_k_val  = round(proj_k_val  * arsenal_k_f * ump_f_sp['k_factor'], 3)
-            proj_er_val = round(proj_er_val * ump_f_sp['runs_factor'], 3)
-            proj_bb_val = round(proj_bb_val * ump_f_sp['bb_factor'], 3)
-
-            conf = confidence_score_pitcher(sp_logs, sp_days_rest)
+            proj_k_v,    fac_k    = project_strikeouts(sp_logs, opp_tl, weather, loc, opp_k_rate, dr, sp_hand, arsenal, ump)
+            proj_er_v,   fac_er   = project_earned_runs(sp_logs, opp_tl, weather, park, loc, dr, whiff_r)
+            proj_bb_v,   fac_bb   = project_walks(sp_logs, opp_tl, weather, loc, dr, ump, whiff_r)
+            proj_out_v,  fac_out  = project_outs_recorded(sp_logs, weather, loc, dr, opp_bullpen_tired, opp_tl, arsenal)
 
             all_factors = {
                 'strikeouts':    fac_k,
                 'earned_runs':   fac_er,
                 'walks':         fac_bb,
-                'outs_recorded': fac_outs,
+                'outs_recorded': fac_out,
                 'context': {
-                    'park_name':        venue_name,
-                    'home_away':        loc,
-                    'bullpen_era':      round(bullpen_era, 3),
-                    'sp_starts_in_db':  len(sp_logs),
                     'sp_hand':          sp_hand,
-                    'days_rest':        sp_days_rest,
-                    'weather_available': bool(weather),
-                    # v2.1 new factors
-                    'arsenal_k_f':      round(arsenal_k_f, 3),
-                    'ump_k_f':          round(ump_f_sp['k_factor'], 3),
-                    'ump_bb_f':         round(ump_f_sp['bb_factor'], 3),
-                    'ump_runs_f':       round(ump_f_sp['runs_factor'], 3),
+                    'days_rest':        dr,
+                    'park_name':        vname,
+                    'arsenal_whiff':    round(whiff_r, 3) if whiff_r else None,
+                    'ump_name':         ump.get('ump_name') if ump else None,
+                    'ump_available':    ump_avail,
+                    'weather_available': wx_avail,
+                    'sp_starts_in_db':  len(sp_logs),
                 },
             }
-
             proj_data = {
                 'home_away':        loc,
-                'proj_hits':        0,   # not projected for pitchers
+                'proj_k':           proj_k_v,
+                'proj_er':          proj_er_v,
+                'proj_walks':       proj_bb_v,
+                'proj_outs':        proj_out_v,
+                'proj_hits':        0,
                 'proj_tb':          0,
                 'proj_hr':          0,
                 'proj_rbi':         0,
                 'proj_runs':        0,
                 'proj_sb':          0,
-                'proj_er':          proj_er_val,
-                'proj_walks':       proj_bb_val,
-                'proj_outs':        proj_outs_val,
-                # Store K projection in proj_hits slot for pitchers (displayed as Ks)
-                'proj_k':           proj_k_val,
-                'confidence_score': conf,
+                'confidence_score': conf_p,
                 'factors_json':     all_factors,
             }
-            # For pitchers, override proj_hits with proj_k for DB storage clarity
-            proj_data['proj_hits'] = proj_k_val
 
             try:
                 rows = upsert_player_projection(conn, pid, name, team_name, opponent, game_date, proj_data)
-                total_pitcher_projections += rows
+                total_p += rows
                 log.info(
                     f'    [{loc} SP] {name} — '
-                    f'K:{proj_k_val:.2f} ER:{proj_er_val:.2f} BB:{proj_bb_val:.2f} '
-                    f'Outs:{proj_outs_val:.1f} Conf:{conf}'
+                    f'K:{proj_k_v:.2f} ER:{proj_er_v:.2f} BB:{proj_bb_v:.2f} Outs:{proj_out_v:.1f} Conf:{conf_p}'
                 )
             except Exception as exc:
-                log.warning(f'    Could not store pitcher projection for {name}: {exc}')
+                log.warning(f'    Failed pitcher {name}: {exc}')
                 conn.rollback()
 
-        # ── Step 6: Team projections ──────────────────────────────────────────
-        log.info(f'  Processing team projections...')
-
-        ml_val, ml_factors = project_moneyline(
-            home_team_logs, away_team_logs,
-            home_sp_logs, away_sp_logs,
-            weather, park,
+        # ── Step 7: Team projections ──────────────────────────────────────────
+        proj_total_v, proj_home_r, proj_away_r, total_f = project_total(
+            home_tl, away_tl, home_sp_logs, away_sp_logs,
+            weather, park, ump, home_bp_tired, away_bp_tired,
         )
-        run_diff, rl_factors, rl_cover_prob, cover_factors = project_run_line(
-            home_team_logs, away_team_logs,
-            home_sp_logs, away_sp_logs,
-            weather, park,
-        )
-        total_val, total_factors = project_total(
-            home_team_logs, away_team_logs,
-            home_sp_logs, away_sp_logs,
-            weather, park,
+        home_cover, away_cover = project_run_line(proj_home_r - proj_away_r)
+        home_win, away_win, home_ml, away_ml, ml_factors = project_moneyline(
+            home_tl, away_tl, home_sp_logs, away_sp_logs,
         )
 
-        # Win probability from ML factors
-        win_prob = ml_factors.get('win_probability', 0.5)
-
-        # Over/under probabilities
-        # We need a posted total to compare against; default to league avg
-        posted_total = LEAGUE_AVG['team_runs_per_game'] * 2  # ~9.2 runs placeholder
-        over_prob  = round(_normal_cdf((total_val - posted_total) / TOTAL_STD_DEV), 4)
+        posted_total = LEAGUE_AVG['game_total']
+        over_prob  = round(_normal_cdf((proj_total_v - posted_total) / TOTAL_STD_DEV), 4)
         under_prob = round(1 - over_prob, 4)
 
-        # Extract projected runs from run_line factors
-        proj_home_runs = rl_factors.get('proj_home_runs', total_val / 2)
-        proj_away_runs = rl_factors.get('proj_away_runs', total_val / 2)
+        team_conf = 60
+        if len(home_tl) >= 15: team_conf += 5
+        team_conf = max(50, min(90, team_conf))
 
-        home_conf = 60
-        if len(home_team_logs) >= 15: home_conf += 5
-        home_conf = max(50, min(90, home_conf))
-
-        all_team_factors = {
-            'moneyline':  ml_factors,
-            'run_line':   {**rl_factors, **cover_factors},
-            'total':      total_factors,
+        all_t_factors = {
+            'total': total_f,
+            'moneyline': ml_factors,
+            'run_line': {
+                'proj_run_diff': round(proj_home_r - proj_away_r, 3),
+                'home_cover': home_cover,
+                'away_cover': away_cover,
+            },
             'context': {
-                'venue_name':   venue_name,
-                'park_hr_f':    park.get('hr', 1.0),
-                'park_runs_f':  park.get('runs', 1.0),
-                'park_hits_f':  park.get('hits', 1.0),
-                'weather_temp': weather.get('temp_f', None),
-                'weather_wind': weather.get('wind_mph', None),
-                'weather_dir':  wind_direction_label(weather.get('wind_dir_deg', 0)) if weather else None,
+                'venue': vname,
+                'park_hr_f': park.get('hr', 1.0),
+                'park_runs_f': park.get('runs', 1.0),
+                'weather_temp': weather.get('temp_f') if weather else None,
+                'weather_wind': weather.get('wind_mph') if weather else None,
+                'ump_name': ump.get('ump_name') if ump else None,
             },
         }
 
-        # Upsert home team projection
-        home_proj = {
-            'team_id':                  game.get('home_team_id', 0),
-            'team_name':                home_team,
-            'game_date':                game_date,
-            'opponent':                 away_team,
-            'home_away':                'home',
-            'proj_points':              round(proj_home_runs, 3),
-            'proj_points_allowed':      round(proj_away_runs, 3),
-            'proj_total':               round(total_val, 3),
-            'moneyline_projection':     round(ml_val, 2),
-            'win_probability':          round(win_prob, 4),
-            'spread_projection':        round(run_diff, 3),
-            'spread_cover_probability': round(rl_cover_prob, 4),
-            'over_probability':         over_prob,
-            'under_probability':        under_prob,
-            'confidence_score':         home_conf,
-            'model_version':            MODEL_VERSION,
-            'factors_json':             json.dumps(all_team_factors),
-        }
-
-        # Away team is inverse of home — flip probabilities
-        away_win_prob = 1 - win_prob
-        if away_win_prob >= 0.5:
-            away_ml = -(away_win_prob / (1 - away_win_prob)) * 100
-        else:
-            away_ml = ((1 - away_win_prob) / away_win_prob) * 100
-
-        away_conf = 60
-        if len(away_team_logs) >= 15: away_conf += 5
-        away_conf = max(50, min(90, away_conf))
-
-        away_proj = {
-            'team_id':                  game.get('away_team_id', 0),
-            'team_name':                away_team,
-            'game_date':                game_date,
-            'opponent':                 home_team,
-            'home_away':                'away',
-            'proj_points':              round(proj_away_runs, 3),
-            'proj_points_allowed':      round(proj_home_runs, 3),
-            'proj_total':               round(total_val, 3),
-            'moneyline_projection':     round(away_ml, 2),
-            'win_probability':          round(away_win_prob, 4),
-            'spread_projection':        round(-run_diff, 3),
-            'spread_cover_probability': round(1 - rl_cover_prob, 4),
-            'over_probability':         over_prob,
-            'under_probability':        under_prob,
-            'confidence_score':         away_conf,
-            'model_version':            MODEL_VERSION,
-            'factors_json':             json.dumps(all_team_factors),
-        }
-
-        for proj, tname in [(home_proj, home_team), (away_proj, away_team)]:
+        for tname, t_loc, proj_r, allowed_r, ml_v, win_p, sp_cov, t_id in [
+            (home_team, 'home', proj_home_r, proj_away_r, home_ml, home_win, home_cover, game.get('home_team_id', 0)),
+            (away_team, 'away', proj_away_r, proj_home_r, away_ml, away_win, away_cover, game.get('away_team_id', 0)),
+        ]:
+            tproj = {
+                'team_id':                  t_id,
+                'team_name':                tname,
+                'game_date':                game_date,
+                'opponent':                 away_team if t_loc == 'home' else home_team,
+                'home_away':                t_loc,
+                'proj_points':              round(proj_r, 3),
+                'proj_points_allowed':      round(allowed_r, 3),
+                'proj_total':               round(proj_total_v, 3),
+                'moneyline_projection':     round(ml_v, 2),
+                'win_probability':          round(win_p, 4),
+                'spread_projection':        round(proj_home_r - proj_away_r if t_loc == 'home' else proj_away_r - proj_home_r, 3),
+                'spread_cover_probability': round(sp_cov, 4),
+                'over_probability':         over_prob,
+                'under_probability':        under_prob,
+                'confidence_score':         team_conf,
+                'model_version':            MODEL_VERSION,
+                'factors_json':             json.dumps(all_t_factors),
+            }
             try:
-                upsert_team_projection(conn, tname, proj.get('opponent', ''), game_date, proj)
-                total_team_projections += 1
-                log.info(
-                    f'    [{proj["home_away"]}] {tname} — '
-                    f'Proj runs: {proj["proj_points"]:.2f} | '
-                    f'Total: {proj["proj_total"]:.2f} | '
-                    f'ML: {proj["moneyline_projection"]:.0f} | '
-                    f'Win%: {proj["win_probability"]:.3f}'
-                )
+                upsert_team_projection(conn, tname, tproj['opponent'], game_date, tproj)
+                total_t += 1
+                log.info(f'    [{t_loc}] {tname} — runs:{proj_r:.2f} ML:{ml_v:.0f} win%:{win_p:.3f}')
             except Exception as exc:
-                log.warning(f'    Could not store team projection for {tname}: {exc}')
+                log.warning(f'    Failed team {tname}: {exc}')
                 conn.rollback()
 
-    # ── Summary ───────────────────────────────────────────────────────────────
     conn.close()
     log.info('\n═══════════════════════════════════════════════════')
-    log.info('MLB Projection Model complete')
-    log.info(f'  Batter projections:  {total_batter_projections}')
-    log.info(f'  Pitcher projections: {total_pitcher_projections}')
-    log.info(f'  Team projections:    {total_team_projections}')
-    log.info('  Next: run edgeDetector.js to compare vs. market lines')
+    log.info(f'v3.0 complete — batters:{total_b}  pitchers:{total_p}  teams:{total_t}')
     log.info('═══════════════════════════════════════════════════')
 
 
