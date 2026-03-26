@@ -168,11 +168,11 @@ def compute_mlb(conn, cur, since: date, today: date):
 
     # Game totals from team_game_logs
     total_rows = run_query(conn, """
-        SELECT AVG(points_scored + opp_points_scored) AS game_total
+        SELECT AVG(points_scored + points_allowed) AS game_total
         FROM team_game_logs
         WHERE sport = 'MLB' AND game_date >= %s
           AND points_scored IS NOT NULL
-          AND opp_points_scored IS NOT NULL
+          AND points_allowed IS NOT NULL
     """, (since,))
     if total_rows and total_rows[0]['game_total']:
         upsert_avg(cur, 'MLB', 'game_total', total_rows[0]['game_total'], today)

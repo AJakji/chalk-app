@@ -11,7 +11,6 @@ DATA SOURCE: BallDontLie GOAT API (https://api.balldontlie.io/v1)
 
 WHAT THIS COLLECTOR WRITES TO:
   - player_game_logs         (one row per player per game)
-  - position_defense_ratings (how each team defends — derived from team_stats)
 
 Usage:
   python nbaDataCollector.py            (incremental: only new games since last run)
@@ -61,6 +60,24 @@ BATCH_SIZE         = 100   # max player_ids[] per request (GOAT tier)
 DELAY_BETWEEN_PAGES = 0.5  # seconds between paginated calls
 DELAY_BETWEEN_BATCHES = 1.0  # seconds between player batches
 RATE_LIMIT_SLEEP   = 60    # seconds to sleep on 429
+
+
+# ── Position mapping ───────────────────────────────────────────────────────────
+
+def map_position(bdl_pos: str | None) -> str | None:
+    """Map BallDontLie position string to standard 5-position format."""
+    if not bdl_pos:
+        return None
+    p = bdl_pos.strip().upper()
+    mapping = {
+        'PG': 'PG', 'G': 'PG',
+        'SG': 'SG',
+        'SF': 'SF', 'F': 'SF',
+        'PF': 'PF', 'F-C': 'PF',
+        'C':  'C',
+        'G-F': 'SG',
+    }
+    return mapping.get(p)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -251,18 +268,6 @@ def fetch_advanced_stats_batch(player_ids: list[int], seasons: list[int]) -> lis
     return _paginate('advanced_stats', params)
 
 
-# ── BallDontLie: team stats (for defense ratings) ─────────────────────────────
-
-def fetch_team_stats(season_yr: int) -> list[dict]:
-    """
-    Fetch /team_stats?season={season_yr}.
-    Returns list of team stat rows.
-    """
-    log.info(f'Fetching team_stats for season {season_yr}…')
-    payload = _get('team_stats', {'season': season_yr})
-    return payload.get('data', [])
-
-
 # ── BallDontLie: injury report ────────────────────────────────────────────────
 
 def fetch_injuries() -> list[dict]:
@@ -375,6 +380,7 @@ def normalise_stat_row(raw: dict, adv: Optional[dict],
         'defensive_rating': def_rtg,
         'pace':             pace,
         'plus_minus':       plus_minus,
+        'position':         map_position(player_detail.get('position', '')),
     }
 
 
@@ -392,7 +398,7 @@ INSERT INTO player_game_logs (
     off_reb, def_reb,
     usage_rate, true_shooting_pct,
     offensive_rating, defensive_rating,
-    plus_minus, pace
+    plus_minus, pace, position
 ) VALUES (
     %(player_id)s, %(player_name)s, %(team)s, 'NBA', %(season)s,
     %(game_date)s, %(game_id)s, %(opponent)s, %(home_away)s,
@@ -404,7 +410,7 @@ INSERT INTO player_game_logs (
     %(off_reb)s, %(def_reb)s,
     %(usage_rate)s, %(true_shooting_pct)s,
     %(offensive_rating)s, %(defensive_rating)s,
-    %(plus_minus)s, %(pace)s
+    %(plus_minus)s, %(pace)s, %(position)s
 )
 ON CONFLICT (player_id, game_date, sport) DO UPDATE SET
     minutes           = EXCLUDED.minutes,
@@ -432,36 +438,15 @@ ON CONFLICT (player_id, game_date, sport) DO UPDATE SET
     defensive_rating  = EXCLUDED.defensive_rating,
     plus_minus        = EXCLUDED.plus_minus,
     pace              = EXCLUDED.pace,
+    position          = EXCLUDED.position,
     team              = EXCLUDED.team,
     opponent          = EXCLUDED.opponent,
     home_away         = EXCLUDED.home_away
 """
 
-_UPSERT_DEFENSE_RATING = """
-INSERT INTO position_defense_ratings
-    (team_id, team_name, sport, season, position,
-     pts_allowed, reb_allowed, ast_allowed, three_allowed)
-VALUES
-    (%(team_id)s, %(team_name)s, 'NBA', %(season)s, 'ALL',
-     %(pts_allowed)s, %(reb_allowed)s, %(ast_allowed)s, %(three_allowed)s)
-ON CONFLICT (team_id, season, position) DO UPDATE SET
-    pts_allowed   = EXCLUDED.pts_allowed,
-    reb_allowed   = EXCLUDED.reb_allowed,
-    ast_allowed   = EXCLUDED.ast_allowed,
-    three_allowed = EXCLUDED.three_allowed,
-    updated_at    = NOW()
-"""
-
-
 def upsert_player_game_log(conn, row: dict) -> None:
     with conn.cursor() as cur:
         cur.execute(_UPSERT_PLAYER_GAME_LOG, row)
-    conn.commit()
-
-
-def upsert_defense_rating(conn, row: dict) -> None:
-    with conn.cursor() as cur:
-        cur.execute(_UPSERT_DEFENSE_RATING, row)
     conn.commit()
 
 
@@ -583,59 +568,29 @@ def collect_player_logs(conn, players: list[dict], full: bool) -> None:
     log.info(f'Phase 1 complete — total written: {total_written}, skipped: {total_skipped}')
 
 
-def collect_defense_ratings(conn) -> None:
-    """
-    Phase 2: write position_defense_ratings from /team_stats.
-
-    BallDontLie /team_stats returns per-team season averages.
-    We store opponent averages allowed (pts, reb, ast, 3pm) at the 'ALL' position
-    level.  The field names in the API represent what that team *gave up* on defence —
-    the projection model reads this table to adjust player projections vs a given
-    opponent.
-
-    Note: BallDontLie team_stats rows describe what a team DID, not what they
-    allowed.  We store them as-is under the team's own record — the edge detector
-    joins these as the opposing team's defensive context.
-    """
-    log.info('=' * 60)
-    log.info('PHASE 2: Team defense ratings (from team_stats)')
-
-    try:
-        rows = fetch_team_stats(CURRENT_SEASON_YR)
-    except Exception as exc:
-        log.error(f'fetch_team_stats failed: {exc}')
-        return
-
-    written = 0
-    for r in rows:
-        team = r.get('team') or {}
-        team_id   = team.get('id')
-        team_name = team.get('full_name', '')
-
-        if not team_id:
+def backfill_positions(conn, players: list[dict]) -> None:
+    """One-time backfill: set position on all existing player_game_logs rows."""
+    log.info('Backfilling position column in player_game_logs...')
+    updated = 0
+    for p in players:
+        pos = map_position(p.get('position', ''))
+        if not pos:
             continue
-
-        record = {
-            'team_id':      team_id,
-            'team_name':    team_name,
-            'season':       CURRENT_SEASON_STR,
-            # Using what the team allows per game — BDL team_stats gives season avgs
-            # pts, reb, ast, fg3m are the team's own stats; the projection model uses
-            # the *opponent* team's row to understand defensive strength.
-            'pts_allowed':    safe_float(r.get('pts')),
-            'reb_allowed':    safe_float(r.get('reb')),
-            'ast_allowed':    safe_float(r.get('ast')),
-            'three_allowed':  safe_float(r.get('fg3m')),
-        }
-
         try:
-            upsert_defense_rating(conn, record)
-            written += 1
-        except Exception as exc:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """UPDATE player_game_logs
+                       SET position = %s
+                       WHERE player_id = %s AND sport = 'NBA'
+                         AND position IS NULL""",
+                    (pos, p['id'])
+                )
+                updated += cur.rowcount
+            conn.commit()
+        except Exception as e:
             conn.rollback()
-            log.error(f'  Defense rating write error (team_id={team_id}): {exc}')
-
-    log.info(f'Phase 2 complete — {written} team defense ratings written')
+            log.warning(f'backfill_positions error for player {p["id"]}: {e}')
+    log.info(f'  Backfilled {updated} rows with position data')
 
 
 def log_injury_report() -> None:
@@ -693,13 +648,12 @@ def main() -> None:
         players = fetch_active_players()
         if players:
             collect_player_logs(conn, players, args.full)
+            # Backfill position for existing rows (idempotent — only updates NULL rows)
+            backfill_positions(conn, players)
         else:
             log.warning('No active players returned — skipping player log collection')
 
-        # Phase 2: team defense ratings
-        collect_defense_ratings(conn)
-
-        # Phase 3: injury report (log only)
+        # Phase 2: injury report (log only)
         log_injury_report()
 
     except KeyboardInterrupt:

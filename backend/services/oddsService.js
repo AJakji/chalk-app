@@ -14,6 +14,8 @@
 
 require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
 
+const db = require('../db');
+
 const ODDS_API_KEY = process.env.ODDS_API_KEY;
 const BASE_URL     = 'https://api.the-odds-api.com/v4';
 const CACHE_TTL_MS = 5 * 60 * 1000;  // 5 minutes
@@ -181,4 +183,111 @@ async function getTodayGames(league) {
   });
 }
 
-module.exports = { fetchEvents, fetchGameOdds, fetchEventProps, getTodayGames, SPORT_KEYS };
+/**
+ * Fetch player prop lines from The Odds API and write to player_props_history.
+ * Called at 9 AM ET before the projection model runs.
+ *
+ * @param {string} sport - 'NBA', 'NHL', or 'MLB'
+ * @param {string} gameDate - 'YYYY-MM-DD'
+ */
+async function writePropLinesToDB(sport, gameDate) {
+  const sportKey = SPORT_KEYS[sport];
+  if (!sportKey) {
+    console.log(`[writePropLinesToDB] Unknown sport: ${sport}`);
+    return 0;
+  }
+
+  const propMarkets = {
+    NBA: 'player_points,player_rebounds,player_assists,player_threes,player_points_rebounds_assists,player_points_rebounds,player_points_assists,player_rebounds_assists',
+    NHL: 'player_shots_on_goal,player_goals,player_points,player_assists,player_saves',
+    MLB: 'batter_hits,batter_total_bases,batter_home_runs,batter_rbis,batter_runs_scored,pitcher_strikeouts,pitcher_earned_runs',
+  }[sport];
+
+  if (!propMarkets) return 0;
+
+  // Fetch tonight's events
+  const events = await fetchEvents(sport);
+  if (!events || events.length === 0) {
+    console.log(`[writePropLinesToDB] No ${sport} events found for ${gameDate}`);
+    return 0;
+  }
+
+  let totalWritten = 0;
+
+  for (const event of events) {
+    const propsData = await fetchEventProps(sport, event.id, propMarkets);
+    if (!propsData || !propsData.bookmakers) continue;
+
+    // Build per-bookmaker lookup for odds
+    const bmByKey = {};
+    for (const bm of propsData.bookmakers) bmByKey[bm.key] = bm;
+
+    for (const bm of propsData.bookmakers) {
+      for (const market of (bm.markets || [])) {
+        // Normalise prop_type: strip player_/batter_/pitcher_ prefix
+        const propType = market.key
+          .replace(/^player_/, '')
+          .replace(/^batter_/, '')
+          .replace(/^pitcher_/, '');
+
+        // Group outcomes by player description
+        const playerOutcomes = {};
+        for (const outcome of (market.outcomes || [])) {
+          const pname = outcome.description;
+          if (!pname) continue;
+          if (!playerOutcomes[pname]) playerOutcomes[pname] = {};
+          playerOutcomes[pname][outcome.name] = outcome;
+        }
+
+        for (const [playerName, sides] of Object.entries(playerOutcomes)) {
+          const over = sides['Over'];
+          if (!over || over.point == null) continue;
+
+          const propLine = parseFloat(over.point);
+
+          // Get DK/FD odds for this player+market
+          const dkLine = (() => {
+            const m = bmByKey['draftkings']?.markets?.find(m => m.key === market.key);
+            return m?.outcomes?.find(o => o.name === 'Over' && o.description === playerName)?.price ?? null;
+          })();
+          const fdLine = (() => {
+            const m = bmByKey['fanduel']?.markets?.find(m => m.key === market.key);
+            return m?.outcomes?.find(o => o.name === 'Over' && o.description === playerName)?.price ?? null;
+          })();
+          const bmgmLine = (() => {
+            const m = bmByKey['betmgm']?.markets?.find(m => m.key === market.key);
+            return m?.outcomes?.find(o => o.name === 'Over' && o.description === playerName)?.price ?? null;
+          })();
+
+          try {
+            await db.query(
+              `INSERT INTO player_props_history
+                 (player_name, sport, prop_type, prop_line,
+                  dk_odds, fd_odds, betmgm_odds,
+                  game_date, event_id, created_at, updated_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
+               ON CONFLICT (player_name, sport, prop_type, game_date)
+               DO UPDATE SET
+                 prop_line    = EXCLUDED.prop_line,
+                 dk_odds      = EXCLUDED.dk_odds,
+                 fd_odds      = EXCLUDED.fd_odds,
+                 betmgm_odds  = EXCLUDED.betmgm_odds,
+                 event_id     = EXCLUDED.event_id,
+                 updated_at   = NOW()`,
+              [playerName, sport, propType, propLine, dkLine, fdLine, bmgmLine, gameDate, event.id]
+            );
+            totalWritten++;
+          } catch (err) {
+            console.warn(`[writePropLinesToDB] DB write error for ${playerName} ${propType}: ${err.message}`);
+          }
+        }
+      }
+      break; // use first bookmaker for the Over line, then get odds per-book above
+    }
+  }
+
+  console.log(`[writePropLinesToDB] ${sport} ${gameDate}: ${totalWritten} prop lines written`);
+  return totalWritten;
+}
+
+module.exports = { fetchEvents, fetchGameOdds, fetchEventProps, getTodayGames, SPORT_KEYS, writePropLinesToDB };

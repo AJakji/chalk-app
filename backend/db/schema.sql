@@ -233,11 +233,14 @@ CREATE TABLE IF NOT EXISTS team_situation_splits (
 
 -- Sportsbook prop lines collected daily (before games)
 -- and graded after (actual_result, over_hit filled post-game)
+-- player_id and team are nullable because writePropLinesToDB (oddsService.js) writes
+-- from The Odds API which doesn't carry BDL player IDs.
+-- edgeDetector.js storeEdge() always provides player_id and team.
 CREATE TABLE IF NOT EXISTS player_props_history (
   id                  BIGSERIAL PRIMARY KEY,
-  player_id           INTEGER NOT NULL,
+  player_id           INTEGER,            -- nullable: Odds API source doesn't have BDL IDs
   player_name         TEXT    NOT NULL,
-  team                TEXT    NOT NULL,
+  team                TEXT,               -- nullable: Odds API source doesn't have team
   sport               TEXT    NOT NULL DEFAULT 'NBA',
   game_date           DATE    NOT NULL,
   prop_type           TEXT    NOT NULL,   -- 'points'|'rebounds'|'assists'|'threes'|'pra'|etc.
@@ -245,6 +248,7 @@ CREATE TABLE IF NOT EXISTS player_props_history (
   dk_odds             TEXT,
   fd_odds             TEXT,
   mgm_odds            TEXT,
+  betmgm_odds         TEXT,               -- alias for mgm_odds used by writePropLinesToDB
   bet365_odds         TEXT,
   chalk_projection    NUMERIC(7,3),       -- what our model projected
   chalk_edge          NUMERIC(7,3),       -- projection minus line (+ = over edge)
@@ -253,16 +257,30 @@ CREATE TABLE IF NOT EXISTS player_props_history (
   over_hit            BOOLEAN,            -- filled after game
   was_correct         BOOLEAN,            -- filled after game
   model_version       TEXT NOT NULL DEFAULT 'v1.0',
-  created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  event_id            TEXT,               -- Odds API event ID
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at          TIMESTAMPTZ
 );
 
--- Unique constraint: one row per player per prop type per day
--- Prevents duplicate edges from multiple detectEdges() runs
+-- Unique constraint used by edgeDetector.js storeEdge(): one edge per player/prop/day
 CREATE UNIQUE INDEX IF NOT EXISTS idx_pph_player_date_proptype
-  ON player_props_history (player_id, game_date, prop_type);
+  ON player_props_history (player_id, game_date, prop_type)
+  WHERE player_id IS NOT NULL;
+
+-- Unique constraint used by writePropLinesToDB (oddsService.js): name-based dedup
+CREATE UNIQUE INDEX IF NOT EXISTS pph_unique_player_prop_date
+  ON player_props_history (player_name, sport, prop_type, game_date);
 
 CREATE INDEX IF NOT EXISTS idx_pph_player_date ON player_props_history (player_id, game_date DESC);
 CREATE INDEX IF NOT EXISTS idx_pph_date        ON player_props_history (game_date DESC);
+
+-- Migration: make player_id and team nullable if upgrading from earlier schema
+ALTER TABLE player_props_history ALTER COLUMN player_id DROP NOT NULL;
+ALTER TABLE player_props_history ALTER COLUMN team DROP NOT NULL;
+-- Migration: add new columns if upgrading from earlier schema
+ALTER TABLE player_props_history ADD COLUMN IF NOT EXISTS betmgm_odds TEXT;
+ALTER TABLE player_props_history ADD COLUMN IF NOT EXISTS event_id    TEXT;
+ALTER TABLE player_props_history ADD COLUMN IF NOT EXISTS updated_at  TIMESTAMPTZ;
 
 -- Which players are confirmed playing tonight (populated at 9 AM before edge detection)
 -- is_confirmed_playing: true = active, false = out, null = questionable/uncertain

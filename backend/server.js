@@ -321,6 +321,21 @@ if (process.env.MOCK_MODE !== 'true') {
     await runPipeline('League Averages', () => runPythonScript('computeLeagueAverages.py'));
   }, { timezone: 'America/New_York' });
 
+  // ── 9:00 AM ET — Write player prop lines to DB (all sports) ─────────────────
+  // Runs after the 8 AM grader. Stores fresh lines for that night's games.
+  cron.schedule('0 9 * * *', async () => {
+    const today = new Date().toISOString().split('T')[0];
+    console.log(`\n⏰ [9:00 AM] Writing prop lines to DB for all sports (${today})…`);
+    const { writePropLinesToDB } = require('./services/oddsService');
+    try {
+      await writePropLinesToDB('NBA', today);
+      await writePropLinesToDB('NHL', today);
+      await writePropLinesToDB('MLB', today);
+    } catch (err) {
+      console.error('[cron] writePropLinesToDB error:', err.message);
+    }
+  }, { timezone: 'America/New_York' });
+
 } else {
   console.log('ℹ️  MOCK_MODE=true — all cron jobs disabled, no API credits used');
 }
