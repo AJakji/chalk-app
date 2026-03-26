@@ -2215,6 +2215,66 @@ def compute_confidence(
 
 # ── DB write functions ───────────────────────────────────────────────────────────
 
+# Maps model prop_type → DB prop_type (after oddsService.js strips batter_/pitcher_ prefix)
+MLB_PROP_TYPE_MAP = {
+    'rbi':          'rbis',
+    'runs':         'runs_scored',
+    'outs_recorded': 'outs',
+}
+
+# Minimum edge required per prop type before writing a pick
+MLB_MIN_EDGE = {
+    'hits':         0.15,
+    'total_bases':  0.20,
+    'home_runs':    0.05,
+    'rbis':         0.15,
+    'runs_scored':  0.15,
+    'stolen_bases': 0.05,
+    'strikeouts':   0.30,
+    'earned_runs':  0.20,
+    'outs':         0.50,
+}
+
+
+def get_market_line(conn, player_name: str, prop_type: str, game_date) -> float | None:
+    """
+    Read the market prop line from player_props_history.
+    Populated by oddsService.js before the model runs.
+    Returns None if no line posted yet — prop is skipped.
+    oddsService.js strips batter_/pitcher_ prefix on write, so DB stores bare types.
+    """
+    # Normalize: strip sport-specific prefixes before DB lookup
+    clean_type = prop_type
+    for prefix in ('player_', 'batter_', 'pitcher_'):
+        if clean_type.startswith(prefix):
+            clean_type = clean_type[len(prefix):]
+            break
+
+    # Remap model-internal names to DB-stored names
+    clean_type = MLB_PROP_TYPE_MAP.get(clean_type, clean_type)
+
+    # Match on last name since name formats can differ
+    last_name = player_name.split()[-1] if player_name else ''
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT prop_line
+                   FROM player_props_history
+                   WHERE player_name ILIKE %s
+                     AND prop_type = %s
+                     AND game_date = %s
+                   ORDER BY created_at DESC LIMIT 1""",
+                (f'%{last_name}%', clean_type, str(game_date))
+            )
+            row = cur.fetchone()
+            if row and row[0] is not None:
+                return float(row[0])
+    except Exception:
+        conn.rollback()
+    return None
+
+
 def upsert_player_projection(
     conn, player_id, player_name, team, opponent, game_date, proj
 ) -> int:
@@ -2244,6 +2304,20 @@ def upsert_player_projection(
 
     with conn.cursor() as cur:
         for prop_type, proj_value, prop_factors in prop_rows:
+            # Gate on market line from player_props_history — skip if no line posted
+            line = get_market_line(conn, player_name, prop_type, game_date)
+            if line is None:
+                continue  # No market line for this prop — not a tradeable market today
+
+            # Resolve DB-stored prop_type (handles rbi→rbis, runs→runs_scored, etc.)
+            db_prop_type = MLB_PROP_TYPE_MAP.get(prop_type, prop_type)
+
+            # Only write picks with meaningful edge vs the posted line
+            edge = round(proj_value - line, 2)
+            threshold = MLB_MIN_EDGE.get(db_prop_type, 0.15)
+            if abs(edge) < threshold:
+                continue  # Edge too small — not a pick
+
             merged = dict(prop_factors)
             if 'context' in factors_all:
                 merged['context'] = factors_all['context']
@@ -2265,7 +2339,7 @@ def upsert_player_projection(
                      model_version    = EXCLUDED.model_version""",
                 (
                     player_id, player_name, team, game_date, opponent, home_away,
-                    prop_type, proj_value,
+                    db_prop_type, proj_value,
                     confidence, MODEL_VERSION, json.dumps(merged),
                 )
             )

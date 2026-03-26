@@ -1223,7 +1223,8 @@ def project_total(home_tl: list, away_tl: list,
                     elif h2h_avg < LEAGUE['nhl_total'] - 1.0:
                         h2h_f = 1.0 - 0.06 * 0.10
         except Exception:
-            pass
+            if conn:
+                conn.rollback()
 
     proj_total = proj_total_raw * h2h_f
 
@@ -1488,6 +1489,59 @@ MIN_EDGE = {
 
 # ── DB write functions ────────────────────────────────────────────────────────
 
+def get_market_line(conn, player_name: str, prop_type: str, game_date) -> float | None:
+    """
+    Read the market prop line from player_props_history.
+    Populated by oddsService.js before the model runs.
+    Returns None if no line posted yet — prop is skipped.
+    oddsService.js strips player_ prefix on write, so DB stores bare types:
+    'shots_on_goal', 'goals', 'assists', 'points', 'blocked_shots', etc.
+    """
+    # Normalize: strip sport-specific prefixes before DB lookup
+    clean_type = prop_type
+    for prefix in ('player_', 'batter_', 'pitcher_'):
+        if clean_type.startswith(prefix):
+            clean_type = clean_type[len(prefix):]
+            break
+
+    # Match on last name since name formats can differ
+    last_name = player_name.split()[-1] if player_name else ''
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT prop_line
+                   FROM player_props_history
+                   WHERE player_name ILIKE %s
+                     AND prop_type = %s
+                     AND game_date = %s
+                   ORDER BY created_at DESC LIMIT 1""",
+                (f'%{last_name}%', clean_type, str(game_date))
+            )
+            row = cur.fetchone()
+            if row and row[0] is not None:
+                return float(row[0])
+    except Exception as e:
+        log.warning(f'[get_market_line] {player_name} {prop_type}: {e}')
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+    return None
+
+
+# Minimum edge required per prop type before writing a pick
+NHL_MIN_EDGE = {
+    'shots_on_goal':      0.4,
+    'goals':              0.1,
+    'assists':            0.1,
+    'points':             0.15,
+    'blocked_shots':      0.3,
+    'goal_scorer_anytime': 0.05,
+    'saves':              0.5,
+}
+
+
 def upsert_player_projection(conn, player_id: int, player_name: str,
                               team: str, opponent: str, game_date: date,
                               prop_type: str, proj_value: float,
@@ -1504,26 +1558,41 @@ def upsert_player_projection(conn, player_id: int, player_name: str,
     }
     proj_col = col_map.get(prop_type, 'proj_points')
 
-    with conn.cursor() as cur:
-        cur.execute(
-            f"""INSERT INTO chalk_projections
-                   (player_id, player_name, team, opponent, sport, game_date,
-                    prop_type, proj_value, {proj_col},
-                    confidence_score, factors_json, model_version)
-                VALUES (%s,%s,%s,%s,'NHL',%s,%s,%s,%s,%s,%s,%s)
-                ON CONFLICT (player_id, game_date, prop_type)
-                DO UPDATE SET
-                   proj_value      = EXCLUDED.proj_value,
-                   {proj_col}      = EXCLUDED.{proj_col},
-                   confidence_score = EXCLUDED.confidence_score,
-                   factors_json    = EXCLUDED.factors_json,
-                   model_version   = EXCLUDED.model_version,
-                   updated_at      = NOW()""",
-            (player_id, player_name, team, opponent, game_date,
-             prop_type, proj_value, proj_value,
-             confidence, json.dumps(factors), MODEL_VERSION)
-        )
-    conn.commit()
+    # Gate on market line from player_props_history — skip if no line posted
+    line = get_market_line(conn, player_name, prop_type, game_date)
+    if line is None:
+        return  # No market line for this prop — not a tradeable market today
+
+    # Only write picks with meaningful edge vs the posted line
+    edge = round(proj_value - line, 2)
+    threshold = NHL_MIN_EDGE.get(prop_type, 0.3)
+    if abs(edge) < threshold:
+        return  # Edge too small — not a pick
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""INSERT INTO chalk_projections
+                       (player_id, player_name, team, opponent, sport, game_date,
+                        prop_type, proj_value, {proj_col},
+                        confidence_score, factors_json, model_version)
+                    VALUES (%s,%s,%s,%s,'NHL',%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (player_id, game_date, prop_type)
+                    DO UPDATE SET
+                       proj_value      = EXCLUDED.proj_value,
+                       {proj_col}      = EXCLUDED.{proj_col},
+                       confidence_score = EXCLUDED.confidence_score,
+                       factors_json    = EXCLUDED.factors_json,
+                       model_version   = EXCLUDED.model_version,
+                       updated_at      = NOW()""",
+                (player_id, player_name, team, opponent, game_date,
+                 prop_type, proj_value, proj_value,
+                 confidence, json.dumps(factors), MODEL_VERSION)
+            )
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        log.warning(f'[upsert_player_projection] {player_name} {prop_type}: {e}')
 
 
 def upsert_team_projection(conn, team_name: str, opponent: str, game_date: date,
@@ -1536,35 +1605,39 @@ def upsert_team_projection(conn, team_name: str, opponent: str, game_date: date,
     cover_prob = float(proj_value)                 if prop_type in ('puck_line_cover', 'spread') else None
     proj_pts   = factors.get('proj_home_score')    if prop_type == 'moneyline'       else None
 
-    with conn.cursor() as cur:
-        cur.execute(
-            """INSERT INTO team_projections
-                  (team_name, opponent, sport, game_date, prop_type,
-                   proj_value, proj_total, over_probability, under_probability,
-                   win_probability, spread_cover_probability,
-                   proj_points, confidence_score, factors_json, model_version)
-               VALUES (%s,%s,'NHL',%s,%s,%s, %s,%s,%s,%s,%s,%s,%s, %s,%s)
-               ON CONFLICT (team_name, game_date, prop_type)
-               DO UPDATE SET
-                  proj_value               = EXCLUDED.proj_value,
-                  proj_total               = EXCLUDED.proj_total,
-                  over_probability         = EXCLUDED.over_probability,
-                  under_probability        = EXCLUDED.under_probability,
-                  win_probability          = EXCLUDED.win_probability,
-                  spread_cover_probability = EXCLUDED.spread_cover_probability,
-                  proj_points              = EXCLUDED.proj_points,
-                  confidence_score         = EXCLUDED.confidence_score,
-                  factors_json             = EXCLUDED.factors_json,
-                  model_version            = EXCLUDED.model_version,
-                  updated_at               = NOW()""",
-            (team_name, opponent, game_date,
-             prop_type, proj_value,
-             proj_total, over_prob, under_prob,
-             win_prob, cover_prob,
-             proj_pts, confidence,
-             json.dumps(factors), MODEL_VERSION)
-        )
-    conn.commit()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO team_projections
+                      (team_name, opponent, sport, game_date, prop_type,
+                       proj_value, proj_total, over_probability, under_probability,
+                       win_probability, spread_cover_probability,
+                       proj_points, confidence_score, factors_json, model_version)
+                   VALUES (%s,%s,'NHL',%s,%s,%s, %s,%s,%s,%s,%s,%s,%s, %s,%s)
+                   ON CONFLICT (team_name, game_date, prop_type)
+                   DO UPDATE SET
+                      proj_value               = EXCLUDED.proj_value,
+                      proj_total               = EXCLUDED.proj_total,
+                      over_probability         = EXCLUDED.over_probability,
+                      under_probability        = EXCLUDED.under_probability,
+                      win_probability          = EXCLUDED.win_probability,
+                      spread_cover_probability = EXCLUDED.spread_cover_probability,
+                      proj_points              = EXCLUDED.proj_points,
+                      confidence_score         = EXCLUDED.confidence_score,
+                      factors_json             = EXCLUDED.factors_json,
+                      model_version            = EXCLUDED.model_version,
+                      updated_at               = NOW()""",
+                (team_name, opponent, game_date,
+                 prop_type, proj_value,
+                 proj_total, over_prob, under_prob,
+                 win_prob, cover_prob,
+                 proj_pts, confidence,
+                 json.dumps(factors), MODEL_VERSION)
+            )
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        log.warning(f'[upsert_team_projection] {team_name} {prop_type}: {e}')
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────

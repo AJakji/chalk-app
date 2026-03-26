@@ -199,7 +199,7 @@ async function writePropLinesToDB(sport, gameDate) {
 
   const propMarkets = {
     NBA: 'player_points,player_rebounds,player_assists,player_threes,player_points_rebounds_assists,player_points_rebounds,player_points_assists,player_rebounds_assists',
-    NHL: 'player_shots_on_goal,player_goals,player_points,player_assists,player_saves',
+    NHL: 'player_shots_on_goal,player_goals,player_points,player_assists,player_blocked_shots,player_goal_scorer_anytime',
     MLB: 'batter_hits,batter_total_bases,batter_home_runs,batter_rbis,batter_runs_scored,pitcher_strikeouts,pitcher_earned_runs',
   }[sport];
 
