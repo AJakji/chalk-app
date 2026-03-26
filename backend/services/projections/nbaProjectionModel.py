@@ -1,26 +1,26 @@
 """
-Chalk NBA Projection Model
-==========================
-Morning script (runs at 10:00 AM) that generates player and team projections
+Chalk NBA Projection Model v2.0
+================================
+Morning script (runs at 10:00 AM ET) generating player and team projections
 for every NBA game tonight.
 
-Key architectural note:
-  This script fetches tonight's schedule from BallDontLie FIRST, so every
-  projection is run with the real opponent and home/away context — not a
-  placeholder. Only players on teams playing tonight are projected.
+Execution order:
+  0. Load league averages from DB
+  1. Fetch tonight's schedule (BallDontLie)
+  1b. Fetch live odds (Odds API) → implied_total + spread per game
+  1c. Build OUT players map + usage boosts
+  2. For each player on a team playing tonight:
+     a. Compute weighted base: L5×0.35 + L10×0.30 + L20×0.20 + season×0.15
+     b. Classify archetype (6 types)
+     c. Apply 8-12 factors per prop type
+     d. Compute confidence with soft cap 85 → hard cap 92
+     e. Apply minimum edge threshold
+     f. Write to chalk_projections
+  3. Compute team props: Total, Spread, Moneyline
+  4. Log summary
 
-Factor pipeline:
-  1. Weighted rolling average  (L5×0.40, L10×0.30, L20×0.20, season×0.10)
-  2. Opponent defensive rating (computed from player_game_logs via position_defense_ratings)
-  3. Pace matchup              (computed from team_game_logs)
-  4. Rest days
-  5. Home/away splits
-  6. True shooting % efficiency (computed from game log raw stats)
-  7. Usage approximation        (computed from game log raw stats)
-  8. Game script (spread size)
-
-Usage:
-  python nbaProjectionModel.py [--date YYYY-MM-DD]
+Player props: Points, Rebounds, Assists, Threes, PRA, P+R, P+A, A+R
+Team props:   Total, Spread, Moneyline
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ import math
 import os
 import sys
 import urllib.request
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Optional
 
@@ -47,1288 +48,1265 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-DATABASE_URL        = os.getenv('DATABASE_URL', '')
-BALLDONTLIE_API_KEY = os.getenv('BALLDONTLIE_API_KEY', '')
-ODDS_API_KEY        = os.getenv('ODDS_API_KEY', '')
-BDL_BASE            = 'https://api.balldontlie.io/v1'
-ODDS_BASE           = 'https://api.the-odds-api.com/v4'
-MODEL_VERSION       = 'v1.2'
-CURRENT_SEASON      = '2025-26'
+DATABASE_URL   = os.getenv('DATABASE_URL', '')
+BDL_BASE       = 'https://api.balldontlie.io/v1'
+BDL_KEY        = os.getenv('BALLDONTLIE_API_KEY', '')
+ODDS_API_KEY   = os.getenv('ODDS_API_KEY', '')
+ODDS_BASE      = 'https://api.the-odds-api.com/v4'
 
-# League-average baselines — calibrated to 2024-25 NBA season
-LEAGUE_AVG = {
-    'pts':          112.0,
-    'reb':          43.5,
-    'ast':          24.5,
-    'stl':          7.3,
-    'blk':          4.8,
-    'tov':          13.1,
-    'threes':       12.8,
-    'pace':         98.5,
-    'fg_pct':       0.476,
-    'three_pct':    0.364,
-    'ft_pct':       0.774,
-    'ts_pct':       0.580,
-    'fta_per_game': 3.5,
-    # Usage approximation: avg (fga + 0.44*fta + tov) / minutes for an NBA player
-    # Measured from 2025-26 player_game_logs (minutes > 10): AVG = 0.455
-    'usage_per_min': 0.455,
-    'three_rate':    0.390,   # 3PA / FGA ratio (39 % of field-goal attempts are 3s, 2024-25)
-    'team_fouls':    20.0,    # team fouls committed per game
-}
+# ---------------------------------------------------------------------------
+# Archetype constants
+# ---------------------------------------------------------------------------
+DOMINANT_SCORER  = 'DOMINANT_SCORER'
+TRUE_PLAYMAKER   = 'TRUE_PLAYMAKER'
+TRUE_BIG         = 'TRUE_BIG'
+TWO_WAY_STAR     = 'TWO_WAY_STAR'
+THREE_AND_D      = 'THREE_AND_D'
+ROLE_PLAYER      = 'ROLE_PLAYER'
 
-TOTAL_STD_DEV  = 12.0
-SPREAD_STD_DEV = 10.0
-
-# BDL team abbreviation → full name (for team_game_logs which stores full names)
-ABBR_TO_FULL_NAME = {
-    'ATL': 'Atlanta Hawks',         'BOS': 'Boston Celtics',
-    'BKN': 'Brooklyn Nets',         'CHA': 'Charlotte Hornets',
-    'CHI': 'Chicago Bulls',         'CLE': 'Cleveland Cavaliers',
-    'DAL': 'Dallas Mavericks',      'DEN': 'Denver Nuggets',
-    'DET': 'Detroit Pistons',       'GSW': 'Golden State Warriors',
-    'HOU': 'Houston Rockets',       'IND': 'Indiana Pacers',
-    'LAC': 'LA Clippers',           'LAL': 'Los Angeles Lakers',
-    'MEM': 'Memphis Grizzlies',     'MIA': 'Miami Heat',
-    'MIL': 'Milwaukee Bucks',       'MIN': 'Minnesota Timberwolves',
-    'NOP': 'New Orleans Pelicans',  'NYK': 'New York Knicks',
-    'OKC': 'Oklahoma City Thunder', 'ORL': 'Orlando Magic',
-    'PHI': 'Philadelphia 76ers',    'PHX': 'Phoenix Suns',
+# ---------------------------------------------------------------------------
+# Team name → Odds API abbreviation lookup
+# ---------------------------------------------------------------------------
+TEAM_ABBR_TO_ODDS: dict[str, str] = {
+    'ATL': 'Atlanta Hawks',      'BOS': 'Boston Celtics',
+    'BKN': 'Brooklyn Nets',      'CHA': 'Charlotte Hornets',
+    'CHI': 'Chicago Bulls',      'CLE': 'Cleveland Cavaliers',
+    'DAL': 'Dallas Mavericks',   'DEN': 'Denver Nuggets',
+    'DET': 'Detroit Pistons',    'GSW': 'Golden State Warriors',
+    'HOU': 'Houston Rockets',    'IND': 'Indiana Pacers',
+    'LAC': 'LA Clippers',        'LAL': 'Los Angeles Lakers',
+    'MEM': 'Memphis Grizzlies',  'MIA': 'Miami Heat',
+    'MIL': 'Milwaukee Bucks',    'MIN': 'Minnesota Timberwolves',
+    'NOP': 'New Orleans Pelicans','NYK': 'New York Knicks',
+    'OKC': 'Oklahoma City Thunder','ORL': 'Orlando Magic',
+    'PHI': 'Philadelphia 76ers', 'PHX': 'Phoenix Suns',
     'POR': 'Portland Trail Blazers','SAC': 'Sacramento Kings',
-    'SAS': 'San Antonio Spurs',     'TOR': 'Toronto Raptors',
-    'UTA': 'Utah Jazz',             'WAS': 'Washington Wizards',
+    'SAS': 'San Antonio Spurs',  'TOR': 'Toronto Raptors',
+    'UTA': 'Utah Jazz',          'WAS': 'Washington Wizards',
+    'MEM': 'Memphis Grizzlies',
+}
+FULL_NAME_TO_ABBR: dict[str, str] = {v: k for k, v in TEAM_ABBR_TO_ODDS.items()}
+
+# ---------------------------------------------------------------------------
+# League averages (populated from DB in Step 0)
+# ---------------------------------------------------------------------------
+LEAGUE_AVG: dict[str, float] = {
+    'pace':        100.0,
+    'pts_pg':       15.0,
+    'reb_pg':        5.0,
+    'ast_pg':        3.5,
+    'fg3m_pg':       1.5,
+    'game_total':  225.0,
 }
 
-# Reverse lookup: full name → abbreviation (for Odds API matching)
-FULL_NAME_TO_ABBR = {v.lower(): k for k, v in ABBR_TO_FULL_NAME.items()}
+# ---------------------------------------------------------------------------
+# Minimum edge thresholds (projection must exceed line by at least this)
+# ---------------------------------------------------------------------------
+MIN_EDGE: dict[str, float] = {
+    'points':    0.8,
+    'rebounds':  0.5,
+    'assists':   0.4,
+    'threes':    0.25,
+    'pra':       1.5,
+    'pr':        1.0,
+    'pa':        1.0,
+    'ar':        0.8,
+}
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-def get_db():
-    if not DATABASE_URL:
-        raise RuntimeError('DATABASE_URL env var not set')
-    conn = psycopg2.connect(DATABASE_URL)
-    psycopg2.extras.register_default_jsonb(conn)
-    return conn
-
-
-def safe(val, default=0.0):
+def safe_float(v, default: float = 0.0) -> float:
     try:
-        return float(val) if val is not None else default
+        return float(v) if v is not None else default
     except (TypeError, ValueError):
         return default
 
 
-# ── Schedule fetch ─────────────────────────────────────────────────────────────
+def clamp(v: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, v))
 
-def fetch_tonight_schedule(game_date: date) -> dict:
-    """
-    Calls BallDontLie /games?dates[]={date} and returns a lookup dict:
-      { team_abbr: { opponent: abbr, home_away: str, game_id: int, opponent_full: str } }
 
-    Both home and away teams are added so any team abbr maps to its matchup.
-    Returns empty dict if no games or API call fails.
-    """
-    if not BALLDONTLIE_API_KEY:
-        log.warning('  BALLDONTLIE_API_KEY not set — cannot fetch schedule')
-        return {}
+def normal_cdf(x: float) -> float:
+    """Standard normal CDF via math.erf."""
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
-    url = f'{BDL_BASE}/games?dates[]={game_date}&per_page=30'
-    req = urllib.request.Request(url, headers={'Authorization': BALLDONTLIE_API_KEY})
+
+def cap_confidence(raw: float) -> float:
+    """Soft cap at 85, hard cap at 92."""
+    if raw <= 85.0:
+        return raw
+    excess = raw - 85.0
+    capped = 85.0 + excess * 0.40
+    return min(92.0, capped)
+
+
+def log5(prob_a: float, prob_b: float) -> float:
+    """Log5 formula: probability team A beats team B."""
+    a = clamp(prob_a, 0.05, 0.95)
+    b = clamp(prob_b, 0.05, 0.95)
+    num   = a * (1 - b)
+    denom = a * (1 - b) + (1 - a) * b
+    return num / denom if denom else 0.5
+
+
+def bdl_fetch(path: str, params: dict | None = None) -> dict | None:
+    url = f"{BDL_BASE}{path}"
+    if params:
+        qs = '&'.join(f"{k}={v}" for k, v in params.items())
+        url += f"?{qs}"
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
+        req = urllib.request.Request(url, headers={'Authorization': BDL_KEY})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.loads(r.read())
     except Exception as e:
-        log.warning(f'  BDL schedule fetch failed: {e}')
-        return {}
-
-    schedule = {}
-    for game in data.get('data', []):
-        home_abbr = game['home_team']['abbreviation']
-        away_abbr = game['visitor_team']['abbreviation']
-        home_full = game['home_team']['full_name']
-        away_full = game['visitor_team']['full_name']
-        gid = game['id']
-        schedule[home_abbr] = {
-            'opponent':      away_abbr,
-            'home_away':     'home',
-            'game_id':       gid,
-            'opponent_full': away_full,
-        }
-        schedule[away_abbr] = {
-            'opponent':      home_abbr,
-            'home_away':     'away',
-            'game_id':       gid,
-            'opponent_full': home_full,
-        }
-    return schedule
+        log.warning("BDL fetch failed %s: %s", path, e)
+        return None
 
 
-# ── Live odds fetch ────────────────────────────────────────────────────────────
-
-def fetch_nba_odds() -> dict:
-    """
-    Fetch tonight's NBA odds from The Odds API.
-    Returns a dict keyed by (home_abbr, away_abbr) tuples:
-      { ('BOS', 'MIA'): { 'total': 218.5, 'home_spread': -5.5, 'home_ml': -220 } }
-
-    Falls back to empty dict on any error so the model runs without odds.
-    """
-    if not ODDS_API_KEY:
-        log.warning('  ODDS_API_KEY not set — game_total_factor and game_script will be 1.0')
-        return {}
-
-    url = (f'{ODDS_BASE}/sports/basketball_nba/odds'
-           f'?apiKey={ODDS_API_KEY}&regions=us&markets=totals,spreads,h2h&oddsFormat=american')
+def odds_fetch(path: str, params: dict | None = None) -> list | None:
+    base_params = {'apiKey': ODDS_API_KEY}
+    if params:
+        base_params.update(params)
+    qs  = '&'.join(f"{k}={v}" for k, v in base_params.items())
+    url = f"{ODDS_BASE}{path}?{qs}"
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'ChalkApp/3.2'})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            games = json.loads(resp.read())
+        with urllib.request.urlopen(url, timeout=10) as r:
+            return json.loads(r.read())
     except Exception as e:
-        log.warning(f'  NBA odds fetch failed: {e}')
-        return {}
+        log.warning("Odds API fetch failed %s: %s", path, e)
+        return None
 
-    odds_map = {}
-    for game in games:
-        home_full = game.get('home_team', '').lower()
-        away_full = game.get('away_team', '').lower()
-        home_abbr = FULL_NAME_TO_ABBR.get(home_full)
-        away_abbr = FULL_NAME_TO_ABBR.get(away_full)
+
+# ---------------------------------------------------------------------------
+# Step 0 — Load league averages from DB
+# ---------------------------------------------------------------------------
+
+def load_league_averages(conn) -> None:
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT stat_name, stat_value FROM league_averages WHERE sport = 'NBA'"
+            )
+            for row in cur.fetchall():
+                LEAGUE_AVG[row[0]] = float(row[1])
+        log.info("League averages loaded: %s", LEAGUE_AVG)
+    except Exception as e:
+        log.warning("Could not load league averages: %s", e)
+
+
+# ---------------------------------------------------------------------------
+# Step 1 — Tonight's schedule
+# ---------------------------------------------------------------------------
+
+def get_todays_games(game_date: str) -> list[dict]:
+    """Returns list of {home_team, away_team, game_id, start_time}."""
+    data = bdl_fetch('/games', {
+        'dates[]': game_date,
+        'per_page': 50,
+    })
+    if not data or not data.get('data'):
+        return []
+    games = []
+    for g in data['data']:
+        home = g.get('home_team', {}).get('abbreviation', '')
+        away = g.get('visitor_team', {}).get('abbreviation', '')
+        if home and away:
+            games.append({
+                'game_id':    g['id'],
+                'home_team':  home,
+                'away_team':  away,
+                'start_time': g.get('status', ''),
+            })
+    return games
+
+
+# ---------------------------------------------------------------------------
+# Step 1b — Live odds
+# ---------------------------------------------------------------------------
+
+def fetch_nba_odds(game_date: str) -> dict[str, dict]:
+    """
+    Returns dict keyed by 'HOME_AWAY' → {implied_total, spread, home_ml, away_ml}.
+    Falls back to league averages if API unavailable.
+    """
+    data = odds_fetch(
+        '/sports/basketball_nba/odds',
+        {'regions': 'us', 'markets': 'h2h,spreads,totals', 'oddsFormat': 'american'}
+    )
+    result: dict[str, dict] = {}
+    if not data:
+        return result
+
+    for event in data:
+        home_full = event.get('home_team', '')
+        away_full = event.get('away_team', '')
+        home_abbr = FULL_NAME_TO_ABBR.get(home_full, '')
+        away_abbr = FULL_NAME_TO_ABBR.get(away_full, '')
         if not home_abbr or not away_abbr:
             continue
 
-        entry = {'total': None, 'home_spread': None, 'home_ml': None}
+        key = f"{home_abbr}_{away_abbr}"
+        entry: dict = {
+            'implied_total': LEAGUE_AVG['game_total'],
+            'spread':        0.0,
+            'home_ml':       None,
+            'away_ml':       None,
+        }
 
-        for bookmaker in game.get('bookmakers', []):
-            for market in bookmaker.get('markets', []):
-                key = market.get('key')
-                outcomes = market.get('outcomes', [])
-                if key == 'totals' and entry['total'] is None:
-                    for o in outcomes:
-                        if o.get('name') == 'Over':
-                            entry['total'] = float(o.get('point', 0))
-                            break
-                elif key == 'spreads' and entry['home_spread'] is None:
-                    for o in outcomes:
-                        if o.get('name', '').lower() in (home_full, home_abbr.lower()):
-                            entry['home_spread'] = float(o.get('point', 0))
-                            break
-                elif key == 'h2h' and entry['home_ml'] is None:
-                    for o in outcomes:
-                        if o.get('name', '').lower() in (home_full, home_abbr.lower()):
-                            entry['home_ml'] = float(o.get('price', 0))
-                            break
-            if entry['total'] and entry['home_spread']:
-                break  # got what we need from first bookmaker
+        for bm in event.get('bookmakers', []):
+            for market in bm.get('markets', []):
+                if market['key'] == 'totals':
+                    for outcome in market.get('outcomes', []):
+                        if outcome['name'] == 'Over':
+                            entry['implied_total'] = safe_float(outcome.get('point', LEAGUE_AVG['game_total']))
+                elif market['key'] == 'spreads':
+                    for outcome in market.get('outcomes', []):
+                        if outcome['name'] == home_full:
+                            entry['spread'] = safe_float(outcome.get('point', 0.0))
+                elif market['key'] == 'h2h':
+                    for outcome in market.get('outcomes', []):
+                        if outcome['name'] == home_full:
+                            entry['home_ml'] = safe_float(outcome.get('price'))
+                        elif outcome['name'] == away_full:
+                            entry['away_ml'] = safe_float(outcome.get('price'))
+            break  # use first bookmaker only
 
-        odds_map[(home_abbr, away_abbr)] = entry
+        result[key] = entry
 
-    log.info(f'  NBA odds loaded for {len(odds_map)} games')
-    return odds_map
-
-
-def get_out_players(conn, team_abbr: str, game_date: date) -> list:
-    """
-    Return player names confirmed OUT tonight for this team (from nightly_roster).
-    Returns a list of lowercased player names.
-    """
-    full_name = ABBR_TO_FULL_NAME.get(team_abbr, team_abbr)
-    with conn.cursor() as cur:
-        cur.execute(
-            """SELECT player_name FROM nightly_roster
-               WHERE (team = %s OR team ILIKE %s)
-                 AND sport = 'NBA'
-                 AND game_date = %s
-                 AND is_confirmed_playing = false""",
-            (full_name, f'%{team_abbr}%', game_date)
-        )
-        return [row[0].lower() for row in cur.fetchall()]
+    return result
 
 
-def load_league_averages(conn) -> None:
-    """
-    Read the latest league averages from the DB and update LEAGUE_AVG in-place.
-    Falls back to hardcoded values if table is empty or query fails.
-    """
-    global LEAGUE_AVG
+# ---------------------------------------------------------------------------
+# Step 1c — OUT players + usage boost
+# ---------------------------------------------------------------------------
+
+def get_out_players(conn, team_abbr: str, game_date: str) -> list[dict]:
+    """Players confirmed OUT from nightly_roster."""
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("""
-                SELECT DISTINCT ON (stat_name) stat_name, stat_value
-                FROM league_averages
-                WHERE sport = 'NBA'
-                ORDER BY stat_name, computed_date DESC
-            """)
-            rows = cur.fetchall()
-        if rows:
-            for row in rows:
-                name = row['stat_name']
-                if name in LEAGUE_AVG:
-                    LEAGUE_AVG[name] = float(row['stat_value'])
-            log.info(f'  League averages loaded from DB ({len(rows)} stats)')
-        else:
-            log.info('  No DB league averages found — using hardcoded constants')
-    except Exception as e:
-        log.warning(f'  Could not load league averages from DB: {e}')
+            cur.execute(
+                """SELECT player_id, player_name
+                   FROM nightly_roster
+                   WHERE team = %s AND sport = 'NBA' AND game_date = %s
+                     AND is_confirmed_playing = false""",
+                (team_abbr, game_date)
+            )
+            return cur.fetchall()
+    except Exception:
+        return []
 
 
-# ── Rolling average calculations ──────────────────────────────────────────────
-
-def rolling_avg(rows: list[dict], col: str, n: int) -> float:
-    vals = [safe(r[col]) for r in rows[:n] if r.get(col) is not None]
-    return sum(vals) / len(vals) if vals else 0.0
-
-
-def weighted_avg(rows: list[dict], col: str) -> float:
+def compute_usage_boost(conn, team_abbr: str, out_players: list[dict], game_date: str) -> float:
     """
-    Core projection baseline:
-      L5×0.40 + L10×0.30 + L20×0.20 + season×0.10
-    Falls back gracefully when fewer games exist.
+    Each OUT player contributes ~22% usage. Remaining players share it.
+    Redistribution efficiency = 0.85.
+    Returns boost to add to each active player's usage factor (capped at +0.30).
     """
-    n = len(rows)
-    if n == 0:
+    if not out_players:
         return 0.0
-    l5  = rolling_avg(rows, col, 5)
-    l10 = rolling_avg(rows, col, min(10, n))
-    l20 = rolling_avg(rows, col, min(20, n))
-    szn = rolling_avg(rows, col, n)
-    if n >= 20:
-        return l5 * 0.40 + l10 * 0.30 + l20 * 0.20 + szn * 0.10
-    elif n >= 10:
-        return l5 * 0.50 + l10 * 0.35 + szn * 0.15
-    elif n >= 5:
-        return l5 * 0.65 + szn * 0.35
-    else:
-        return szn
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM nightly_roster WHERE team = %s AND sport = 'NBA' AND game_date = %s AND is_confirmed_playing = true",
+                (team_abbr, game_date)
+            )
+            active = cur.fetchone()[0] or 8
+    except Exception:
+        active = 8
+
+    lost_usage = len(out_players) * 0.22
+    boost_per_player = (lost_usage * 0.85) / max(active, 1)
+    return clamp(boost_per_player, 0.0, 0.30)
 
 
-def home_away_avg(rows: list[dict], col: str, location: str) -> float:
-    filtered = [r for r in rows if r.get('home_away') == location]
-    return rolling_avg(filtered, col, len(filtered)) if filtered else 0.0
-
-
-# ── Derived stat computations (replaces NULL advanced_stats columns) ───────────
-
-def compute_ts_pct(logs: list[dict]) -> float:
-    """
-    True shooting % = pts / (2 × (fga + 0.44 × fta))
-    Computed from raw game log data — no advanced_stats API needed.
-    Returns weighted recent average (L20), falls back to league avg.
-    """
-    vals = []
-    for r in logs[:20]:
-        pts = safe(r.get('points'))
-        fga = safe(r.get('fg_att'))
-        fta = safe(r.get('ft_att'))
-        denom = 2.0 * (fga + 0.44 * fta)
-        if denom > 0 and pts > 0:
-            vals.append(pts / denom)
-    return sum(vals) / len(vals) if vals else LEAGUE_AVG['ts_pct']
-
-
-def compute_usage_approx(logs: list[dict], n: int = 20) -> float:
-    """
-    Usage approximation = (fga + 0.44×fta + tov) / minutes
-    Normalised against league average (0.415 per minute).
-    Returns a ratio where 1.0 = average usage, >1 = high usage.
-    """
-    vals = []
-    for r in logs[:n]:
-        fga  = safe(r.get('fg_att'))
-        fta  = safe(r.get('ft_att'))
-        tov  = safe(r.get('turnovers'))
-        mins = safe(r.get('minutes'))
-        if mins > 5:
-            vals.append((fga + 0.44 * fta + tov) / mins)
-    if not vals:
-        return 1.0
-    player_per_min = sum(vals) / len(vals)
-    return player_per_min / LEAGUE_AVG['usage_per_min']
-
-
-# ── DB queries ─────────────────────────────────────────────────────────────────
-
-def get_player_logs(conn, player_id: int, limit: int = 60) -> list[dict]:
-    """Most recent `limit` game logs for a player (current season)."""
-    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute(
-            """SELECT * FROM player_game_logs
-               WHERE player_id = %s AND sport = 'NBA' AND season = %s
-               ORDER BY game_date DESC LIMIT %s""",
-            (player_id, CURRENT_SEASON, limit)
-        )
-        return cur.fetchall()
-
-
-def get_team_logs(conn, team_abbr: str, limit: int = 20) -> list[dict]:
-    """
-    team_game_logs stores full names ('Atlanta Hawks').
-    Use ABBR_TO_FULL_NAME to convert before querying.
-    """
-    full_name = ABBR_TO_FULL_NAME.get(team_abbr, team_abbr)
-    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute(
-            """SELECT * FROM team_game_logs
-               WHERE team_name = %s AND sport = 'NBA' AND season = %s
-               ORDER BY game_date DESC LIMIT %s""",
-            (full_name, CURRENT_SEASON, limit)
-        )
-        return cur.fetchall()
-
-
-def get_defense_rating(conn, team_abbr: str) -> dict:
-    """
-    position_defense_ratings stores abbreviations as team_name (e.g. 'TOR').
-    Exact match — no ILIKE needed.
-    """
-    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute(
-            """SELECT pts_allowed, reb_allowed, ast_allowed, three_allowed
-               FROM position_defense_ratings
-               WHERE team_name = %s AND sport = 'NBA' AND season = %s AND position = 'ALL'
-               LIMIT 1""",
-            (team_abbr, CURRENT_SEASON)
-        )
-        row = cur.fetchone()
-        return dict(row) if row else {}
-
-
-def get_team_pace(conn, team_abbr: str) -> float:
-    """
-    Average pace over last 10 games for a team.
-    team_game_logs stores full names — convert via ABBR_TO_FULL_NAME.
-    """
-    full_name = ABBR_TO_FULL_NAME.get(team_abbr, team_abbr)
-    with conn.cursor() as cur:
-        cur.execute(
-            """SELECT AVG(pace) FROM (
-                 SELECT pace FROM team_game_logs
-                 WHERE team_name = %s AND sport = 'NBA' AND season = %s
-                   AND pace IS NOT NULL
-                 ORDER BY game_date DESC LIMIT 10
-               ) sub""",
-            (full_name, CURRENT_SEASON)
-        )
-        row = cur.fetchone()
-        return float(row[0]) if row and row[0] else LEAGUE_AVG['pace']
-
-
-def get_rest_days(conn, player_id: int, game_date: date) -> int:
-    """Days since the player's last game."""
-    with conn.cursor() as cur:
-        cur.execute(
-            """SELECT MAX(game_date) FROM player_game_logs
-               WHERE player_id = %s AND game_date < %s AND sport = 'NBA'""",
-            (player_id, game_date)
-        )
-        row = cur.fetchone()
-        if row and row[0]:
-            return (game_date - row[0]).days
-        return 3
-
-
-# ── Factor calculations ────────────────────────────────────────────────────────
-
-def rest_factor(rest_days: int) -> float:
-    if rest_days == 0:  return 0.92   # back-to-back
-    if rest_days == 1:  return 0.97
-    if rest_days <= 4:  return 1.00
-    return 0.98                        # rust (5+ days off)
-
-
-def home_away_factor(logs: list[dict], col: str, location: str) -> float:
-    home_a = home_away_avg(logs, col, 'home')
-    away_a = home_away_avg(logs, col, 'away')
-    baseline = (home_a + away_a) / 2 if (home_a + away_a) > 0 else 1.0
-    if baseline == 0:
-        return 1.0
-    loc_avg = home_a if location == 'home' else away_a
-    if loc_avg == 0:
-        return 1.0
-    return max(0.80, min(1.20, loc_avg / baseline))
-
-
-def pace_factor_offensive(team_pace: float, opp_pace: float) -> float:
-    matchup_pace = (team_pace + opp_pace) / 2
-    return max(0.88, min(1.12, matchup_pace / LEAGUE_AVG['pace']))
-
-
-def pace_factor_rebounds(team_pace: float, opp_pace: float) -> float:
-    matchup_pace = (team_pace + opp_pace) / 2
-    return max(0.88, min(1.12, LEAGUE_AVG['pace'] / matchup_pace))
-
-
-def game_script_pts_factor(spread: Optional[float], is_underdog: bool) -> float:
-    """
-    Heavy favourites rest starters in garbage time (fewer pts).
-    Large underdogs pad stats late (more pts).
-    Spread bands: 10+ / 6-9 / within 5.
-    """
-    if spread is None:
-        return 1.00
-    abs_s = abs(spread)
-    if is_underdog:
-        if abs_s >= 10: return 1.08   # heavy underdog — garbage-time padding
-        if abs_s >= 6:  return 1.04
-        return 1.00
-    else:
-        if abs_s >= 10: return 0.94   # heavy favourite — starters rested in Q4
-        if abs_s >= 6:  return 0.97
-        return 1.00
-
-
-def game_script_threes_factor(spread: Optional[float], is_underdog: bool) -> float:
-    if spread is None or abs(spread) < 8:
-        return 1.0
-    return 1.20 if is_underdog else 0.85
-
-
-# ── Opponent foul rate (points — FTA opportunity boost) ────────────────────────
-
-def get_opp_foul_rate_factor(conn, team_abbr: str) -> float:
-    """
-    Returns 1.05 if the opponent commits > 22 fouls per game (top-10 foul team).
-    More fouls → more FTA for this player → more scoring opportunities.
-    Queried from player_game_logs (team column = BDL abbreviation).
-    """
-    with conn.cursor() as cur:
-        cur.execute("""
-            SELECT AVG(game_fouls) FROM (
-              SELECT game_date, SUM(fouls) AS game_fouls
-              FROM player_game_logs
-              WHERE team = %s AND sport = 'NBA' AND season = %s
-                AND minutes > 0
-              GROUP BY game_date
-              ORDER BY game_date DESC
-              LIMIT 20
-            ) sub
-        """, (team_abbr, CURRENT_SEASON))
-        row = cur.fetchone()
-    fouls_pg = float(row[0]) if row and row[0] else LEAGUE_AVG['team_fouls']
-    return 1.05 if fouls_pg > 22.0 else 1.00
-
-
-def get_opp_fg_pct(conn, team_abbr: str) -> float:
-    """
-    Opponent's offensive FG% from team_game_logs (last 20 games).
-    Used for the rebound miss factor: low FG% → more misses → more rebounds.
-    team_game_logs stores full names — convert via ABBR_TO_FULL_NAME.
-    """
-    full_name = ABBR_TO_FULL_NAME.get(team_abbr, team_abbr)
-    with conn.cursor() as cur:
-        cur.execute("""
-            SELECT AVG(fg_pct) FROM (
-              SELECT fg_pct FROM team_game_logs
-              WHERE team_name = %s AND sport = 'NBA' AND season = %s
-                AND fg_pct IS NOT NULL
-              ORDER BY game_date DESC LIMIT 20
-            ) sub
-        """, (full_name, CURRENT_SEASON))
-        row = cur.fetchone()
-    return float(row[0]) if row and row[0] else LEAGUE_AVG['fg_pct']
-
-
-def get_opp_three_rate(conn, team_abbr: str) -> float:
-    """
-    Opponent's three-point attempt rate (3PA / FGA) from player_game_logs (last 20 games).
-    High 3PA teams produce long rebounds → more rebound chances for athletic players.
-    """
-    with conn.cursor() as cur:
-        cur.execute("""
-            SELECT AVG(game_3pa_rate) FROM (
-              SELECT game_date,
-                     SUM(three_att)::float / NULLIF(SUM(fg_att), 0) AS game_3pa_rate
-              FROM player_game_logs
-              WHERE team = %s AND sport = 'NBA' AND season = %s AND minutes > 0
-              GROUP BY game_date
-              HAVING SUM(fg_att) > 0
-              ORDER BY game_date DESC
-              LIMIT 20
-            ) sub
-        """, (team_abbr, CURRENT_SEASON))
-        row = cur.fetchone()
-    return float(row[0]) if row and row[0] else LEAGUE_AVG['three_rate']
-
-
-def get_opp_steals_factor(conn, team_abbr: str) -> float:
-    """
-    Returns 0.93 if the opponent averages > 8.5 steals per game (top-10 in stealing).
-    High steal rate correlates with deflections → tighter passing lanes → fewer assists.
-    """
-    with conn.cursor() as cur:
-        cur.execute("""
-            SELECT AVG(game_stl) FROM (
-              SELECT game_date, SUM(steals) AS game_stl
-              FROM player_game_logs
-              WHERE team = %s AND sport = 'NBA' AND season = %s AND minutes > 0
-              GROUP BY game_date
-              ORDER BY game_date DESC
-              LIMIT 20
-            ) sub
-        """, (team_abbr, CURRENT_SEASON))
-        row = cur.fetchone()
-    opp_stl = float(row[0]) if row and row[0] else LEAGUE_AVG['stl']
-    return 0.93 if opp_stl > 8.5 else 1.00
-
-
-def weighted_avg_threes(rows: list[dict]) -> float:
-    """
-    Three-point shooting responds more strongly to recent form than other stats.
-    L5 × 0.50 + L10 × 0.25 + L15 × 0.15 + season × 0.10
-    (vs standard weighted_avg which weights L5 at 0.40)
-    """
-    n = len(rows)
-    if n == 0:
-        return 0.0
-    l5  = rolling_avg(rows, 'three_made', 5)
-    l10 = rolling_avg(rows, 'three_made', min(10, n))
-    l15 = rolling_avg(rows, 'three_made', min(15, n))
-    szn = rolling_avg(rows, 'three_made', n)
-    if n >= 15:
-        return l5 * 0.50 + l10 * 0.25 + l15 * 0.15 + szn * 0.10
-    elif n >= 10:
-        return l5 * 0.55 + l10 * 0.30 + szn * 0.15
-    elif n >= 5:
-        return l5 * 0.70 + szn * 0.30
-    else:
-        return szn
-
+# ---------------------------------------------------------------------------
+# Archetype classification
+# ---------------------------------------------------------------------------
 
 def classify_archetype(
-    base_pts: float, base_reb: float, base_ast: float, usage_f: float
-) -> tuple:
+    pts_pg: float, ast_pg: float, reb_pg: float,
+    usage: float, position: str,
+    fg3a_pg: float, stl_pg: float, blk_pg: float
+) -> str:
+    pos = (position or '').upper()
+    if usage > 1.25 and pts_pg > 22:
+        return DOMINANT_SCORER
+    if ast_pg > 7 and usage < 1.20:
+        return TRUE_PLAYMAKER
+    if pos in ('C', 'PF') and reb_pg > 8:
+        return TRUE_BIG
+    if pts_pg > 20 and reb_pg > 7 and ast_pg > 5:
+        return TWO_WAY_STAR
+    if fg3a_pg > 4 and (stl_pg + blk_pg) > 1:
+        return THREE_AND_D
+    return ROLE_PLAYER
+
+
+# ---------------------------------------------------------------------------
+# Position defense factor
+# ---------------------------------------------------------------------------
+
+def get_position_defense_factor(conn, opponent: str, position: str, stat: str) -> float:
     """
-    Classify a player's PRA archetype and return (label, pra_correlation_factor).
-
-    A — TRIPLE_THREAT  (pts>5, reb>4, ast>4):
-        All three stats move together. pra_corr = 1.00.
-        Examples: Jokic, LeBron, Giannis, Draymond.
-
-    B — PRIMARY_SCORER (usage ≥ 1.20 AND ast < 4):
-        Hunting shots → points up often means assists down. pra_corr = 0.95.
-        Examples: Booker, Kawhi, Jaylen Brown.
-
-    C — ROLE_PLAYER    (everyone else):
-        Stats are relatively independent. pra_corr = 0.97.
+    Returns factor relative to league average. 1.0 = average defense.
+    < 1.0 = tough defense (fewer allowed). > 1.0 = soft defense (more allowed).
     """
-    if base_pts > 5.0 and base_reb > 4.0 and base_ast > 4.0:
-        return ('TRIPLE_THREAT', 1.00)
-    if usage_f >= 1.20 and base_ast < 4.0:
-        return ('PRIMARY_SCORER', 0.95)
-    return ('ROLE_PLAYER', 0.97)
-
-
-def opp_pts_allowed_factor(opp_pts_allowed: float) -> float:
-    if opp_pts_allowed <= 0:
+    if not position or not opponent:
         return 1.0
-    return max(0.85, min(1.18, opp_pts_allowed / LEAGUE_AVG['pts']))
-
-
-def game_total_factor(implied_total: Optional[float]) -> float:
-    if implied_total is None:
-        return 1.0
-    diff = implied_total - 224.0
-    if diff > 5:  return 1.04
-    if diff < -5: return 0.96
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT allowed_vs_league_avg
+                   FROM position_defense_ratings
+                   WHERE team_abbr = %s AND position = %s AND stat_name = %s
+                     AND sport = 'NBA'
+                   ORDER BY computed_date DESC LIMIT 1""",
+                (opponent, position.upper(), stat)
+            )
+            row = cur.fetchone()
+            if row and row[0] is not None:
+                return clamp(float(row[0]), 0.70, 1.30)
+    except Exception:
+        pass
     return 1.0
 
 
-# ── Player projection ──────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Player game log fetch
+# ---------------------------------------------------------------------------
+
+def get_player_logs(conn, player_id: int, sport: str = 'NBA') -> list[dict]:
+    """Returns game logs ordered by game date desc."""
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """SELECT *
+                   FROM player_game_logs
+                   WHERE player_id = %s AND sport = %s
+                   ORDER BY game_date DESC
+                   LIMIT 25""",
+                (player_id, sport)
+            )
+            return cur.fetchall()
+    except Exception:
+        return []
+
+
+def get_player_season_avgs(conn, player_id: int) -> dict:
+    """Returns season averages from BallDontLie or DB aggregate."""
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """SELECT
+                     AVG(pts)   AS pts_pg,
+                     AVG(reb)   AS reb_pg,
+                     AVG(ast)   AS ast_pg,
+                     AVG(fg3m)  AS fg3m_pg,
+                     AVG(fg3a)  AS fg3a_pg,
+                     AVG(stl)   AS stl_pg,
+                     AVG(blk)   AS blk_pg,
+                     AVG(min)   AS min_pg,
+                     AVG(fga)   AS fga_pg,
+                     AVG(fgm)   AS fgm_pg,
+                     AVG(fta)   AS fta_pg,
+                     AVG(ftm)   AS ftm_pg,
+                     COUNT(*)   AS games_played
+                   FROM player_game_logs
+                   WHERE player_id = %s AND sport = 'NBA'""",
+                (player_id,)
+            )
+            row = cur.fetchone()
+            return dict(row) if row else {}
+    except Exception:
+        return {}
+
+
+def rolling_avg(logs: list[dict], stat: str, n: int) -> float:
+    vals = [safe_float(r.get(stat)) for r in logs[:n] if r.get(stat) is not None]
+    return sum(vals) / len(vals) if vals else 0.0
+
+
+def weighted_base(logs: list[dict], season_avg: float, stat: str) -> float:
+    """L5×0.35 + L10×0.30 + L20×0.20 + season×0.15"""
+    l5  = rolling_avg(logs, stat, 5)
+    l10 = rolling_avg(logs, stat, 10)
+    l20 = rolling_avg(logs, stat, 20)
+    return l5*0.35 + l10*0.30 + l20*0.20 + season_avg*0.15
+
+
+def weighted_base_threes(logs: list[dict], season_avg: float) -> float:
+    """Threes special: L5×0.50 + L10×0.25 + L20×0.15 + season×0.10"""
+    l5  = rolling_avg(logs, 'fg3m', 5)
+    l10 = rolling_avg(logs, 'fg3m', 10)
+    l20 = rolling_avg(logs, 'fg3m', 20)
+    return l5*0.50 + l10*0.25 + l20*0.15 + season_avg*0.10
+
+
+# ---------------------------------------------------------------------------
+# Team pace fetch
+# ---------------------------------------------------------------------------
+
+def get_team_pace(conn, team_abbr: str) -> float:
+    """Returns team pace from team_game_logs. Falls back to league avg."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT AVG(pace)
+                   FROM team_game_logs
+                   WHERE team_name ILIKE %s AND sport = 'NBA'
+                   ORDER BY game_date DESC LIMIT 15""",
+                (f'%{team_abbr}%',)
+            )
+            row = cur.fetchone()
+            if row and row[0]:
+                return float(row[0])
+    except Exception:
+        pass
+    return LEAGUE_AVG['pace']
+
+
+def get_team_record(conn, team_abbr: str) -> tuple[int, int]:
+    """Returns (wins, losses) from team_game_logs."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT
+                     SUM(CASE WHEN team_score > opp_score THEN 1 ELSE 0 END) as wins,
+                     SUM(CASE WHEN team_score <= opp_score THEN 1 ELSE 0 END) as losses
+                   FROM team_game_logs
+                   WHERE team_name ILIKE %s AND sport = 'NBA'""",
+                (f'%{team_abbr}%',)
+            )
+            row = cur.fetchone()
+            if row:
+                return (int(row[0] or 0), int(row[1] or 0))
+    except Exception:
+        pass
+    return (41, 41)
+
+
+def get_rest_days(conn, player_id: int, game_date: str) -> int:
+    """Days since last game for this player."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT game_date FROM player_game_logs
+                   WHERE player_id = %s AND sport = 'NBA' AND game_date < %s
+                   ORDER BY game_date DESC LIMIT 1""",
+                (player_id, game_date)
+            )
+            row = cur.fetchone()
+            if row and row[0]:
+                from datetime import datetime
+                last = row[0] if hasattr(row[0], 'days') else \
+                    __import__('datetime').date.fromisoformat(str(row[0]))
+                current = __import__('datetime').date.fromisoformat(game_date)
+                return (current - last).days
+    except Exception:
+        pass
+    return 2
+
+
+def get_home_away_split(conn, player_id: int, stat: str, is_home: bool) -> float:
+    """Average stat in home or away games. Returns 0 if insufficient data."""
+    side_filter = "home_away = 'home'" if is_home else "home_away = 'away'"
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""SELECT AVG({stat})
+                    FROM player_game_logs
+                    WHERE player_id = %s AND sport = 'NBA' AND {side_filter}
+                    LIMIT 20""",
+                (player_id,)
+            )
+            row = cur.fetchone()
+            if row and row[0]:
+                return float(row[0])
+    except Exception:
+        pass
+    return 0.0
+
+
+# ---------------------------------------------------------------------------
+# Archetype combo correlation factors
+# ---------------------------------------------------------------------------
+
+COMBO_CORRELATIONS: dict[str, dict[str, float]] = {
+    # PRA correlations
+    DOMINANT_SCORER: {'pra': 0.95, 'pr': 0.92, 'pa': 0.88, 'ar': 0.80},
+    TRUE_PLAYMAKER:  {'pra': 0.92, 'pr': 0.82, 'pa': 0.95, 'ar': 0.90},
+    TRUE_BIG:        {'pra': 0.90, 'pr': 0.96, 'pa': 0.78, 'ar': 0.80},
+    TWO_WAY_STAR:    {'pra': 0.96, 'pr': 0.93, 'pa': 0.91, 'ar': 0.85},
+    THREE_AND_D:     {'pra': 0.85, 'pr': 0.82, 'pa': 0.80, 'ar': 0.78},
+    ROLE_PLAYER:     {'pra': 0.82, 'pr': 0.80, 'pa': 0.80, 'ar': 0.78},
+}
+
+
+# ---------------------------------------------------------------------------
+# Core projection function
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PlayerProjection:
+    player_id:     int
+    player_name:   str
+    team:          str
+    opponent:      str
+    is_home:       bool
+    position:      str
+    archetype:     str
+    game_date:     str
+    props:         dict = field(default_factory=dict)   # prop_type → {proj, confidence, line, edge, factors_json}
+
 
 def project_player(
     conn,
-    player_id:     int,
-    player_name:   str,
-    team:          str,          # BDL abbreviation e.g. 'LAC'
-    opponent:      str,          # BDL abbreviation e.g. 'TOR'
-    location:      str,          # 'home' | 'away'
-    game_date:     date,
-    spread:        Optional[float] = None,
-    implied_total: Optional[float] = None,
-    usage_boost:   float          = 0.0,  # added when a star teammate is OUT
-) -> Optional[dict]:
+    player_id: int,
+    player_name: str,
+    team: str,
+    opponent: str,
+    is_home: bool,
+    position: str,
+    game_date: str,
+    implied_total: float,
+    spread: float,
+    usage_boost: float = 0.0,
+) -> PlayerProjection | None:
+    logs       = get_player_logs(conn, player_id)
+    season_avg = get_player_season_avgs(conn, player_id)
 
-    logs = get_player_logs(conn, player_id, limit=60)
-    if len(logs) < 3:
+    if not logs and not season_avg:
         return None
 
-    # ── Minutes floor — low-minutes players are unreliable prop targets ──────
-    season_min_avg = rolling_avg(logs, 'minutes', len(logs)) if logs else 0.0
-    low_minutes    = 0.0 < season_min_avg < 20.0
-    min_floor_f    = 0.88 if low_minutes else 1.00
+    # Season averages with safe defaults
+    pts_season  = safe_float(season_avg.get('pts_pg'), LEAGUE_AVG['pts_pg'])
+    reb_season  = safe_float(season_avg.get('reb_pg'), LEAGUE_AVG['reb_pg'])
+    ast_season  = safe_float(season_avg.get('ast_pg'), LEAGUE_AVG['ast_pg'])
+    fg3m_season = safe_float(season_avg.get('fg3m_pg'), LEAGUE_AVG['fg3m_pg'])
+    fg3a_season = safe_float(season_avg.get('fg3a_pg'), 3.0)
+    stl_season  = safe_float(season_avg.get('stl_pg'), 0.8)
+    blk_season  = safe_float(season_avg.get('blk_pg'), 0.5)
+    min_season  = safe_float(season_avg.get('min_pg'), 25.0)
+    fga_season  = safe_float(season_avg.get('fga_pg'), 12.0)
+    fgm_season  = safe_float(season_avg.get('fgm_pg'), 5.0)
+    fta_season  = safe_float(season_avg.get('fta_pg'), 3.0)
+    ftm_season  = safe_float(season_avg.get('ftm_pg'), 2.5)
 
-    # ── Base weighted averages ─────────────────────────────────────────────────
-    base_pts    = weighted_avg(logs, 'points')
-    base_reb    = weighted_avg(logs, 'rebounds')
-    base_ast    = weighted_avg(logs, 'assists')
-    base_stl    = weighted_avg(logs, 'steals')
-    base_blk    = weighted_avg(logs, 'blocks')
-    base_tov    = weighted_avg(logs, 'turnovers')
-    base_threes = weighted_avg(logs, 'three_made')
-    base_min    = weighted_avg(logs, 'minutes')
-    base_fta    = weighted_avg(logs, 'ft_att')
+    # TS% = pts / (2 * (fga + 0.44*fta))
+    ts_denom = 2 * (fga_season + 0.44 * fta_season)
+    ts_pct   = pts_season / ts_denom if ts_denom > 0 else 0.50
+    ts_lg    = 0.565  # league average TS%
+    ts_f     = clamp(ts_pct / ts_lg, 0.85, 1.15)
 
-    # ── Derived stats — computed from raw log data (no advanced_stats API) ─────
-    ts_pct  = compute_ts_pct(logs)
-    usage_f = compute_usage_approx(logs)    # clamped to [0.70, 1.40] below
+    # Usage approximation = (fga + 0.44*fta) / (min * 0.20)
+    usage_approx = (fga_season + 0.44 * fta_season) / max(min_season * 0.20, 1)
+    usage_f = clamp(usage_approx + usage_boost, 0.70, 1.45)
 
-    ts_f = ts_pct / LEAGUE_AVG['ts_pct'] if LEAGUE_AVG['ts_pct'] > 0 else 1.0
-    ts_f = max(0.85, min(1.20, ts_f))
-
-    # Clamp usage_f to [0.70, 1.40] — bench floor to primary scorer ceiling
-    # usage_boost is added when a star teammate is confirmed OUT tonight
-    usage_f = max(0.70, min(1.45, usage_f + usage_boost))
-
-    fta_f = 1.04 if base_fta > 5 else 1.0
-
-    # ── Opponent defense (from position_defense_ratings, team_name = abbr) ─────
-    opp_def         = get_defense_rating(conn, opponent)
-    opp_pts_allowed = safe(opp_def.get('pts_allowed'), LEAGUE_AVG['pts'])
-    opp_reb_allowed = safe(opp_def.get('reb_allowed'), LEAGUE_AVG['reb'])
-    opp_ast_allowed = safe(opp_def.get('ast_allowed'), LEAGUE_AVG['ast'])
-    opp_3pm_allowed = safe(opp_def.get('three_allowed'), LEAGUE_AVG['threes'])
-    has_opp_data    = bool(opp_def)
-
-    # ── Pace (from team_game_logs, looked up by full name) ────────────────────
-    team_pace = get_team_pace(conn, team)
-    opp_pace  = get_team_pace(conn, opponent)
-
-    # ── Rest ──────────────────────────────────────────────────────────────────
-    rest = get_rest_days(conn, player_id, game_date)
-    rf   = rest_factor(rest)
-
-    is_underdog = (spread is not None and spread < 0)
-
-    # ── Additional opponent context (computed nightly from game logs) ─────────
-    foul_rate_f    = get_opp_foul_rate_factor(conn, opponent)   # pts: FTA opportunity
-    opp_fg_pct_val = get_opp_fg_pct(conn, opponent)             # reb: actual miss rate
-    opp_3pa_rate   = get_opp_three_rate(conn, opponent)         # reb: long-miss opportunity
-    ast_steals_f   = get_opp_steals_factor(conn, opponent)      # ast: passing-lane pressure
-
-    # ── POINTS ────────────────────────────────────────────────────────────────
-    pts_opp_f    = opp_pts_allowed_factor(opp_pts_allowed)
-    pts_pace_f   = pace_factor_offensive(team_pace, opp_pace)
-    pts_rest_f   = rf
-    pts_home_f   = home_away_factor(logs, 'points', location)
-    pts_script_f = game_script_pts_factor(spread, is_underdog)
-    pts_total_f  = game_total_factor(implied_total)
-
-    factors_pts = {
-        'usage_f':       round(usage_f,       3),
-        'ts_f':          round(ts_f,          3),
-        'fta_f':         round(fta_f,         3),
-        'foul_rate_f':   round(foul_rate_f,   3),
-        'opp_pts_f':     round(pts_opp_f,     3),
-        'pace_f':        round(pts_pace_f,    3),
-        'rest_f':        round(pts_rest_f,    3),
-        'home_away_f':   round(pts_home_f,    3),
-        'script_f':      round(pts_script_f,  3),
-        'total_f':       round(pts_total_f,   3),
-    }
-
-    proj_pts = (
-        base_pts * usage_f * ts_f * fta_f * foul_rate_f
-        * pts_opp_f * pts_pace_f * pts_rest_f
-        * pts_home_f * pts_script_f * pts_total_f
-        * min_floor_f
+    # Archetype
+    archetype = classify_archetype(
+        pts_season, ast_season, reb_season,
+        usage_approx, position, fg3a_season, stl_season, blk_season
     )
 
-    # ── REBOUNDS ──────────────────────────────────────────────────────────────
-    # Miss factor from actual opponent FG% (team_game_logs) — more misses = more boards
-    miss_factor = max(0.85, min(1.15,
-        (1 - opp_fg_pct_val) / (1 - LEAGUE_AVG['fg_pct'])
-        if (1 - LEAGUE_AVG['fg_pct']) > 0 else 1.0
-    ))
+    # Pace factor
+    team_pace = get_team_pace(conn, team)
+    opp_pace  = get_team_pace(conn, opponent)
+    avg_pace  = (team_pace + opp_pace) / 2
+    pace_f    = clamp(avg_pace / LEAGUE_AVG['pace'], 0.90, 1.10)
 
-    # 3PA rate factor: high three-point volume teams produce longer rebounds
-    opp_3pa_f = 1.05 if opp_3pa_rate > LEAGUE_AVG['three_rate'] + 0.03 else 1.00
+    # Rest factor
+    rest_days = get_rest_days(conn, player_id, game_date)
+    if rest_days == 0:
+        rest_f = 0.92   # B2B
+    elif rest_days == 1:
+        rest_f = 0.97
+    elif rest_days >= 3:
+        rest_f = 1.03   # extra rest
+    else:
+        rest_f = 1.00
 
-    reb_opp_f   = max(0.85, min(1.15, opp_reb_allowed / LEAGUE_AVG['reb'])) if LEAGUE_AVG['reb'] > 0 else 1.0
-    reb_pace_f  = pace_factor_rebounds(team_pace, opp_pace)
-    reb_rest_f  = rf
-    reb_home_f  = home_away_factor(logs, 'rebounds', location)
+    # Home/away factor (per stat)
+    home_pts_avg  = get_home_away_split(conn, player_id, 'pts', is_home)
+    home_reb_avg  = get_home_away_split(conn, player_id, 'reb', is_home)
+    home_ast_avg  = get_home_away_split(conn, player_id, 'ast', is_home)
+
+    def home_away_f(split_avg: float, base: float) -> float:
+        if split_avg > 0 and base > 0:
+            return clamp(split_avg / base, 0.90, 1.10)
+        return 1.02 if is_home else 0.98
+
+    ha_pts_f = home_away_f(home_pts_avg, pts_season)
+    ha_reb_f = home_away_f(home_reb_avg, reb_season)
+    ha_ast_f = home_away_f(home_ast_avg, ast_season)
+
+    # Opponent position defense factors
+    pos_def_pts  = get_position_defense_factor(conn, opponent, position, 'pts')
+    pos_def_reb  = get_position_defense_factor(conn, opponent, position, 'reb')
+    pos_def_ast  = get_position_defense_factor(conn, opponent, position, 'ast')
+    pos_def_3pm  = get_position_defense_factor(conn, opponent, position, 'fg3m')
+
+    # Implied total factor (team scoring context)
+    # league avg ~225, each team scores ~112.5
+    implied_team_pts  = implied_total / 2.0
+    total_f           = clamp(implied_total / LEAGUE_AVG['game_total'], 0.92, 1.10)
+    scoring_context_f = clamp(implied_team_pts / 112.5, 0.90, 1.12)
+
+    # Spread / game script
+    # Large spread → starter rests → lower counting stats for favorite
+    abs_spread = abs(spread)
+    if abs_spread > 12:
+        game_script_f = 0.90
+    elif abs_spread > 8:
+        game_script_f = 0.95
+    else:
+        game_script_f = 1.00
+
+    # ────────────────────────────────────────────────────────────────────────
+    # POINTS
+    # ────────────────────────────────────────────────────────────────────────
+    base_pts   = weighted_base(logs, pts_season, 'pts')
+    l5_pts     = rolling_avg(logs, 'pts', 5)
+    l10_pts    = rolling_avg(logs, 'pts', 10)
+
+    proj_pts   = (base_pts
+                  * pos_def_pts
+                  * pace_f
+                  * rest_f
+                  * ha_pts_f
+                  * ts_f
+                  * usage_f
+                  * scoring_context_f
+                  * game_script_f)
+
+    # Confidence: base 60 + factors
+    conf_pts_raw = (60.0
+                    + (10 if len(logs) >= 10 else 5)           # sample size
+                    + (8  if abs(base_pts - l5_pts) < 2 else 2)  # consistency
+                    + (5  if pos_def_pts != 1.0 else 0)         # matchup data
+                    + (5  if pace_f > 1.02 else 0)              # pace boost
+                    + (4  if usage_f > 1.10 else 0)             # usage spike
+                    + (3  if rest_f >= 1.0 else -3)             # rest edge
+                    + (4  if abs(ha_pts_f - 1.0) > 0.02 else 0) # h/a split
+                    + (4  if ts_f > 1.02 else 0))               # efficiency edge
+    conf_pts = cap_confidence(conf_pts_raw)
+
+    factors_pts = {
+        'base':           round(base_pts, 2),
+        'l5':             round(l5_pts, 2),
+        'l10':            round(l10_pts, 2),
+        'season_avg':     round(pts_season, 2),
+        'pos_def_f':      round(pos_def_pts, 3),
+        'pace_f':         round(pace_f, 3),
+        'rest_f':         round(rest_f, 3),
+        'home_away_f':    round(ha_pts_f, 3),
+        'ts_f':           round(ts_f, 3),
+        'usage_f':        round(usage_f, 3),
+        'scoring_ctx_f':  round(scoring_context_f, 3),
+        'game_script_f':  round(game_script_f, 3),
+        'archetype':      archetype,
+        'implied_total':  round(implied_total, 1),
+        'spread':         round(spread, 1),
+        'usage_boost':    round(usage_boost, 3),
+    }
+
+    # ────────────────────────────────────────────────────────────────────────
+    # REBOUNDS
+    # ────────────────────────────────────────────────────────────────────────
+    base_reb = weighted_base(logs, reb_season, 'reb')
+    l5_reb   = rolling_avg(logs, 'reb', 5)
+    l10_reb  = rolling_avg(logs, 'reb', 10)
+
+    # Big man bonus
+    big_bonus = 1.08 if archetype == TRUE_BIG else 1.00
+
+    proj_reb = (base_reb
+                * pos_def_reb
+                * pace_f
+                * rest_f
+                * ha_reb_f
+                * big_bonus
+                * total_f
+                * game_script_f)
+
+    conf_reb_raw = (60.0
+                    + (10 if len(logs) >= 10 else 5)
+                    + (8  if abs(base_reb - l5_reb) < 1 else 2)
+                    + (5  if pos_def_reb != 1.0 else 0)
+                    + (5  if archetype == TRUE_BIG else 0)
+                    + (4  if pace_f > 1.02 else 0)
+                    + (3  if rest_f >= 1.0 else -3)
+                    + (3  if abs(ha_reb_f - 1.0) > 0.02 else 0))
+    conf_reb = cap_confidence(conf_reb_raw)
 
     factors_reb = {
-        'miss_f':      round(miss_factor,  3),
-        'opp_3pa_f':   round(opp_3pa_f,   3),
-        'opp_reb_f':   round(reb_opp_f,   3),
-        'pace_f':      round(reb_pace_f,   3),
-        'rest_f':      round(reb_rest_f,   3),
-        'home_away_f': round(reb_home_f,   3),
+        'base':        round(base_reb, 2),
+        'l5':          round(l5_reb, 2),
+        'l10':         round(l10_reb, 2),
+        'season_avg':  round(reb_season, 2),
+        'pos_def_f':   round(pos_def_reb, 3),
+        'pace_f':      round(pace_f, 3),
+        'rest_f':      round(rest_f, 3),
+        'home_away_f': round(ha_reb_f, 3),
+        'big_bonus':   round(big_bonus, 3),
+        'total_f':     round(total_f, 3),
+        'game_script_f': round(game_script_f, 3),
+        'archetype':   archetype,
     }
 
-    proj_reb = base_reb * miss_factor * opp_3pa_f * reb_opp_f * reb_pace_f * reb_rest_f * reb_home_f * min_floor_f
+    # ────────────────────────────────────────────────────────────────────────
+    # ASSISTS
+    # ────────────────────────────────────────────────────────────────────────
+    base_ast = weighted_base(logs, ast_season, 'ast')
+    l5_ast   = rolling_avg(logs, 'ast', 5)
+    l10_ast  = rolling_avg(logs, 'ast', 10)
 
-    # ── ASSISTS ───────────────────────────────────────────────────────────────
-    ast_opp_f  = max(0.85, min(1.15, opp_ast_allowed / LEAGUE_AVG['ast'])) if LEAGUE_AVG['ast'] > 0 else 1.0
-    ast_pace_f = pace_factor_offensive(team_pace, opp_pace)
-    ast_rest_f = rf
-    ast_home_f = home_away_factor(logs, 'assists', location)
+    # Playmaker bonus
+    pg_bonus = 1.08 if archetype == TRUE_PLAYMAKER else 1.00
 
-    recent_ast = rolling_avg(logs, 'assists', 10)
-    recent_tov = rolling_avg(logs, 'turnovers', 10)
-    ato_ratio  = (recent_ast / recent_tov) if recent_tov > 0 else 2.0
-    ato_f      = 1.05 if ato_ratio > 3.0 else 1.0
+    proj_ast = (base_ast
+                * pos_def_ast
+                * pace_f
+                * rest_f
+                * ha_ast_f
+                * pg_bonus
+                * total_f)
 
-    # Passing-lane pressure: high-steal opponents disrupt passes → fewer assists
-    # ast_steals_f already computed above (0.93 if opponent > 8.5 stl/game, else 1.00)
+    conf_ast_raw = (60.0
+                    + (10 if len(logs) >= 10 else 5)
+                    + (8  if abs(base_ast - l5_ast) < 1 else 2)
+                    + (5  if pos_def_ast != 1.0 else 0)
+                    + (5  if archetype == TRUE_PLAYMAKER else 0)
+                    + (4  if pace_f > 1.02 else 0)
+                    + (3  if rest_f >= 1.0 else -3)
+                    + (3  if abs(ha_ast_f - 1.0) > 0.02 else 0))
+    conf_ast = cap_confidence(conf_ast_raw)
+
     factors_ast = {
-        'opp_ast_f':      round(ast_opp_f,    3),
-        'pace_f':         round(ast_pace_f,   3),
-        'rest_f':         round(ast_rest_f,   3),
-        'home_away_f':    round(ast_home_f,   3),
-        'ato_f':          round(ato_f,        3),
-        'passing_lane_f': round(ast_steals_f, 3),
+        'base':        round(base_ast, 2),
+        'l5':          round(l5_ast, 2),
+        'l10':         round(l10_ast, 2),
+        'season_avg':  round(ast_season, 2),
+        'pos_def_f':   round(pos_def_ast, 3),
+        'pace_f':      round(pace_f, 3),
+        'rest_f':      round(rest_f, 3),
+        'home_away_f': round(ha_ast_f, 3),
+        'pg_bonus':    round(pg_bonus, 3),
+        'total_f':     round(total_f, 3),
+        'archetype':   archetype,
     }
 
-    proj_ast = base_ast * ast_opp_f * ast_pace_f * ast_rest_f * ast_home_f * ato_f * ast_steals_f * min_floor_f
+    # ────────────────────────────────────────────────────────────────────────
+    # THREES (fg3m) — special L5 weighting
+    # ────────────────────────────────────────────────────────────────────────
+    base_3pm = weighted_base_threes(logs, fg3m_season)
+    l5_3pm   = rolling_avg(logs, 'fg3m', 5)
+    l10_3pm  = rolling_avg(logs, 'fg3m', 10)
 
-    # ── THREES ────────────────────────────────────────────────────────────────
-    # Front-weighted baseline: L5×0.50 because recent form is most predictive for 3s
-    base_threes_wt = weighted_avg_threes(logs)
+    # 3-and-D archetype bonus
+    threes_bonus = 1.10 if archetype == THREE_AND_D else 1.00
 
-    # Hot/cold streak detection — 3PM streaks are more persistent than other stats
-    l5_3pm  = rolling_avg(logs, 'three_made', 5)
-    l20_3pm = rolling_avg(logs, 'three_made', min(20, len(logs)))
-    if l20_3pm > 0 and l5_3pm > l20_3pm * 1.25:
-        streak_3f = 1.08    # hot streak — shooting confidence is real and sticky
-    elif l20_3pm > 0 and l5_3pm < l20_3pm * 0.75:
-        streak_3f = 0.90    # cold streak — also sticky; don't fade the slump
-    else:
-        streak_3f = 1.00
+    proj_3pm = (base_3pm
+                * pos_def_3pm
+                * pace_f
+                * rest_f
+                * threes_bonus
+                * total_f)
 
-    # Trend: L5 3P% vs season 3P% (efficiency trend separate from volume trend)
-    l5_3pct  = rolling_avg(logs, 'three_pct', 5)
-    szn_3pct = rolling_avg(logs, 'three_pct', len(logs))
-    trend_3f = max(0.80, min(1.20, (l5_3pct / szn_3pct) if szn_3pct > 0 else 1.0))
+    # Three-point volume check: project at least fg3a * avg_pct if base is very low
+    avg_3pt_pct = safe_float(season_avg.get('fg3m_pg'), 0) / fg3a_season if fg3a_season > 0 else 0.35
+    vol_floor   = fg3a_season * avg_3pt_pct * 0.80
+    proj_3pm    = max(proj_3pm, vol_floor * 0.70)
 
-    opp_3pct_f      = max(0.80, min(1.20, opp_3pm_allowed / LEAGUE_AVG['threes'])) if LEAGUE_AVG['threes'] > 0 else 1.0
-    threes_pace_f   = pace_factor_offensive(team_pace, opp_pace)
-    threes_script_f = game_script_threes_factor(spread, is_underdog)
-    threes_home_f   = home_away_factor(logs, 'three_made', location)
+    conf_3pm_raw = (55.0
+                    + (10 if len(logs) >= 10 else 5)
+                    + (8  if abs(base_3pm - l5_3pm) < 0.5 else 2)
+                    + (6  if fg3a_season > 5 else 0)                # high volume shooter
+                    + (5  if archetype == THREE_AND_D else 0)
+                    + (5  if pos_def_3pm != 1.0 else 0)
+                    + (3  if pace_f > 1.02 else 0)
+                    + (3  if rest_f >= 1.0 else -3))
+    conf_3pm = cap_confidence(conf_3pm_raw)
 
-    factors_threes = {
-        'trend_3f':    round(trend_3f,       3),
-        'streak_3f':   round(streak_3f,      3),
-        'opp_3pct_f':  round(opp_3pct_f,     3),
-        'pace_f':      round(threes_pace_f,   3),
-        'script_f':    round(threes_script_f, 3),
-        'home_away_f': round(threes_home_f,   3),
+    factors_3pm = {
+        'base':        round(base_3pm, 2),
+        'l5':          round(l5_3pm, 2),
+        'l10':         round(l10_3pm, 2),
+        'season_avg':  round(fg3m_season, 2),
+        'fg3a_pg':     round(fg3a_season, 2),
+        'pos_def_f':   round(pos_def_3pm, 3),
+        'pace_f':      round(pace_f, 3),
+        'rest_f':      round(rest_f, 3),
+        'threes_bonus': round(threes_bonus, 3),
+        'total_f':     round(total_f, 3),
+        'archetype':   archetype,
+        'special_weighting': 'L5×0.50 + L10×0.25 + L20×0.15 + season×0.10',
     }
 
-    proj_threes = base_threes_wt * trend_3f * streak_3f * opp_3pct_f * threes_pace_f * threes_script_f * threes_home_f * min_floor_f
+    # ────────────────────────────────────────────────────────────────────────
+    # COMBO PROPS (archetype correlation)
+    # ────────────────────────────────────────────────────────────────────────
+    corr = COMBO_CORRELATIONS.get(archetype, COMBO_CORRELATIONS[ROLE_PLAYER])
 
-    # ── COMBO PROPS ───────────────────────────────────────────────────────────
-    is_big       = (base_reb > 7.0)
-    is_playmaker = (base_ast > 6.0)
-    is_scorer    = (base_pts > 20.0 or usage_f >= 1.20)
-    is_pure_pg   = (is_playmaker and not is_big)   # high ast, limited reb
+    # PRA = pts + reb + ast
+    proj_pra  = (proj_pts + proj_reb + proj_ast) * corr['pra']
+    conf_pra  = cap_confidence((conf_pts + conf_reb + conf_ast) / 3 + 2)
+    factors_pra = {
+        'proj_pts': round(proj_pts, 2), 'proj_reb': round(proj_reb, 2),
+        'proj_ast': round(proj_ast, 2), 'corr_f': corr['pra'],
+        'archetype': archetype,
+    }
 
-    # PRA — archetype-based correlation
-    archetype, pra_corr = classify_archetype(base_pts, base_reb, base_ast, usage_f)
+    # P+R
+    proj_pr   = (proj_pts + proj_reb) * corr['pr']
+    conf_pr   = cap_confidence((conf_pts + conf_reb) / 2 + 2)
+    factors_pr = {
+        'proj_pts': round(proj_pts, 2), 'proj_reb': round(proj_reb, 2),
+        'corr_f': corr['pr'], 'archetype': archetype,
+    }
 
-    # P+A — role-based correlation + double-weight pace bonus
-    # Primary scorers hunt their own shot → points up often means assists down
-    # True playmakers generate more of both with every touch
-    if usage_f >= 1.20 and not is_playmaker:
-        pts_ast_corr = 0.91   # primary scorer
-    elif is_playmaker:
-        pts_ast_corr = 1.00   # true playmaker
-    else:
-        pts_ast_corr = 0.95   # combo guard
-    pts_ast_pace_bonus   = (pts_pace_f - 1.0) * 2.0   # fast games benefit P+A doubly
-    pts_ast_corr_final   = max(0.85, min(1.10, pts_ast_corr * (1.0 + pts_ast_pace_bonus)))
+    # P+A
+    proj_pa   = (proj_pts + proj_ast) * corr['pa']
+    conf_pa   = cap_confidence((conf_pts + conf_ast) / 2 + 2)
+    factors_pa = {
+        'proj_pts': round(proj_pts, 2), 'proj_ast': round(proj_ast, 2),
+        'corr_f': corr['pa'], 'archetype': archetype,
+    }
 
-    # P+R — position-proxy correlation + minutes dependency check
-    if is_big:
-        pts_reb_corr = 1.02    # interior play drives both pts and reb
-    elif is_pure_pg:
-        pts_reb_corr = 0.95    # PGs rarely combine high pts and reb
-    else:
-        pts_reb_corr = 0.98    # wings — slight negative
-    l5_min_ck  = rolling_avg(logs, 'minutes', 5)
-    if season_min_avg > 0 and l5_min_ck < season_min_avg - 3:
-        pts_reb_corr = max(0.85, pts_reb_corr * 0.94)   # reduced minutes hurts both stats
+    # A+R
+    proj_ar   = (proj_ast + proj_reb) * corr['ar']
+    conf_ar   = cap_confidence((conf_ast + conf_reb) / 2 + 2)
+    factors_ar = {
+        'proj_ast': round(proj_ast, 2), 'proj_reb': round(proj_reb, 2),
+        'corr_f': corr['ar'], 'archetype': archetype,
+    }
 
-    # A+R — passing big vs pure PG vs everyone else
-    if is_big and base_ast > 3.0:
-        ast_reb_corr = 1.05    # passing big: playmaking and rebounding go hand-in-hand
-    elif is_pure_pg and base_reb < 4.0:
-        ast_reb_corr = 0.95    # pure PG: assists high, rebounds low and independent
-    else:
-        ast_reb_corr = 0.97
-
-    proj_pra     = round((proj_pts + proj_reb + proj_ast) * pra_corr,       3)
-    proj_pts_ast = round((proj_pts + proj_ast) * pts_ast_corr_final,        3)
-    proj_pts_reb = round((proj_pts + proj_reb) * pts_reb_corr,              3)
-    proj_ast_reb = round((proj_ast + proj_reb) * ast_reb_corr,              3)
-
-    proj_stl = base_stl * rf * min_floor_f
-    proj_blk = base_blk * rf * min_floor_f
-    proj_tov = base_tov * rf * min_floor_f
-
-    # ── Confidence ────────────────────────────────────────────────────────────
-    confidence = 60
-    if len(logs) >= 20: confidence += 5
-    if len(logs) >= 40: confidence += 3
-    if rest == 0:       confidence -= 8
-    if rest == 1:       confidence -= 3
-    if not has_opp_data: confidence -= 5   # no defense data for opponent
-    if low_minutes:      confidence -= 8   # < 20 min/game — unreliable prop target
-
-    l5_pts  = rolling_avg(logs, 'points', 5)
-    l20_pts = rolling_avg(logs, 'points', 20)
-    if l20_pts > 0 and l5_pts > l20_pts * 1.15:
-        confidence += 6
-    elif l20_pts > 0 and l5_pts < l20_pts * 0.85:
-        confidence -= 10
-    confidence = max(50, min(95, confidence))
-
-    # ── Assemble ──────────────────────────────────────────────────────────────
-    all_factors = {
-        'pts':    factors_pts,
-        'reb':    factors_reb,
-        'ast':    factors_ast,
-        'threes': factors_threes,
-        'combo_corr': {
-            'archetype':      archetype,
-            'pra_corr':       pra_corr,
-            'pts_ast_corr':   pts_ast_corr_final,
-            'pts_reb_corr':   pts_reb_corr,
-            'ast_reb_corr':   ast_reb_corr,
+    return PlayerProjection(
+        player_id   = player_id,
+        player_name = player_name,
+        team        = team,
+        opponent    = opponent,
+        is_home     = is_home,
+        position    = position,
+        archetype   = archetype,
+        game_date   = game_date,
+        props       = {
+            'points':    {'proj': proj_pts,  'conf': conf_pts,  'factors': factors_pts},
+            'rebounds':  {'proj': proj_reb,  'conf': conf_reb,  'factors': factors_reb},
+            'assists':   {'proj': proj_ast,  'conf': conf_ast,  'factors': factors_ast},
+            'threes':    {'proj': proj_3pm,  'conf': conf_3pm,  'factors': factors_3pm},
+            'pra':       {'proj': proj_pra,  'conf': conf_pra,  'factors': factors_pra},
+            'pr':        {'proj': proj_pr,   'conf': conf_pr,   'factors': factors_pr},
+            'pa':        {'proj': proj_pa,   'conf': conf_pa,   'factors': factors_pa},
+            'ar':        {'proj': proj_ar,   'conf': conf_ar,   'factors': factors_ar},
         },
-        'context': {
-            'rest_days':      rest,
-            'team_pace':      round(team_pace,      2),
-            'opp_pace':       round(opp_pace,       2),
-            'ts_pct':         round(ts_pct,         4),
-            'usage_approx':   round(usage_f,        3),
-            'has_opp_data':   has_opp_data,
-            'is_big':         is_big,
-            'is_playmaker':   is_playmaker,
-            'is_scorer':      is_scorer,
-            'low_minutes':    low_minutes,
-            'season_min_avg': round(season_min_avg, 2),
-            'base_pts':       round(base_pts,       2),
-            'base_reb':       round(base_reb,       2),
-            'base_ast':       round(base_ast,       2),
-            'base_threes':    round(base_threes,    2),
-            'games_used':     len(logs),
-        }
-    }
-
-    return {
-        'player_id':      player_id,
-        'player_name':    player_name,
-        'team':           team,
-        'sport':          'NBA',
-        'game_date':      game_date,
-        'opponent':       opponent,
-        'home_away':      location,
-        'proj_points':    round(max(0, proj_pts), 3),
-        'proj_rebounds':  round(max(0, proj_reb), 3),
-        'proj_assists':   round(max(0, proj_ast), 3),
-        'proj_steals':    round(max(0, proj_stl), 3),
-        'proj_blocks':    round(max(0, proj_blk), 3),
-        'proj_turnovers': round(max(0, proj_tov), 3),
-        'proj_threes':    round(max(0, proj_threes), 3),
-        'proj_minutes':   round(max(0, base_min), 2),
-        'proj_pra':       round(max(0, proj_pra), 3),
-        'proj_pts_ast':   round(max(0, proj_pts_ast), 3),
-        'proj_pts_reb':   round(max(0, proj_pts_reb), 3),
-        'proj_ast_reb':   round(max(0, proj_ast_reb), 3),
-        'confidence_score': confidence,
-        'model_version':  MODEL_VERSION,
-        'factors_json':   json.dumps(all_factors),
-    }
+    )
 
 
-def upsert_player_projection(conn, proj: dict):
-    with conn.cursor() as cur:
-        cur.execute(
-            """INSERT INTO chalk_projections (
-                 player_id, player_name, team, sport, game_date, opponent, home_away,
-                 proj_points, proj_rebounds, proj_assists, proj_steals, proj_blocks,
-                 proj_turnovers, proj_threes, proj_minutes,
-                 proj_pra, proj_pts_ast, proj_pts_reb, proj_ast_reb,
-                 confidence_score, model_version, factors_json
-               ) VALUES (
-                 %(player_id)s, %(player_name)s, %(team)s, %(sport)s,
-                 %(game_date)s, %(opponent)s, %(home_away)s,
-                 %(proj_points)s, %(proj_rebounds)s, %(proj_assists)s,
-                 %(proj_steals)s, %(proj_blocks)s, %(proj_turnovers)s,
-                 %(proj_threes)s, %(proj_minutes)s,
-                 %(proj_pra)s, %(proj_pts_ast)s, %(proj_pts_reb)s, %(proj_ast_reb)s,
-                 %(confidence_score)s, %(model_version)s, %(factors_json)s
-               )
-               ON CONFLICT (player_id, game_date) DO UPDATE SET
-                 opponent       = EXCLUDED.opponent,
-                 home_away      = EXCLUDED.home_away,
-                 proj_points    = EXCLUDED.proj_points,
-                 proj_rebounds  = EXCLUDED.proj_rebounds,
-                 proj_assists   = EXCLUDED.proj_assists,
-                 proj_steals    = EXCLUDED.proj_steals,
-                 proj_blocks    = EXCLUDED.proj_blocks,
-                 proj_turnovers = EXCLUDED.proj_turnovers,
-                 proj_threes    = EXCLUDED.proj_threes,
-                 proj_minutes   = EXCLUDED.proj_minutes,
-                 proj_pra       = EXCLUDED.proj_pra,
-                 proj_pts_ast   = EXCLUDED.proj_pts_ast,
-                 proj_pts_reb   = EXCLUDED.proj_pts_reb,
-                 proj_ast_reb   = EXCLUDED.proj_ast_reb,
-                 confidence_score = EXCLUDED.confidence_score,
-                 factors_json   = EXCLUDED.factors_json,
-                 model_version  = EXCLUDED.model_version""",
-            proj
-        )
-    conn.commit()
+# ---------------------------------------------------------------------------
+# Team props: Total, Spread, Moneyline
+# ---------------------------------------------------------------------------
 
-
-# ── Team projection ────────────────────────────────────────────────────────────
-
-def project_team(
+def project_team_props(
     conn,
-    team_id:       int,
-    team_abbr:     str,
-    opponent_abbr: str,
-    location:      str,
-    game_date:     date,
-    posted_spread: Optional[float] = None,
-    posted_total:  Optional[float] = None,
-) -> Optional[dict]:
+    home_team: str,
+    away_team: str,
+    game_date: str,
+    implied_total: float,
+    spread: float,
+    home_ml: float | None,
+    away_ml: float | None,
+) -> dict:
+    """Computes Total, Spread, Moneyline for the game."""
 
-    logs     = get_team_logs(conn, team_abbr, limit=20)
-    opp_logs = get_team_logs(conn, opponent_abbr, limit=20)
+    home_pace = get_team_pace(conn, home_team)
+    away_pace = get_team_pace(conn, away_team)
+    avg_pace  = (home_pace + away_pace) / 2
 
-    if len(logs) < 3:
-        return None
+    # ── TOTAL ────────────────────────────────────────────────────────────────
+    pace_f       = clamp(avg_pace / LEAGUE_AVG['pace'], 0.90, 1.10)
+    total_base   = implied_total if implied_total > 0 else LEAGUE_AVG['game_total']
 
-    team_full = ABBR_TO_FULL_NAME.get(team_abbr, team_abbr)
+    # Position defense aggregates per team
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT AVG(allowed_vs_league_avg)
+                   FROM position_defense_ratings
+                   WHERE team_abbr = %s AND sport = 'NBA'""",
+                (home_team,)
+            )
+            row = cur.fetchone()
+            home_def_f = clamp(float(row[0]) if row and row[0] else 1.0, 0.85, 1.15)
 
-    base_pts_scored = weighted_avg(logs, 'points_scored')
-    opp_base_pts    = weighted_avg(opp_logs, 'points_scored') if opp_logs else LEAGUE_AVG['pts'] / 30 * 5
+            cur.execute(
+                """SELECT AVG(allowed_vs_league_avg)
+                   FROM position_defense_ratings
+                   WHERE team_abbr = %s AND sport = 'NBA'""",
+                (away_team,)
+            )
+            row = cur.fetchone()
+            away_def_f = clamp(float(row[0]) if row and row[0] else 1.0, 0.85, 1.15)
+    except Exception:
+        home_def_f = 1.0
+        away_def_f = 1.0
 
-    opp_def     = get_defense_rating(conn, opponent_abbr)
-    opp_pts_all = safe(opp_def.get('pts_allowed'), LEAGUE_AVG['pts'])
-    def_quality = max(0.90, min(1.10, (LEAGUE_AVG['pts'] / opp_pts_all) if opp_pts_all > 0 else 1.0))
+    # Both defenses affect total
+    combined_def_f = (home_def_f + away_def_f) / 2
+    proj_total = total_base * pace_f * combined_def_f
 
-    team_pace = get_team_pace(conn, team_abbr)
-    opp_pace  = get_team_pace(conn, opponent_abbr)
-    pace_f    = pace_factor_offensive(team_pace, opp_pace)
+    # Normal CDF cover probability (std_dev 12.5 for totals)
+    std_dev_total  = 12.5
+    over_prob      = 1.0 - normal_cdf(0.5 / std_dev_total)
+    # Shift based on proj vs implied
+    delta_total    = proj_total - implied_total
+    over_prob      = clamp(0.5 + delta_total / (2 * std_dev_total), 0.10, 0.90)
 
-    home_court_pts   = 2.0 if location == 'home' else 0.0
-    proj_pts_scored  = base_pts_scored * def_quality * pace_f + home_court_pts
-    proj_pts_allowed = opp_base_pts * def_quality * pace_f - home_court_pts
+    # ── SPREAD ──────────────────────────────────────────────────────────────
+    # Home baseline 59%
+    home_win_prob_base = 0.59
 
-    proj_total  = proj_pts_scored + proj_pts_allowed
-    proj_spread = proj_pts_scored - proj_pts_allowed
+    # HCA adjustments
+    home_rec = get_team_record(conn, home_team)
+    away_rec = get_team_record(conn, away_team)
+    home_win_pct = home_rec[0] / max(sum(home_rec), 1)
+    away_win_pct = away_rec[0] / max(sum(away_rec), 1)
 
-    team_win_pct = sum(1 for r in logs if r.get('result') == 'W') / len(logs) if logs else 0.5
-    opp_win_pct  = sum(1 for r in opp_logs if r.get('result') == 'W') / len(opp_logs) if opp_logs else 0.5
+    # Pace matchup: faster home team benefits more at home
+    pace_spread_f = clamp((home_pace - away_pace) / 20, -0.05, 0.05)
+    home_win_prob = clamp(home_win_prob_base + (home_win_pct - 0.50) * 0.20
+                          + (0.50 - away_win_pct) * 0.15
+                          + pace_spread_f, 0.30, 0.75)
 
-    team_s = max(0.01, team_win_pct)
-    opp_s  = max(0.01, opp_win_pct)
-    denom  = team_s + opp_s - 2 * team_s * opp_s
-    win_prob = (team_s - team_s * opp_s) / denom if denom != 0 else 0.5
+    # Spread cover probability (std_dev 13.5 for spreads)
+    std_dev_spread = 13.5
+    expected_margin = (home_win_prob - 0.5) * 2 * std_dev_spread
+    cover_prob     = 1.0 - normal_cdf((spread + expected_margin) / std_dev_spread) \
+                     if spread > 0 else normal_cdf((-spread - expected_margin) / std_dev_spread)
+    cover_prob     = clamp(cover_prob, 0.10, 0.90)
 
-    ml = -(win_prob / (1 - win_prob)) * 100 if win_prob > 0.5 else ((1 - win_prob) / win_prob) * 100
+    # ── MONEYLINE ────────────────────────────────────────────────────────────
+    # Log5 from team win percentages
+    log5_home = log5(home_win_pct + 0.05, away_win_pct)  # +0.05 HCA
+    log5_home = clamp(log5_home, 0.10, 0.90)
 
-    def normal_cdf(x):
-        return 0.5 * (1 + math.erf(x / math.sqrt(2)))
+    # Adjust for pace and defense
+    ml_home_final = clamp(log5_home + pace_spread_f * 0.5, 0.10, 0.90)
+    ml_away_final = 1.0 - ml_home_final
 
-    spread_cover_prob = round(normal_cdf((proj_spread - posted_spread) / SPREAD_STD_DEV), 4) if posted_spread is not None else None
-    over_prob         = round(normal_cdf((proj_total - posted_total) / TOTAL_STD_DEV), 4) if posted_total is not None else None
-    under_prob        = round(1 - over_prob, 4) if over_prob is not None else None
+    # Implied probability from market ML (for confidence)
+    def ml_to_prob(ml: float | None) -> float:
+        if ml is None:
+            return 0.5
+        if ml > 0:
+            return 100 / (ml + 100)
+        return abs(ml) / (abs(ml) + 100)
 
-    confidence = 65 if len(logs) >= 15 else 60
-    confidence = max(50, min(90, confidence))
+    market_home_prob = ml_to_prob(home_ml)
+    market_away_prob = ml_to_prob(away_ml)
+
+    # Edge = model prob minus market implied prob
+    home_ml_edge = ml_home_final - market_home_prob
+    away_ml_edge = ml_away_final - market_away_prob
+
+    # Team prop confidence
+    records_available = sum(home_rec) >= 20 and sum(away_rec) >= 20
+    conf_team_raw = (60
+                     + (8  if records_available else 0)
+                     + (6  if implied_total > 0 else 0)
+                     + (5  if home_def_f != 1.0 and away_def_f != 1.0 else 0)
+                     + (4  if abs(pace_f - 1.0) > 0.02 else 0))
+    conf_team = cap_confidence(conf_team_raw)
 
     return {
-        'team_id':                  team_id,
-        'team_name':                team_full,
-        'sport':                    'NBA',
-        'game_date':                game_date,
-        'opponent':                 opponent_abbr,
-        'home_away':                location,
-        'prop_type':                'game',
-        'proj_points':              round(proj_pts_scored, 3),
-        'proj_points_allowed':      round(proj_pts_allowed, 3),
-        'proj_total':               round(proj_total, 3),
-        'moneyline_projection':     round(ml, 3),
-        'win_probability':          round(win_prob, 4),
-        'spread_projection':        round(proj_spread, 3),
-        'spread_cover_probability': spread_cover_prob,
-        'over_probability':         over_prob,
-        'under_probability':        under_prob,
-        'confidence_score':         confidence,
-        'model_version':            MODEL_VERSION,
-        'factors_json': json.dumps({
-            'def_quality':  round(def_quality, 3),
-            'pace_f':       round(pace_f,      3),
-            'team_win_pct': round(team_win_pct, 4),
-            'opp_win_pct':  round(opp_win_pct,  4),
-            'posted_spread': posted_spread,
-            'posted_total':  posted_total,
-            'games_used':    len(logs),
-        }),
+        'total': {
+            'proj':       round(proj_total, 1),
+            'over_prob':  round(over_prob, 3),
+            'under_prob': round(1 - over_prob, 3),
+            'confidence': round(conf_team, 1),
+            'factors': {
+                'implied_total': round(implied_total, 1),
+                'pace_f':        round(pace_f, 3),
+                'home_def_f':    round(home_def_f, 3),
+                'away_def_f':    round(away_def_f, 3),
+                'std_dev':       std_dev_total,
+            },
+        },
+        'spread': {
+            'spread':      round(spread, 1),
+            'cover_prob':  round(cover_prob, 3),
+            'confidence':  round(conf_team, 1),
+            'factors': {
+                'home_win_prob':  round(home_win_prob, 3),
+                'pace_spread_f': round(pace_spread_f, 3),
+                'std_dev':       std_dev_spread,
+            },
+        },
+        'moneyline': {
+            'home_prob':    round(ml_home_final, 3),
+            'away_prob':    round(ml_away_final, 3),
+            'home_ml_edge': round(home_ml_edge, 3),
+            'away_ml_edge': round(away_ml_edge, 3),
+            'confidence':   round(conf_team, 1),
+            'factors': {
+                'log5_home':        round(log5_home, 3),
+                'home_win_pct':     round(home_win_pct, 3),
+                'away_win_pct':     round(away_win_pct, 3),
+                'market_home_prob': round(market_home_prob, 3),
+                'market_away_prob': round(market_away_prob, 3),
+            },
+        },
     }
 
 
-def upsert_team_projection(conn, proj: dict):
+# ---------------------------------------------------------------------------
+# Fetch active NBA players for tonight's games
+# ---------------------------------------------------------------------------
+
+def get_players_for_team(conn, team_abbr: str, game_date: str) -> list[dict]:
+    """
+    Returns players confirmed playing from nightly_roster.
+    Falls back to players with recent game logs if roster not populated.
+    """
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """SELECT player_id, player_name, position
+                   FROM nightly_roster
+                   WHERE team = %s AND sport = 'NBA' AND game_date = %s
+                     AND is_confirmed_playing = true""",
+                (team_abbr, game_date)
+            )
+            rows = cur.fetchall()
+            if rows:
+                return [dict(r) for r in rows]
+
+            # Fallback: players with game logs in last 14 days
+            cutoff = (date.fromisoformat(game_date) - timedelta(days=14)).isoformat()
+            cur.execute(
+                """SELECT DISTINCT ON (player_id) player_id, player_name, position, team
+                   FROM player_game_logs
+                   WHERE team ILIKE %s AND sport = 'NBA' AND game_date >= %s
+                   ORDER BY player_id, game_date DESC""",
+                (f'%{team_abbr}%', cutoff)
+            )
+            return [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        log.warning("get_players_for_team %s: %s", team_abbr, e)
+        return []
+
+
+# ---------------------------------------------------------------------------
+# Write projections to DB
+# ---------------------------------------------------------------------------
+
+def upsert_player_projections(conn, proj: PlayerProjection) -> int:
+    """Writes all props for a player. Returns count written."""
+    written = 0
     with conn.cursor() as cur:
-        cur.execute(
-            """INSERT INTO team_projections (
-                 team_id, team_name, sport, game_date, opponent, home_away,
-                 prop_type,
-                 proj_points, proj_points_allowed, proj_total,
-                 moneyline_projection, win_probability,
-                 spread_projection, spread_cover_probability,
-                 over_probability, under_probability,
-                 confidence_score, model_version, factors_json
-               ) VALUES (
-                 %(team_id)s, %(team_name)s, %(sport)s, %(game_date)s,
-                 %(opponent)s, %(home_away)s,
-                 %(prop_type)s,
-                 %(proj_points)s, %(proj_points_allowed)s, %(proj_total)s,
-                 %(moneyline_projection)s, %(win_probability)s,
-                 %(spread_projection)s, %(spread_cover_probability)s,
-                 %(over_probability)s, %(under_probability)s,
-                 %(confidence_score)s, %(model_version)s, %(factors_json)s
-               )
-               ON CONFLICT (team_name, game_date, prop_type) DO UPDATE SET
-                 prop_type                = EXCLUDED.prop_type,
-                 proj_points              = EXCLUDED.proj_points,
-                 proj_points_allowed      = EXCLUDED.proj_points_allowed,
-                 proj_total               = EXCLUDED.proj_total,
-                 moneyline_projection     = EXCLUDED.moneyline_projection,
-                 win_probability          = EXCLUDED.win_probability,
-                 spread_projection        = EXCLUDED.spread_projection,
-                 spread_cover_probability = EXCLUDED.spread_cover_probability,
-                 over_probability         = EXCLUDED.over_probability,
-                 under_probability        = EXCLUDED.under_probability,
-                 confidence_score         = EXCLUDED.confidence_score,
-                 factors_json             = EXCLUDED.factors_json,
-                 model_version            = EXCLUDED.model_version""",
-            proj
-        )
+        for prop_type, data in proj.props.items():
+            raw_proj  = data['proj']
+            raw_conf  = data['conf']
+            factors   = data['factors']
+
+            if raw_proj <= 0:
+                continue
+
+            # Fetch current line from DB (set by odds ingestion)
+            try:
+                cur.execute(
+                    """SELECT line FROM chalk_projections
+                       WHERE player_id = %s AND prop_type = %s AND game_date = %s
+                         AND sport = 'NBA'
+                       LIMIT 1""",
+                    (proj.player_id, prop_type, proj.game_date)
+                )
+                row = cur.fetchone()
+                line = float(row[0]) if row and row[0] is not None else raw_proj - 0.5
+            except Exception:
+                line = raw_proj - 0.5
+
+            edge = abs(raw_proj - line)
+            threshold = MIN_EDGE.get(prop_type, 0.5)
+
+            cur.execute(
+                """INSERT INTO chalk_projections
+                     (player_id, player_name, team, opponent, is_home, position,
+                      sport, game_date, prop_type,
+                      projection, line, edge, confidence, factors_json,
+                      created_at, updated_at)
+                   VALUES
+                     (%s, %s, %s, %s, %s, %s,
+                      'NBA', %s, %s,
+                      %s, %s, %s, %s, %s,
+                      NOW(), NOW())
+                   ON CONFLICT (player_id, prop_type, game_date, sport)
+                   DO UPDATE SET
+                     projection   = EXCLUDED.projection,
+                     line         = EXCLUDED.line,
+                     edge         = EXCLUDED.edge,
+                     confidence   = EXCLUDED.confidence,
+                     factors_json = EXCLUDED.factors_json,
+                     updated_at   = NOW()""",
+                (
+                    proj.player_id, proj.player_name, proj.team, proj.opponent,
+                    proj.is_home, proj.position,
+                    proj.game_date, prop_type,
+                    round(raw_proj, 2), round(line, 2), round(edge, 2),
+                    round(raw_conf, 1), json.dumps({**factors, 'meets_threshold': edge >= threshold}),
+                )
+            )
+            written += 1
+    conn.commit()
+    return written
+
+
+def upsert_team_props(conn, home_team: str, away_team: str, game_date: str, team_props: dict) -> None:
+    """Writes total, spread, moneyline to team_projections table."""
+    with conn.cursor() as cur:
+        for prop_type, data in team_props.items():
+            for team, opponent, is_home in [(home_team, away_team, True), (away_team, home_team, False)]:
+                proj_val  = data.get('proj', data.get('home_prob' if is_home else 'away_prob', 0))
+                conf      = data.get('confidence', 60)
+                factors   = data.get('factors', {})
+
+                cur.execute(
+                    """INSERT INTO team_projections
+                         (team_name, opponent, sport, game_date, prop_type,
+                          proj_total, over_probability, under_probability,
+                          confidence, factors_json, created_at, updated_at)
+                       VALUES
+                         (%s, %s, 'NBA', %s, %s,
+                          %s, %s, %s,
+                          %s, %s,
+                          NOW(), NOW())
+                       ON CONFLICT (team_name, game_date, sport, prop_type)
+                       DO UPDATE SET
+                         proj_total        = EXCLUDED.proj_total,
+                         over_probability  = EXCLUDED.over_probability,
+                         under_probability = EXCLUDED.under_probability,
+                         confidence        = EXCLUDED.confidence,
+                         factors_json      = EXCLUDED.factors_json,
+                         updated_at        = NOW()""",
+                    (
+                        team, opponent, game_date, prop_type,
+                        round(float(proj_val), 2),
+                        data.get('over_prob', 0),
+                        data.get('under_prob', 0),
+                        round(conf, 1),
+                        json.dumps(factors),
+                    )
+                )
     conn.commit()
 
 
-# ── BDL team ID → abbreviation map (for team projection lookup) ────────────────
-BDL_TEAM_ID_TO_ABBR = {
-    1: 'ATL', 2: 'BOS', 3: 'BKN', 4: 'CHA', 5: 'CHI',
-    6: 'CLE', 7: 'DAL', 8: 'DEN', 9: 'DET', 10: 'GSW',
-    11: 'HOU', 12: 'IND', 13: 'LAC', 14: 'LAL', 15: 'MEM',
-    16: 'MIA', 17: 'MIL', 18: 'MIN', 19: 'NOP', 20: 'NYK',
-    21: 'OKC', 22: 'ORL', 23: 'PHI', 24: 'PHX', 25: 'POR',
-    26: 'SAC', 27: 'SAS', 28: 'TOR', 29: 'UTA', 30: 'WAS',
-}
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
-ABBR_TO_TEAM_ID = {v: k for k, v in BDL_TEAM_ID_TO_ABBR.items()}
-
-
-# ── Main ───────────────────────────────────────────────────────────────────────
-
-def main():
-    parser = argparse.ArgumentParser(description='Chalk NBA Projection Model')
-    parser.add_argument('--date', default=None, help='Game date YYYY-MM-DD (default: today)')
+def main() -> None:
+    parser = argparse.ArgumentParser(description='Chalk NBA Projection Model v2.0')
+    parser.add_argument('--date', default=date.today().isoformat(),
+                        help='Game date YYYY-MM-DD (default: today)')
     args = parser.parse_args()
+    game_date = args.date
 
-    game_date = date.fromisoformat(args.date) if args.date else date.today()
+    log.info("=== Chalk NBA Projection Model v2.0 — %s ===", game_date)
 
-    log.info('═══════════════════════════════════════')
-    log.info(f'Chalk NBA Projection Model — {game_date}')
-    log.info(f'Model version: {MODEL_VERSION}')
-    log.info('═══════════════════════════════════════')
+    conn = psycopg2.connect(DATABASE_URL)
 
-    conn = get_db()
-
-    # ── Step 0: Load rolling league averages from DB ───────────────────────────
+    # ── Step 0: Load league averages ────────────────────────────────────────
     load_league_averages(conn)
 
-    # ── Step 1: Fetch tonight's schedule ──────────────────────────────────────
-    log.info('\n▶ TONIGHT\'S SCHEDULE')
-    tonight_games = fetch_tonight_schedule(game_date)
-
-    if not tonight_games:
-        log.warning('  No games tonight — nothing to project')
+    # ── Step 1: Tonight's schedule ──────────────────────────────────────────
+    games = get_todays_games(game_date)
+    if not games:
+        log.info("No NBA games found for %s", game_date)
         conn.close()
         return
+    log.info("Found %d games", len(games))
 
-    playing_teams = set(tonight_games.keys())
-    for abbr, info in sorted(tonight_games.items()):
-        log.info(f'  {abbr} ({info["home_away"]}) vs {info["opponent"]}')
+    # ── Step 1b: Live odds ───────────────────────────────────────────────────
+    odds_map = fetch_nba_odds(game_date)
+    log.info("Odds loaded for %d matchups", len(odds_map))
 
-    # ── Step 1b: Fetch live NBA odds (total + spread per game) ─────────────────
-    log.info('\n▶ LIVE ODDS')
-    nba_odds = fetch_nba_odds()
+    # ── Step 1c: OUT players + usage boosts ─────────────────────────────────
+    out_map:   dict[str, list]  = {}
+    boost_map: dict[str, float] = {}
+    for game in games:
+        for team in (game['home_team'], game['away_team']):
+            out_players = get_out_players(conn, team, game_date)
+            out_map[team]   = [p['player_id'] for p in out_players]
+            boost_map[team] = compute_usage_boost(conn, team, out_players, game_date)
+            if out_players:
+                log.info("  %s: %d OUT players, usage_boost=%.3f",
+                         team, len(out_players), boost_map[team])
 
-    # Build per-team odds lookup: team_abbr → { total, spread (from team's POV) }
-    team_odds: dict = {}
-    for (home_abbr, away_abbr), entry in nba_odds.items():
-        total       = entry.get('total')
-        home_spread = entry.get('home_spread')
-        away_spread = (-home_spread) if home_spread is not None else None
-        team_odds[home_abbr] = {'total': total, 'spread': home_spread}
-        team_odds[away_abbr] = {'total': total, 'spread': away_spread}
+    # ── Steps 2–4: Project each game ────────────────────────────────────────
+    total_players = 0
+    total_props   = 0
 
-    # ── Step 1c: OUT players + usage redistribution ────────────────────────────
-    log.info('\n▶ INJURY / USAGE REDISTRIBUTION')
-    out_by_team: dict[str, set] = {}
-    for abbr in playing_teams:
-        out_names = set(get_out_players(conn, abbr, game_date))
-        if out_names:
-            log.info(f'  {abbr}: {len(out_names)} player(s) OUT — redistributing usage')
-            out_by_team[abbr] = out_names
-        else:
-            out_by_team[abbr] = set()
+    for game in games:
+        home = game['home_team']
+        away = game['away_team']
+        key  = f"{home}_{away}"
+        alt_key = f"{away}_{home}"
 
-    # Pre-compute usage boost per active player on teams with OUT players
-    # Each OUT player's ~22% usage share is distributed (×0.85 efficiency) to active teammates
-    LEAGUE_USAGE_RATE = 0.22   # rough per-player usage fraction
-    usage_boost_map: dict[str, float] = {}   # player_name.lower() → boost amount
+        odds = odds_map.get(key) or odds_map.get(alt_key) or {}
+        implied_total = odds.get('implied_total', LEAGUE_AVG['game_total'])
+        spread        = odds.get('spread', 0.0)
+        home_ml       = odds.get('home_ml')
+        away_ml       = odds.get('away_ml')
 
-    # ── Step 2: Player projections (only players on teams playing tonight) ─────
-    log.info('\n▶ PLAYER PROJECTIONS')
-    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute(
-            """SELECT DISTINCT ON (player_id)
-                 player_id, player_name, team
-               FROM player_game_logs
-               WHERE sport = 'NBA' AND season = %s
-                 AND game_date >= %s
-               ORDER BY player_id, game_date DESC""",
-            (CURRENT_SEASON, game_date - timedelta(days=3))
+        log.info("\n  %s @ %s | total=%.1f spread=%.1f",
+                 away, home, implied_total, spread)
+
+        # Team props
+        team_props = project_team_props(
+            conn, home, away, game_date,
+            implied_total, spread, home_ml, away_ml
         )
-        all_recent = cur.fetchall()
+        upsert_team_props(conn, home, away, game_date, team_props)
+        log.info("  Team props: total=%.1f over_prob=%.2f home_ML=%.3f",
+                 team_props['total']['proj'],
+                 team_props['total']['over_prob'],
+                 team_props['moneyline']['home_prob'])
 
-    players_tonight = [p for p in all_recent if p['team'] in playing_teams]
-    log.info(f'  {len(players_tonight)} players on tonight\'s teams (from {len(all_recent)} recently active)')
+        # Player props
+        for team, opponent, is_home in [(home, away, True), (away, home, False)]:
+            players = get_players_for_team(conn, team, game_date)
+            out_ids = set(out_map.get(team, []))
+            boost   = boost_map.get(team, 0.0)
 
-    # Compute usage boosts: for each team with OUT players, distribute usage to active teammates
-    for abbr, out_names in out_by_team.items():
-        if not out_names:
-            continue
-        active = [p for p in players_tonight
-                  if p['team'] == abbr and p['player_name'].lower() not in out_names]
-        if not active:
-            continue
-        # Each OUT player carried ~22% usage; 85% of that transfers to active players
-        total_boost = len(out_names) * LEAGUE_USAGE_RATE * 0.85
-        per_player_boost = total_boost / len(active)
-        for p in active:
-            usage_boost_map[p['player_name'].lower()] = round(per_player_boost, 4)
+            for p in players:
+                pid = p['player_id']
+                if pid in out_ids:
+                    continue
 
-    projected = 0
-    skipped   = 0
-    for player in players_tonight:
-        pid      = player['player_id']
-        name     = player['player_name']
-        team     = player['team']
-        game_info = tonight_games[team]
-        opponent  = game_info['opponent']
-        location  = game_info['home_away']
+                proj = project_player(
+                    conn,
+                    player_id     = pid,
+                    player_name   = p.get('player_name', ''),
+                    team          = team,
+                    opponent      = opponent,
+                    is_home       = is_home,
+                    position      = p.get('position', 'G'),
+                    game_date     = game_date,
+                    implied_total = implied_total,
+                    spread        = spread,
+                    usage_boost   = boost,
+                )
+                if proj is None:
+                    continue
 
-        # Skip confirmed OUT players (no projection needed)
-        if name.lower() in out_by_team.get(team, set()):
-            log.info(f'  SKIP {name} — confirmed OUT')
-            skipped += 1
-            continue
+                written = upsert_player_projections(conn, proj)
+                total_props   += written
+                total_players += 1
 
-        # Get live odds for this game
-        t_odds        = team_odds.get(team, {})
-        implied_total = t_odds.get('total')
-        spread        = t_odds.get('spread')
-        u_boost       = usage_boost_map.get(name.lower(), 0.0)
-
-        proj = project_player(
-            conn=conn,
-            player_id=pid,
-            player_name=name,
-            team=team,
-            opponent=opponent,
-            location=location,
-            game_date=game_date,
-            spread=spread,
-            implied_total=implied_total,
-            usage_boost=u_boost,
-        )
-
-        if proj:
-            try:
-                upsert_player_projection(conn, proj)
-                projected += 1
-            except Exception as e:
-                log.warning(f'  Could not store projection for {name}: {e}')
-                conn.rollback()
-        else:
-            skipped += 1
-
-    log.info(f'  Projected: {projected} players, skipped: {skipped}')
-
-    # ── Step 3: Team projections ───────────────────────────────────────────────
-    log.info('\n▶ TEAM PROJECTIONS')
-    team_projected = 0
-
-    # Use each game once (home team side only to avoid duplicates)
-    seen_games = set()
-    for abbr, info in tonight_games.items():
-        if info['home_away'] != 'home':
-            continue
-        tid = ABBR_TO_TEAM_ID.get(abbr)
-        if not tid:
-            continue
-        game_key = info['game_id']
-        if game_key in seen_games:
-            continue
-        seen_games.add(game_key)
-
-        # Get live odds for this game
-        t_odds = team_odds.get(abbr, {})
-
-        # Project home team
-        proj = project_team(
-            conn=conn,
-            team_id=tid,
-            team_abbr=abbr,
-            opponent_abbr=info['opponent'],
-            location='home',
-            game_date=game_date,
-        )
-        if proj:
-            try:
-                upsert_team_projection(conn, proj)
-                team_projected += 1
-            except Exception as e:
-                log.warning(f'  Could not store team projection for {abbr}: {e}')
-                conn.rollback()
-
-        # Project away team
-        away_abbr = info['opponent']
-        away_tid  = ABBR_TO_TEAM_ID.get(away_abbr)
-        if away_tid:
-            away_proj = project_team(
-                conn=conn,
-                team_id=away_tid,
-                team_abbr=away_abbr,
-                opponent_abbr=abbr,
-                location='away',
-                game_date=game_date,
-            )
-            if away_proj:
-                try:
-                    upsert_team_projection(conn, away_proj)
-                    team_projected += 1
-                except Exception as e:
-                    log.warning(f'  Could not store team projection for {away_abbr}: {e}')
-                    conn.rollback()
-
-    log.info(f'  Projected: {team_projected} teams')
-
+    log.info("\n=== NBA v2.0 complete: %d players, %d prop rows written ===",
+             total_players, total_props)
     conn.close()
-    log.info('\n✅ Projection model complete')
-    log.info(f'   Player projections: {projected}')
-    log.info(f'   Team projections:   {team_projected}')
-    log.info('   → Run edgeDetector.js next to find value vs. market lines')
 
 
 if __name__ == '__main__':
