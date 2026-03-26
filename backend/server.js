@@ -99,16 +99,17 @@ function runPythonScript(scriptName, args = []) {
 //  MORNING CLEANUP:
 //   8:00 AM — pickGrader.js (grade yesterday's picks using final scores)
 //
-//  MIDDAY:
-//  12:00 PM — mlbLineupFetcher.py (confirmed batting orders for day games)
-//  12:30 PM — mlbProjectionModel.py (second pass — real lineup positions)
-//
 //  NHL SPECIAL: goalie confirmation jobs scheduled dynamically at 4:00 AM,
 //               running 90 min before each puck drop.
 //
 //  WEEKLY (every Monday):
 //  Mon 2:00 AM — statcastCollector.py (Baseball Savant whiff rates + Statcast)
 //  Mon 3:00 AM — computeLeagueAverages.py (keep LEAGUE_AVG constants current)
+//
+//  NOTE: mlbLineupFetcher.py exists but is NOT scheduled.
+//  MLB picks are generated once at 4:30 AM using lineup fallbacks.
+//  Lineups post 10 AM–4 PM ET — after picks are already live at 7 AM.
+//  A silent noon update (Option B) can be added later if needed.
 //
 // Disabled in MOCK_MODE to avoid API credit usage during development.
 
@@ -311,22 +312,6 @@ if (process.env.MOCK_MODE !== 'true') {
       const r = await gradeYesterdaysPicks();
       console.log(`  Grading complete: ${r.correctPicks}/${r.totalPicks} correct`);
     });
-  }, { timezone: 'America/New_York' });
-
-  // ── 12:00 PM — MLB Lineup Fetcher (confirmed batting orders posted by teams) ─
-  // Day games (1 PM ET) post lineups ~10 AM; evening games (7 PM ET) by ~4 PM.
-  // This noon run captures day game lineups so the 12:30 PM second pass uses them.
-  cron.schedule('0 12 * * *', async () => {
-    console.log('\n⏰ [12:00 PM] MLB Lineup Fetcher (confirmed batting orders)…');
-    await runPipeline('MLB Lineup Fetcher', () => runPythonScript('mlbLineupFetcher.py'));
-  }, { timezone: 'America/New_York' });
-
-  // ── 12:30 PM — MLB second projection pass (with confirmed day-game lineups) ──
-  // First pass at 4:30 AM uses fallbacks; this pass uses confirmed batting orders
-  // for get_teammates_obp() and get_teammates_rbi_rate() accuracy.
-  cron.schedule('30 12 * * *', async () => {
-    console.log('\n⏰ [12:30 PM] MLB Projection Model — second pass (confirmed lineups)…');
-    await runPipeline('MLB Projection Model (noon)', () => runPythonScript('mlbProjectionModel.py'));
   }, { timezone: 'America/New_York' });
 
   // ── Every Monday 3:00 AM — Recompute league averages (all three sports) ──────
