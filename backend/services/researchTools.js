@@ -285,6 +285,10 @@ async function get_nba_player_stats({ player_name }) {
   const displayHint  = resolved?.displayName || player_name;
   const result = await getNBAPlayerComplete(searchName, displayHint);
   if (!result) return `No NBA player found matching "${player_name}". Try their full last name.`;
+  // Prepend explicit schedule banner so Claude cannot hallucinate tonight's opponent
+  if (result.includes('NOT PLAYING TONIGHT')) {
+    return `⛔ SCHEDULE CHECK: ${displayHint || player_name} has NO GAME tonight. Their team is not on the live schedule. Do NOT mention any opponent or game time for tonight.\n\n${result}`;
+  }
   return result;
 }
 
@@ -708,6 +712,9 @@ async function get_nhl_player_stats({ player_name }) {
   const { getNHLPlayerComplete } = require('./masterDataFetch');
   const result = await getNHLPlayerComplete(player_name);
   if (!result) return `No NHL player found matching "${player_name}". Try their full last name.`;
+  if (result.includes('NOT PLAYING TONIGHT')) {
+    return `⛔ SCHEDULE CHECK: ${player_name} has NO GAME tonight. Their team is not on the live schedule. Do NOT mention any opponent or game time for tonight.\n\n${result}`;
+  }
   return result;
 }
 
@@ -717,6 +724,9 @@ async function get_mlb_player_stats({ player_name }) {
   const { getMLBPlayerComplete } = require('./masterDataFetch');
   const result = await getMLBPlayerComplete(player_name);
   if (!result) return `No active MLB player found matching "${player_name}". Try their full name.`;
+  if (result.includes('NOT SCHEDULED TONIGHT')) {
+    return `⛔ SCHEDULE CHECK: ${player_name} has NO GAME tonight. Their team is not on the live schedule. Do NOT mention any opponent or game time for tonight.\n\n${result}`;
+  }
   return result;
 }
 
