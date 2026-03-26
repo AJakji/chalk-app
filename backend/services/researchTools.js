@@ -348,21 +348,38 @@ async function get_prop_lines({ player_name, sport }) {
     const teamAbbr = found[0].team?.abbreviation || '';
     const teamWord = teamName.split(' ').pop().toLowerCase();
 
+    // Step 1: Check BDL schedule first — this is authoritative for "playing tonight"
+    // The Odds API lists games days in advance and is NOT reliable for tonight-only checks
+    const today    = getTodayET();
+    const bdlGames = await bdl.getGames(today).catch(() => []);
+    const bdlGame  = (bdlGames || []).find(g =>
+      g.home_team?.abbreviation === teamAbbr || g.visitor_team?.abbreviation === teamAbbr
+    );
+
+    if (!bdlGame) {
+      // Team has no game tonight per BDL — return immediately, no game time, no opponent
+      return `⛔ LINES: ${pName} (${teamAbbr}) — Team has NO GAME tonight per live BDL schedule. Do NOT mention any tip-off time or opponent. No prop lines available.\n${pName} — ${teamName} is not on tonight's NBA schedule. There are no prop lines to show.`;
+    }
+
+    // Step 2: Team confirmed playing tonight — now check Odds API for lines
+    const bdlIsHome  = bdlGame.home_team?.abbreviation === teamAbbr;
+    const bdlOpp     = bdlIsHome
+      ? (bdlGame.visitor_team?.full_name || bdlGame.visitor_team?.abbreviation)
+      : (bdlGame.home_team?.full_name    || bdlGame.home_team?.abbreviation);
+    const bdlRawTime = bdlGame.status || '';
+    const gameTimeET = bdlRawTime.includes('T')
+      ? new Date(bdlRawTime).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' }) + ' ET'
+      : '';
+
     const events = await oddsService.fetchEvents('NBA').catch(() => []);
     const event  = events?.find(e =>
       e.home_team?.toLowerCase().includes(teamWord) ||
       e.away_team?.toLowerCase().includes(teamWord)
     );
 
-    if (!event) {
-      return `⛔ LINES: ${pName} (${teamAbbr}) — Team is NOT on tonight's NBA schedule. Do NOT mention any prop line or game. No lines available.\n${pName} (${teamAbbr}) — ${teamName} is not on tonight's NBA schedule. No prop lines available.`;
-    }
-
-    const isHome    = event.home_team?.toLowerCase().includes(teamWord);
-    const opp       = isHome ? event.away_team : event.home_team;
-    const gameTimeET = event.commence_time
-      ? new Date(event.commence_time).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' }) + ' ET'
-      : '';
+    // Use BDL-confirmed opponent and time (not Odds API time which can be stale/future)
+    const isHome = bdlIsHome;
+    const opp    = bdlOpp;
 
     const MARKETS = [
       'player_points', 'player_rebounds', 'player_assists', 'player_threes',
@@ -374,7 +391,10 @@ async function get_prop_lines({ player_name, sport }) {
       player_points_rebounds: 'P+R', player_points_assists: 'P+A',
     };
 
-    const propsData = await oddsService.fetchEventProps('NBA', event.id, MARKETS).catch(() => null);
+    // event may be null if Odds API hasn't listed the game yet — that's fine, just means no lines
+    const propsData = event?.id
+      ? await oddsService.fetchEventProps('NBA', event.id, MARKETS).catch(() => null)
+      : null;
 
     // Normalize for accent-insensitive matching (Jokić vs Jokic etc.)
     const normName = s => (s || '').toLowerCase()
