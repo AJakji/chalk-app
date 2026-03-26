@@ -400,7 +400,8 @@ def get_position_defense_factor(conn, opponent: str, position: str, stat: str) -
                 row = cur.fetchone()
                 if row and row[0] is not None:
                     factor = float(row[0]) / league_avg_val
-                    return clamp(factor, 0.70, 1.30)
+                    # Tighter clamp: ±20% vs ±30% to avoid dominating total projection
+                    return clamp(factor, 0.80, 1.20)
     except Exception:
         pass
     return 1.0
@@ -643,8 +644,11 @@ def project_player(
     ts_lg    = 0.565  # league average TS%
     ts_f     = clamp(ts_pct / ts_lg, 0.85, 1.15)
 
-    # Usage approximation = (fga + 0.44*fta) / (min * 0.20)
-    usage_approx = (fga_season + 0.44 * fta_season) / max(min_season * 0.20, 1)
+    # Usage approximation — normalized so league-average player ≈ 1.0.
+    # Denominator min * 0.38 gives ~1.0 for a typical starter (8 FGA, 2.5 FTA, 25 min).
+    # High-usage stars (15 FGA, 6 FTA, 35 min) get ~1.30-1.35.
+    # min * 0.20 was wrong: produced 2.0+ for all starters, everyone hit the 1.45 ceiling.
+    usage_approx = (fga_season + 0.44 * fta_season) / max(min_season * 0.38, 1)
     usage_f = clamp(usage_approx + usage_boost, 0.70, 1.45)
 
     # Archetype
@@ -1080,19 +1084,29 @@ def project_team_props(
                 'std_dev':       std_dev_total,
             },
         },
+        # upsert_team_props reads: proj, over_prob, under_prob, confidence
+        # spread: proj = market spread value, over_prob = probability home covers
         'spread': {
-            'spread':      round(spread, 1),
-            'cover_prob':  round(cover_prob, 3),
+            'proj':        round(spread, 1),
+            'over_prob':   round(cover_prob, 3),       # home cover probability
+            'under_prob':  round(1 - cover_prob, 3),   # away cover probability
             'confidence':  round(conf_team, 1),
             'factors': {
-                'home_win_prob':  round(home_win_prob, 3),
+                'spread':        round(spread, 1),
+                'cover_prob':    round(cover_prob, 3),
+                'home_win_prob': round(home_win_prob, 3),
                 'pace_spread_f': round(pace_spread_f, 3),
                 'std_dev':       std_dev_spread,
             },
         },
+        # moneyline: proj = win probability (home or away depending on team row)
+        # upsert reads proj_val = data.get('home_prob' if is_home else 'away_prob')
         'moneyline': {
             'home_prob':    round(ml_home_final, 3),
             'away_prob':    round(ml_away_final, 3),
+            'proj':         round(ml_home_final, 3),   # home win prob as default proj
+            'over_prob':    round(ml_home_final, 3),   # stored as over_prob for querying
+            'under_prob':   round(ml_away_final, 3),
             'home_ml_edge': round(home_ml_edge, 3),
             'away_ml_edge': round(away_ml_edge, 3),
             'confidence':   round(conf_team, 1),
@@ -1100,6 +1114,8 @@ def project_team_props(
                 'log5_home':        round(log5_home, 3),
                 'home_win_pct':     round(home_win_pct, 3),
                 'away_win_pct':     round(away_win_pct, 3),
+                'home_ml_edge':     round(home_ml_edge, 3),
+                'away_ml_edge':     round(away_ml_edge, 3),
                 'market_home_prob': round(market_home_prob, 3),
                 'market_away_prob': round(market_away_prob, 3),
             },
