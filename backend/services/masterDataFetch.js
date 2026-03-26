@@ -182,8 +182,8 @@ async function getNBAPlayerComplete(playerName, displayNameHint) {
   const abbr   = player.team?.abbreviation || '';
   const season = getCurrentNBASeason();
 
-  // 2. DB queries — all parallel (game logs, vs history, injury, projections)
-  const [logsResult, vsOppResult, injuryResult, projResult] = await Promise.all([
+  // 2. DB queries — all parallel (game logs, vs history, injury, projections, full season)
+  const [logsResult, vsOppResult, injuryResult, projResult, seasonLogsResult] = await Promise.all([
     db.query(`
       SELECT game_date, opponent, home_away, minutes,
              points, rebounds, assists, steals, blocks, turnovers,
@@ -201,8 +201,9 @@ async function getNBAPlayerComplete(playerName, displayNameHint) {
              points, rebounds, assists, fg_pct, minutes, plus_minus
       FROM player_game_logs
       WHERE sport = 'NBA' AND player_name ILIKE $1
+      AND game_date >= CURRENT_DATE - 1095
       ORDER BY game_date DESC
-      LIMIT 50
+      LIMIT 15
     `, [`%${lastName(pName)}%`]),
     db.query(`
       SELECT is_confirmed_playing, injury_status
@@ -220,6 +221,14 @@ async function getNBAPlayerComplete(playerName, displayNameHint) {
       AND prop_type IS NOT NULL AND proj_value IS NOT NULL
       ORDER BY confidence_score DESC NULLS LAST
     `, [`%${lastName(pName)}%`]),
+    db.query(`
+      SELECT game_date, opponent, home_away, points, rebounds, assists,
+             fg_pct, steals, blocks, turnovers, minutes, plus_minus
+      FROM player_game_logs
+      WHERE sport = 'NBA' AND player_name ILIKE $1
+      AND game_date >= '2025-10-01'
+      ORDER BY game_date ASC
+    `, [`%${lastName(pName)}%`]),
   ]);
 
   const logs = logsResult.rows;
@@ -229,11 +238,19 @@ async function getNBAPlayerComplete(playerName, displayNameHint) {
   const l10 = logs.slice(0, 10);
   const l20 = logs;
 
-  // 3. Splits
-  const homeGames   = l20.filter(g => g.home_away === 'home');
-  const awayGames   = l20.filter(g => g.home_away === 'away');
-  const b2bGames    = getB2BGames(l20);
-  const normalGames = l20.filter(g => !b2bGames.includes(g));
+  // 3. Splits — full 2025-26 season for home/away and B2B (much larger sample)
+  const seasonLogs   = seasonLogsResult.rows;
+  const seasonHome   = seasonLogs.filter(g => g.home_away === 'home');
+  const seasonAway   = seasonLogs.filter(g => g.home_away === 'away');
+  const seasonB2B    = getB2BGames(seasonLogs);
+  const seasonNormal = seasonLogs.filter(g => !seasonB2B.includes(g));
+
+  // Fallback: if season query returned nothing, use l20 for splits
+  const homeGames   = seasonHome.length  > 0 ? seasonHome  : l20.filter(g => g.home_away === 'home');
+  const awayGames   = seasonAway.length  > 0 ? seasonAway  : l20.filter(g => g.home_away === 'away');
+  const b2bGames    = seasonB2B.length   > 0 ? seasonB2B   : getB2BGames(l20);
+  const normalGames = seasonNormal.length > 0 ? seasonNormal : l20.filter(g => !getB2BGames(l20).includes(g));
+  const splitLabel  = seasonLogs.length  > 0 ? `full 2025-26 season (${seasonLogs.length}g)` : 'last 20 games';
 
   // 4. Injury header
   const injuryRow = injuryResult.rows[0];
@@ -398,13 +415,13 @@ async function getNBAPlayerComplete(playerName, displayNameHint) {
 
     // 7. Prop lines
     const propLines = await fetchLivePropLines('NBA', pName, oddsEventId);
-    return buildNBAOutput(pName, abbr, season, logs, l5, l10, l20, homeGames, awayGames, b2bGames, normalGames, tonightBlock, propLines, injuryHeader, projBlock);
+    return buildNBAOutput(pName, abbr, season, logs, l5, l10, l20, homeGames, awayGames, b2bGames, normalGames, tonightBlock, propLines, injuryHeader, projBlock, splitLabel);
   }
 
-  return buildNBAOutput(pName, abbr, season, logs, l5, l10, l20, homeGames, awayGames, b2bGames, normalGames, 'NOT PLAYING TONIGHT', '', injuryHeader, projBlock);
+  return buildNBAOutput(pName, abbr, season, logs, l5, l10, l20, homeGames, awayGames, b2bGames, normalGames, 'NOT PLAYING TONIGHT', '', injuryHeader, projBlock, splitLabel);
 }
 
-function buildNBAOutput(pName, abbr, season, logs, l5, l10, l20, homeGames, awayGames, b2bGames, normalGames, tonightBlock, propLines, injuryHeader = '', projBlock = '') {
+function buildNBAOutput(pName, abbr, season, logs, l5, l10, l20, homeGames, awayGames, b2bGames, normalGames, tonightBlock, propLines, injuryHeader = '', projBlock = '', splitLabel = 'last 20 games') {
   const l20FG  = avgPct(l20.filter(g => g.fg_pct != null), 'fg_pct', 3);
   const l20_3P = avgPct(l20.filter(g => g.three_pct != null), 'three_pct', 3);
   const l20FT  = avgPct(l20.filter(g => g.ft_pct != null), 'ft_pct', 3);
@@ -438,16 +455,16 @@ Trend: L5 scoring is ${trendDiff} pts ${trendArrow} the L20 average
 LAST 10 GAMES (most recent first):
 ${l10log.join('\n')}
 
-HOME vs AWAY (last 20):
+HOME vs AWAY (${splitLabel}):
 Home (${homeGames.length}g): ${avg(homeGames, 'points')} PTS / ${avg(homeGames, 'rebounds')} REB / ${avg(homeGames, 'assists')} AST | FG%: ${avgPct(homeGames.filter(g => g.fg_pct), 'fg_pct', 3)}
 Away (${awayGames.length}g): ${avg(awayGames, 'points')} PTS / ${avg(awayGames, 'rebounds')} REB / ${avg(awayGames, 'assists')} AST | FG%: ${avgPct(awayGames.filter(g => g.fg_pct), 'fg_pct', 3)}
 
-BACK-TO-BACK (${b2bGames.length} b2b games in last 20):
-${b2bGames.length >= 2
-  ? `B2B avg:    ${avg(b2bGames, 'points')} PTS / ${avg(b2bGames, 'rebounds')} REB / ${avg(b2bGames, 'assists')} AST
-Normal avg: ${avg(normalGames, 'points')} PTS / ${avg(normalGames, 'rebounds')} REB / ${avg(normalGames, 'assists')} AST
-Impact:     ${(parseFloat(avg(b2bGames, 'points')) - parseFloat(avg(normalGames, 'points'))).toFixed(1)} pts on b2b`
-  : 'Not enough b2b games in sample to compute meaningful split.'}
+BACK-TO-BACK (${splitLabel}):
+${b2bGames.length >= 1
+  ? `B2B (${b2bGames.length}g): ${avg(b2bGames, 'points')} PTS / ${avg(b2bGames, 'rebounds')} REB / ${avg(b2bGames, 'assists')} AST
+Normal rest (${normalGames.length}g): ${avg(normalGames, 'points')} PTS / ${avg(normalGames, 'rebounds')} REB / ${avg(normalGames, 'assists')} AST
+B2B impact: ${(parseFloat(avg(b2bGames, 'points')) - parseFloat(avg(normalGames, 'points'))).toFixed(1)} PTS vs normal rest`
+  : `Small sample (${b2bGames.length} B2B games found in ${splitLabel}). No meaningful B2B split available.`}
 
 ${tonightBlock}
 
@@ -520,8 +537,8 @@ async function getNHLPlayerComplete(playerName) {
     || lower.includes('stolarz') || lower.includes('oettinger')
     || lower.includes('fleury') || lower.includes('daccord');
 
-  // 3. DB game logs + projections (parallel)
-  const [dbLogs, projResult] = await Promise.all([
+  // 3. DB game logs + projections + full season (parallel)
+  const [dbLogs, projResult, nhlSeasonLogsResult] = await Promise.all([
     db.query(`
       SELECT game_date, opponent, home_away,
         points, assists, fg_made, turnovers, three_made, three_att,
@@ -542,7 +559,21 @@ async function getNHLPlayerComplete(playerName) {
       AND prop_type IS NOT NULL AND proj_value IS NOT NULL
       ORDER BY prop_type
     `, [`%${lastName(fullName)}%`]),
+    db.query(`
+      SELECT game_date, opponent, home_away,
+        points, assists, fg_made, turnovers, three_made,
+        steals, blocks, fg_att, fg_pct, off_reb, plus_minus, minutes
+      FROM player_game_logs
+      WHERE sport = 'NHL' AND player_name ILIKE $1
+      AND game_date >= '2025-10-01'
+      ORDER BY game_date DESC
+    `, [`%${lastName(fullName)}%`]),
   ]);
+
+  const nhlSeasonLogs = nhlSeasonLogsResult.rows;
+  const nhlSeasonHome = nhlSeasonLogs.filter(g => g.home_away === 'home');
+  const nhlSeasonAway = nhlSeasonLogs.filter(g => g.home_away === 'away');
+  const nhlSplitLabel = nhlSeasonLogs.length > 0 ? `full 2025-26 season (${nhlSeasonLogs.length}g)` : 'last 20 games';
 
   const logs = dbLogs.rows;
 
@@ -690,17 +721,17 @@ async function getNHLPlayerComplete(playerName) {
   const propLines = await fetchLivePropLines('NHL', fullName, oddsEventId);
 
   if (isGoalie) {
-    return buildNHLGoalieOutput(fullName, teamAbbr || '', logs, apiLog, hasDB, tonightBlock, propLines, projBlock);
+    return buildNHLGoalieOutput(fullName, teamAbbr || '', logs, apiLog, hasDB, tonightBlock, propLines, projBlock, nhlSeasonHome, nhlSeasonAway, nhlSplitLabel);
   }
-  return buildNHLSkaterOutput(fullName, teamAbbr || '', position, logs, apiLog, hasDB, tonightBlock, propLines, projBlock);
+  return buildNHLSkaterOutput(fullName, teamAbbr || '', position, logs, apiLog, hasDB, tonightBlock, propLines, projBlock, nhlSeasonHome, nhlSeasonAway, nhlSplitLabel);
 }
 
-function buildNHLSkaterOutput(fullName, abbr, position, logs, apiLog, hasDB, tonightBlock, propLines, projBlock = '') {
+function buildNHLSkaterOutput(fullName, abbr, position, logs, apiLog, hasDB, tonightBlock, propLines, projBlock = '', seasonHome = [], seasonAway = [], splitLabel = 'last 20 games') {
   const l5  = logs.slice(0, 5);
   const l10 = logs.slice(0, 10);
   const l20 = logs;
-  const homeGames = l20.filter(g => g.home_away === 'home');
-  const awayGames = l20.filter(g => g.home_away === 'away');
+  const homeGames = seasonHome.length > 0 ? seasonHome : l20.filter(g => g.home_away === 'home');
+  const awayGames = seasonAway.length > 0 ? seasonAway : l20.filter(g => g.home_away === 'away');
 
   // DB: points=G, assists=A, fg_made=SOG, three_made=PPG, turnovers=PIM, plus_minus=+/-, minutes=TOI
   const totalPts  = (rows) => rows.map(g => (parseFloat(g.points) || 0) + (parseFloat(g.assists) || 0));
@@ -737,7 +768,7 @@ POWER PLAY vs EVEN STRENGTH (last 10):
 Total G/g: ${totalGAvg} | PP G/g: ${ppgAvg} | EV G/g: ${evGAvg}
 ${parseFloat(ppgAvg) > 0 ? `PP production present — ${ppgAvg} PP goals/g of ${totalGAvg} total` : 'Scoring is primarily at even strength.'}
 
-HOME vs AWAY (last 20):
+HOME vs AWAY (${splitLabel}):
 Home (${homeGames.length}g): ${avg(homeGames, 'points')}G / ${avg(homeGames, 'assists')}A / ${avgPtsG(homeGames)} PTS
 Away (${awayGames.length}g): ${avg(awayGames, 'points')}G / ${avg(awayGames, 'assists')}A / ${avgPtsG(awayGames)} PTS
 
@@ -751,14 +782,14 @@ ${propLines ? `TONIGHT'S PROP LINES:\n${propLines}` : 'No prop lines available f
 ${projBlock}`.trim();
 }
 
-function buildNHLGoalieOutput(fullName, abbr, logs, apiLog, hasDB, tonightBlock, propLines, projBlock = '') {
+function buildNHLGoalieOutput(fullName, abbr, logs, apiLog, hasDB, tonightBlock, propLines, projBlock = '', seasonHome = [], seasonAway = [], splitLabel = 'last 20 starts') {
   // DB: steals=saves, blocks=GA, fg_att=shots_faced, fg_pct=SV%, off_reb=GSAA, plus_minus=1(W)/-1(L)
   const l5  = logs.slice(0, 5);
   const l10 = logs.slice(0, 10);
   const l20 = logs;
 
-  const homeGames = l20.filter(g => g.home_away === 'home');
-  const awayGames = l20.filter(g => g.home_away === 'away');
+  const homeGames = seasonHome.length > 0 ? seasonHome : l20.filter(g => g.home_away === 'home');
+  const awayGames = seasonAway.length > 0 ? seasonAway : l20.filter(g => g.home_away === 'away');
   const wins   = (rows) => rows.filter(g => parseFloat(g.plus_minus) === 1).length;
   const losses = (rows) => rows.filter(g => parseFloat(g.plus_minus) < 0).length;
 
@@ -782,7 +813,7 @@ GSAA:     L10 ${avg(l10.filter(g => g.off_reb), 'off_reb')}
 Saves/g:  L10 ${avg(l10, 'steals')}
 Record:   L10: ${wins(l10)}W-${losses(l10)}L-${l10.length - wins(l10) - losses(l10)}OT | L20: ${wins(l20)}W-${losses(l20)}L-${l20.length - wins(l20) - losses(l20)}OT
 
-HOME vs AWAY (last 20 starts):
+HOME vs AWAY (${splitLabel}):
 Home (${homeGames.length}g): SV% ${avgPct(homeGames.filter(g => g.fg_pct), 'fg_pct', 3)} | GAA ${avg(homeGames, 'blocks')} | Record: ${wins(homeGames)}W-${losses(homeGames)}L
 Away (${awayGames.length}g): SV% ${avgPct(awayGames.filter(g => g.fg_pct), 'fg_pct', 3)} | GAA ${avg(awayGames, 'blocks')} | Record: ${wins(awayGames)}W-${losses(awayGames)}L
 
@@ -896,8 +927,8 @@ async function getMLBPlayerComplete(playerName) {
              ft_att as strikeouts, ft_made as walks
       FROM player_game_logs
       WHERE sport = 'MLB' AND player_name ILIKE $1
+      AND game_date >= '2026-03-01'
       ORDER BY game_date DESC
-      LIMIT 20
     `, [`%${lastName(pName)}%`]),
     db.query(`
       SELECT prop_type, proj_value, confidence_score,
@@ -1178,7 +1209,7 @@ Away (${dbAwayRows.length}g): ${hAvg(dbAwayRows, 'hits')}H/g | ${hAvg(dbAwayRows
   }
 
   const dbBlock  = dbRows.length > 0 ? `
-GAME LOG HISTORY (${dbRows.length} games, 2025 season):
+GAME LOG HISTORY (${dbRows.length} games, ${season} season):
 L5 avg: ${avg(dbL5, 'hits')}H / ${avg(dbL5, 'hr')}HR / ${avg(dbL5, 'rbi')}RBI per game
 L10 avg: ${avg(dbL10, 'hits')}H / ${avg(dbL10, 'hr')}HR / ${avg(dbL10, 'rbi')}RBI per game
 Last 5: ${dbL5.map(g => `${fmtDate(g.game_date)}: ${g.hits}H ${g.hr}HR`).join(', ')}` : '';
