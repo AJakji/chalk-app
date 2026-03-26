@@ -1089,7 +1089,7 @@ async function generateSuggestions() {
     mlbStats.getSchedule(mlbDate).catch(() => []),
   ]);
 
-  // NBA suggestion — matchup breakdown
+  // NBA suggestion — top scorer from tonight's slate
   const nbaGames = nbaResult.status === 'fulfilled' ? (nbaResult.value || []) : [];
   if (nbaGames.length > 0) {
     const g = nbaGames[0];
@@ -1098,50 +1098,61 @@ async function generateSuggestions() {
     if (home && visitor) {
       const homeShort    = home.split(' ').pop();
       const visitorShort = visitor.split(' ').pop();
-      const s = `Break down tonight's ${visitorShort} vs ${homeShort} matchup`;
+      // Alternate between specific player prop question and matchup breakdown
+      const day = new Date().getDay();
+      const s = day % 2 === 0
+        ? `Who are the top scorers in the ${visitorShort} vs ${homeShort} game?`
+        : `What's the points prop line for the ${homeShort} tonight?`;
       if (!isPickQuestion(s)) suggestions.push(s);
     }
   }
 
-  // NHL suggestion — goalie focus
+  // NHL suggestion — shots on goal or goalie
   const nhlGames = nhlResult.status === 'fulfilled' ? (nhlResult.value || []) : [];
   if (nhlGames.length > 0) {
     const g = nhlGames[0];
     const home = g.homeTeam?.placeName?.default || g.homeTeam?.abbrev || '';
     const away = g.awayTeam?.placeName?.default || g.awayTeam?.abbrev || '';
-    if (home) {
-      const s = `Who is starting in goal for the ${home} tonight?`;
-      if (!isPickQuestion(s)) suggestions.push(s);
-    } else if (away) {
-      const s = `How has the ${away} been scoring lately?`;
+    const teamName = home || away;
+    if (teamName) {
+      const day = new Date().getDay();
+      const s = day % 2 === 0
+        ? `Who is starting in goal for the ${teamName} tonight?`
+        : `How has the ${teamName} been scoring on the power play?`;
       if (!isPickQuestion(s)) suggestions.push(s);
     }
   }
 
-  // MLB suggestion — weather focus when there are games
+  // MLB suggestion — starting pitcher or umpire
   const mlbGames = mlbResult.status === 'fulfilled' ? (mlbResult.value || []) : [];
   if (mlbGames.length > 0) {
     const g = mlbGames[0];
-    const away = g.teams?.away?.team?.name || '';
-    const home = g.teams?.home?.team?.name || '';
-    if (home && away) {
-      const homeShort = home.split(' ').pop();
-      const awayShort = away.split(' ').pop();
-      const s = `What are the conditions for the ${awayShort} vs ${homeShort} game tonight?`;
+    const awayPitcher = g.teams?.away?.probablePitcher?.fullName || '';
+    const homePitcher = g.teams?.home?.probablePitcher?.fullName || '';
+    const awayName    = g.teams?.away?.team?.name || '';
+    const homeName    = g.teams?.home?.team?.name || '';
+    if (awayPitcher || homePitcher) {
+      const pitcher = awayPitcher || homePitcher;
+      const s = `How has ${pitcher.split(' ').pop()} been pitching this season?`;
+      if (!isPickQuestion(s)) suggestions.push(s);
+    } else if (homeName && awayName) {
+      const homeShort = homeName.split(' ').pop();
+      const awayShort = awayName.split(' ').pop();
+      const s = `What are the weather conditions for ${awayShort} vs ${homeShort}?`;
       if (!isPickQuestion(s)) suggestions.push(s);
     }
   }
 
-  // Round out to 4 with pure research/data questions — no pick language
+  // Round out to 4 with data-specific fallback questions — no pick language
   const generals = [
-    'What does line movement tell you before a game?',
-    'How do I read a puck line vs moneyline for NHL?',
-    'How do park factors affect MLB totals?',
-    'What is sharp money and how does it move lines?',
-    'How do back-to-back situations affect NBA totals?',
-    'What is the difference between spread and moneyline?',
-    'How has Nikola Jokic been playing this month?',
-    'What are the prop lines for Connor McDavid tonight?',
+    'How has Nikola Jokic been shooting this month?',
+    'What are Connor McDavid\'s prop lines tonight?',
+    'How does Aaron Judge hit vs left-handed pitchers?',
+    'Who are the best NHL goalies playing tonight?',
+    'What is the pace for tonight\'s top NBA game?',
+    'How do back-to-back games affect NBA scoring?',
+    'Who leads tonight\'s NBA slate in usage rate?',
+    'What is the run total for tonight\'s top MLB game?',
   ];
   while (suggestions.length < 4) {
     const idx = (new Date().getDay() + suggestions.length) % generals.length;

@@ -205,7 +205,10 @@ async function getNBAPlayerComplete(playerName, displayNameHint) {
       LIMIT 1
     `, [`%${lastName(pName)}%`]),
     db.query(`
-      SELECT prop_type, proj_value, confidence_score
+      SELECT prop_type, proj_value, confidence_score,
+             factors_json->>'archetype' as archetype,
+             (factors_json->>'market_line')::numeric as market_line,
+             (factors_json->>'edge')::numeric as edge
       FROM chalk_projections
       WHERE player_name ILIKE $1 AND game_date = CURRENT_DATE AND sport = 'NBA'
       AND prop_type IS NOT NULL AND proj_value IS NOT NULL
@@ -245,12 +248,18 @@ async function getNBAPlayerComplete(playerName, displayNameHint) {
       points: 'Points', rebounds: 'Rebounds', assists: 'Assists',
       threes: '3PM', pra: 'PRA', pts_ast: 'P+A', pts_reb: 'P+R',
     };
+    const archetype = projRows.find(r => r.archetype)?.archetype || null;
+    const archetypeLine = archetype ? `  Player archetype: ${archetype}` : '';
     const lines = projRows.map(r => {
       const label = PROJ_LABELS[r.prop_type] || r.prop_type;
-      const conf  = r.confidence_score ? ` (confidence: ${r.confidence_score}%)` : '';
-      return `  ${label}: projects ${parseFloat(r.proj_value).toFixed(1)}${conf}`;
+      const proj  = parseFloat(r.proj_value).toFixed(1);
+      const ml    = r.market_line != null ? ` | Line: ${parseFloat(r.market_line).toFixed(1)}` : '';
+      const edge  = r.edge != null ? ` | Edge: ${r.edge > 0 ? '+' : ''}${parseFloat(r.edge).toFixed(2)}` : '';
+      const conf  = r.confidence_score ? ` | Conf: ${r.confidence_score}%` : '';
+      return `  ${label}: proj ${proj}${ml}${edge}${conf}`;
     });
-    projBlock = `CHALK PROPRIETARY MODEL — Tonight's Projections:\n${lines.join('\n')}`;
+    const header = archetypeLine ? `${archetypeLine}\n` : '';
+    projBlock = `CHALK PROPRIETARY MODEL — Tonight's Projections:\n${header}${lines.join('\n')}`;
   }
 
   // 6. Tonight's game via BDL
@@ -293,10 +302,14 @@ async function getNBAPlayerComplete(playerName, displayNameHint) {
     const [gameOddsArr, pdrResult, playerPaceResult, oppPaceResult] = await Promise.all([
       oddsService.fetchGameOdds('NBA').catch(() => []),
       db.query(`
-        SELECT pts_allowed, reb_allowed, ast_allowed, three_allowed, fg_pct_allowed
-        FROM position_defense_ratings
-        WHERE team_name = $1 AND sport = 'NBA'
-        LIMIT 1
+        WITH ranked AS (
+          SELECT team_name, pts_allowed, reb_allowed, ast_allowed, three_allowed, fg_pct_allowed,
+            RANK() OVER (ORDER BY pts_allowed ASC) as pts_def_rank,
+            COUNT(*) OVER () as total_teams
+          FROM position_defense_ratings
+          WHERE sport = 'NBA'
+        )
+        SELECT * FROM ranked WHERE team_name = $1 LIMIT 1
       `, [oppAbbr]),
       db.query(`
         SELECT AVG(points_scored) as avg_pts, AVG(points_allowed) as avg_pa, AVG(pace) as avg_pace
@@ -339,7 +352,10 @@ async function getNBAPlayerComplete(playerName, displayNameHint) {
     const pdr = pdrResult.rows[0];
     let defenseBlock = '';
     if (pdr) {
-      defenseBlock = `Opponent defense (${oppAbbr}): Allows ${parseFloat(pdr.pts_allowed).toFixed(1)} PTS/g | ${parseFloat(pdr.reb_allowed).toFixed(1)} REB/g | ${parseFloat(pdr.ast_allowed).toFixed(1)} AST/g | ${(parseFloat(pdr.fg_pct_allowed) * 100).toFixed(1)}% FG allowed`;
+      const rankStr = pdr.pts_def_rank && pdr.total_teams
+        ? ` (ranked ${pdr.pts_def_rank}/${pdr.total_teams} toughest on PTS)`
+        : '';
+      defenseBlock = `Opponent defense (${oppAbbr}): Allows ${parseFloat(pdr.pts_allowed).toFixed(1)} PTS/g${rankStr} | ${parseFloat(pdr.reb_allowed).toFixed(1)} REB/g | ${parseFloat(pdr.ast_allowed).toFixed(1)} AST/g | ${(parseFloat(pdr.fg_pct_allowed) * 100).toFixed(1)}% FG allowed`;
     }
 
     // Team pace block
@@ -511,7 +527,9 @@ async function getNHLPlayerComplete(playerName) {
       LIMIT 20
     `, [`%${lastName(fullName)}%`]),
     db.query(`
-      SELECT prop_type, proj_value, confidence_score
+      SELECT prop_type, proj_value, confidence_score,
+             (factors_json->>'market_line')::numeric as market_line,
+             (factors_json->>'edge')::numeric as edge
       FROM chalk_projections
       WHERE player_name ILIKE $1 AND game_date = CURRENT_DATE AND sport = 'NHL'
       AND prop_type IS NOT NULL AND proj_value IS NOT NULL
@@ -561,6 +579,35 @@ async function getNHLPlayerComplete(playerName) {
     });
     oddsEventId = event?.id || null;
 
+    // Backup goalie + opponent shots (parallel with odds fetch)
+    const [oppGoalieResult, oppShotsResult] = await Promise.all([
+      db.query(`
+        SELECT player_name, injury_status
+        FROM nightly_roster
+        WHERE sport = 'NHL' AND position = 'G' AND game_date = CURRENT_DATE
+        AND (team ILIKE $1 OR team = $2)
+        ORDER BY is_confirmed_playing DESC NULLS LAST
+        LIMIT 3
+      `, [`%${opp}%`, oppAbbr]),
+      db.query(`
+        SELECT AVG(blocks::numeric) as avg_shots_against
+        FROM team_game_logs
+        WHERE sport = 'NHL' AND team_name = $1
+        AND game_date >= CURRENT_DATE - 60
+      `, [oppAbbr]),
+    ]);
+
+    const goalieRows = oppGoalieResult.rows;
+    let goalieBlock = '';
+    if (goalieRows.length > 0) {
+      goalieBlock = `Opp goalies (${oppAbbr}): ${goalieRows.map(g => g.player_name + (g.injury_status ? ` [${g.injury_status}]` : '')).join(', ')}`;
+    }
+
+    const oppShotsAvg = oppShotsResult.rows[0]?.avg_shots_against;
+    const oppShotsBlock = oppShotsAvg
+      ? `${oppAbbr} shots allowed/g (L60d): ${parseFloat(oppShotsAvg).toFixed(1)}`
+      : '';
+
     // Game odds
     let oddsBlock = '';
     if (event) {
@@ -602,6 +649,8 @@ async function getNHLPlayerComplete(playerName) {
     tonightBlock = [
       `TONIGHT: ${isHome ? 'vs' : '@'} ${opp} at ${timeET}`,
       oddsBlock || 'Odds not yet posted.',
+      goalieBlock,
+      oppShotsBlock,
       vsBlock,
     ].filter(Boolean).join('\n');
   }
@@ -619,7 +668,11 @@ async function getNHLPlayerComplete(playerName) {
       .filter(r => ['goals', 'assists', 'points', 'shots_on_goal', 'saves', 'toi'].includes(r.prop_type))
       .map(r => {
         const label = NHL_PROJ_LABELS[r.prop_type] || r.prop_type;
-        return `  ${label}: ${parseFloat(r.proj_value).toFixed(r.prop_type === 'toi' ? 1 : 2)}`;
+        const proj  = parseFloat(r.proj_value).toFixed(r.prop_type === 'toi' ? 1 : 2);
+        const ml    = r.market_line != null ? ` | Line: ${parseFloat(r.market_line).toFixed(1)}` : '';
+        const edge  = r.edge != null ? ` | Edge: ${r.edge > 0 ? '+' : ''}${parseFloat(r.edge).toFixed(2)}` : '';
+        const conf  = r.confidence_score ? ` | Conf: ${r.confidence_score}%` : '';
+        return `  ${label}: proj ${proj}${ml}${edge}${conf}`;
       });
     if (lines.length) {
       projBlock = `CHALK PROPRIETARY MODEL — Tonight's Projections:\n${lines.join('\n')}`;
@@ -656,9 +709,12 @@ function buildNHLSkaterOutput(fullName, abbr, position, logs, apiLog, hasDB, ton
     }
   });
 
-  // PP goals per game (three_made = PPG — reliable)
-  // NOTE: three_att does NOT store PP TOI in our DB, so we omit PP TOI
+  // PP vs EV split (three_made = PPG, points = total G)
   const ppgAvg = hasDB ? avg(l10, 'three_made') : 'N/A';
+  const totalGAvg = hasDB ? avg(l10, 'points') : 'N/A';
+  const evGAvg = hasDB && l10.length > 0
+    ? (l10.reduce((sum, g) => sum + Math.max(0, (parseFloat(g.points) || 0) - (parseFloat(g.three_made) || 0)), 0) / l10.length).toFixed(2)
+    : 'N/A';
 
   return `NHL SKATER DATA: ${fullName} (${abbr})${position ? ` — ${position}` : ''}
 Games in database: ${l20.length}${!hasDB && apiLog.length > 0 ? ` (API: ${apiLog.length})` : ''}
@@ -670,9 +726,9 @@ L20: ${avg(l20, 'points')}G / ${avg(l20, 'assists')}A / ${avgPtsG(l20)} PTS | ${
 +/-: L10 ${avg(l10, 'plus_minus')} | L20 ${avg(l20, 'plus_minus')}
 TOI: ${avg(l10, 'minutes')} min/g | PIM: ${avg(l10, 'turnovers')}/g
 
-POWER PLAY (last 10):
-PP Goals/g: ${ppgAvg}
-${parseFloat(ppgAvg) > 0 ? `${fullName.split(' ')[0]} is contributing on the power play — ${ppgAvg} PP goals per game` : 'No significant PP goal production in last 10 games.'}
+POWER PLAY vs EVEN STRENGTH (last 10):
+Total G/g: ${totalGAvg} | PP G/g: ${ppgAvg} | EV G/g: ${evGAvg}
+${parseFloat(ppgAvg) > 0 ? `PP production present — ${ppgAvg} PP goals/g of ${totalGAvg} total` : 'Scoring is primarily at even strength.'}
 
 HOME vs AWAY (last 20):
 Home (${homeGames.length}g): ${avg(homeGames, 'points')}G / ${avg(homeGames, 'assists')}A / ${avgPtsG(homeGames)} PTS
@@ -811,8 +867,8 @@ async function getMLBPlayerComplete(playerName) {
   const throws   = found.pitchHand?.code || '';
   const playerId = found.id;
 
-  // 2. MLB Stats API season stats + game log + platoon splits (parallel)
-  const [seasonStats, gameLog, splitsData, dbLogs] = await Promise.all([
+  // 2. MLB Stats API season stats + game log + platoon splits + DB logs + projections (parallel)
+  const [seasonStats, gameLog, splitsData, dbLogs, projResult] = await Promise.all([
     mlbStats.getPlayerSeasonStats(playerId, season, group).catch(() => []),
     mlbStats.getPlayerGameLog(playerId, season, group).catch(() => []),
     // Platoon splits: vs LHP and vs RHP
@@ -829,6 +885,15 @@ async function getMLBPlayerComplete(playerName) {
       WHERE sport = 'MLB' AND player_name ILIKE $1
       ORDER BY game_date DESC
       LIMIT 20
+    `, [`%${lastName(pName)}%`]),
+    db.query(`
+      SELECT prop_type, proj_value, confidence_score,
+             (factors_json->>'market_line')::numeric as market_line,
+             (factors_json->>'edge')::numeric as edge
+      FROM chalk_projections
+      WHERE player_name ILIKE $1 AND game_date = CURRENT_DATE AND sport = 'MLB'
+      AND prop_type IS NOT NULL AND proj_value IS NOT NULL
+      ORDER BY confidence_score DESC NULLS LAST
     `, [`%${lastName(pName)}%`]),
   ]);
 
@@ -868,6 +933,52 @@ vs RHP: AVG ${vsR?.avg || 'N/A'} | OBP ${vsR?.obp || 'N/A'} | SLG ${vsR?.slg || 
       weatherBlock = `Weather: ${wx.temp_f}°F | Wind: ${wx.wind_mph}mph ${wx.wind_dir_label} (${windEffect})`;
       if (wx.altitude_ft >= 5000) weatherBlock += ' | Coors altitude — major carry boost';
     }
+  }
+
+  // Umpire + bullpen queries (parallel)
+  const homeAbbr2 = tonightGame?.teams?.home?.team?.abbreviation || null;
+  const awayAbbr2 = tonightGame?.teams?.away?.team?.abbreviation || null;
+  const bullpenTeam = teamAbbr || null;
+  const [umpireResult, bullpenResult] = await Promise.all([
+    tonightGame
+      ? db.query(`
+          SELECT umpire_name, k_rate, bb_rate, run_factor, tendency_note
+          FROM umpire_tendencies
+          WHERE game_date = CURRENT_DATE
+          AND (home_team = $1 OR away_team = $2)
+          LIMIT 1
+        `, [homeAbbr2, awayAbbr2]).catch(() => ({ rows: [] }))
+      : Promise.resolve({ rows: [] }),
+    bullpenTeam
+      ? db.query(`
+          SELECT pitcher_name, role, era, appearances_l7, innings_pitched_l7
+          FROM bullpen_usage
+          WHERE team = $1 AND game_date >= CURRENT_DATE - 7
+          ORDER BY appearances_l7 DESC NULLS LAST
+          LIMIT 5
+        `, [bullpenTeam]).catch(() => ({ rows: [] }))
+      : Promise.resolve({ rows: [] }),
+  ]);
+
+  let umpireBlock = '';
+  if (umpireResult.rows[0]) {
+    const u = umpireResult.rows[0];
+    const parts = [`Umpire: ${u.umpire_name}`];
+    if (u.k_rate)       parts.push(`K-rate: ${parseFloat(u.k_rate).toFixed(1)}%`);
+    if (u.bb_rate)      parts.push(`BB-rate: ${parseFloat(u.bb_rate).toFixed(1)}%`);
+    if (u.run_factor)   parts.push(`Run factor: ${parseFloat(u.run_factor).toFixed(2)}`);
+    if (u.tendency_note) parts.push(u.tendency_note);
+    umpireBlock = parts.join(' | ');
+  }
+
+  let bullpenBlock = '';
+  if (bullpenResult.rows.length > 0) {
+    const lines = bullpenResult.rows.map(r => {
+      const era  = r.era        ? ` ERA ${parseFloat(r.era).toFixed(2)}`          : '';
+      const apps = r.appearances_l7 ? ` (${r.appearances_l7}G/last 7d)` : '';
+      return `  ${r.pitcher_name} [${r.role || '?'}]${era}${apps}`;
+    });
+    bullpenBlock = `${teamAbbr} BULLPEN (last 7d usage):\n${lines.join('\n')}`;
   }
 
   // 4. Odds + prop lines
@@ -963,6 +1074,26 @@ ${formatSPBlock(awaySPStats, awayAbbr)}`;
     }
   }
 
+  // Chalk projections block (MLB)
+  const mlbProjRows = projResult.rows;
+  let mlbProjBlock = '';
+  if (mlbProjRows.length > 0) {
+    const MLB_PROJ_LABELS = {
+      hits: 'Hits', home_runs: 'Home Runs', rbis: 'RBIs',
+      strikeouts: 'Strikeouts', total_bases: 'Total Bases', runs_scored: 'Runs',
+      earned_runs: 'Earned Runs', hits_allowed: 'Hits Allowed',
+    };
+    const lines = mlbProjRows.map(r => {
+      const label = MLB_PROJ_LABELS[r.prop_type] || r.prop_type;
+      const proj  = parseFloat(r.proj_value).toFixed(2);
+      const ml    = r.market_line != null ? ` | Line: ${parseFloat(r.market_line).toFixed(1)}` : '';
+      const edge  = r.edge != null ? ` | Edge: ${r.edge > 0 ? '+' : ''}${parseFloat(r.edge).toFixed(2)}` : '';
+      const conf  = r.confidence_score ? ` | Conf: ${r.confidence_score}%` : '';
+      return `  ${label}: proj ${proj}${ml}${edge}${conf}`;
+    });
+    mlbProjBlock = `CHALK PROPRIETARY MODEL — Tonight's Projections:\n${lines.join('\n')}`;
+  }
+
   // Build output
   if (isPitch) {
     const recentLog = recent.map(g => {
@@ -975,7 +1106,7 @@ ${formatSPBlock(awaySPStats, awayAbbr)}`;
       : '';
 
     const tonightBlock = tonightGame
-      ? [`TONIGHT: ${tonightGame.teams?.away?.team?.name} @ ${tonightGame.teams?.home?.team?.name} — ${gameTimeET}`, weatherBlock, spBlock].filter(Boolean).join('\n')
+      ? [`TONIGHT: ${tonightGame.teams?.away?.team?.name} @ ${tonightGame.teams?.home?.team?.name} — ${gameTimeET}`, weatherBlock, umpireBlock, spBlock].filter(Boolean).join('\n')
       : 'NOT SCHEDULED TONIGHT';
 
     return `MLB PITCHER DATA: ${pName} (${teamAbbr}, ${pos}) — Throws: ${throws}
@@ -989,7 +1120,11 @@ ${recentLog || 'No recent starts on record.'}
 
 ${arsenalBlock}
 
+${bullpenBlock}
+
 ${tonightBlock}
+
+${mlbProjBlock}
 
 ${propLines ? `PROP LINES TONIGHT:\n${propLines}` : ''}`.trim();
   }
@@ -1013,7 +1148,7 @@ Last 5: ${dbL5.map(g => `${fmtDate(g.game_date)}: ${g.hits}H ${g.hr}HR`).join(',
     : '';
 
   const tonightBlock = tonightGame
-    ? [`TONIGHT: ${tonightGame.teams?.away?.team?.name} @ ${tonightGame.teams?.home?.team?.name} — ${gameTimeET}`, weatherBlock, spBlock].filter(Boolean).join('\n')
+    ? [`TONIGHT: ${tonightGame.teams?.away?.team?.name} @ ${tonightGame.teams?.home?.team?.name} — ${gameTimeET}`, weatherBlock, umpireBlock, spBlock].filter(Boolean).join('\n')
     : 'NOT SCHEDULED TONIGHT';
 
   return `MLB BATTER DATA: ${pName} (${teamAbbr}, ${pos}) — Bats: ${bats}
@@ -1031,6 +1166,8 @@ ${platoonBlock}
 ${careerVsSpBlock}
 
 ${tonightBlock}
+
+${mlbProjBlock}
 
 ${propLines ? `PROP LINES TONIGHT:\n${propLines}` : ''}`.trim();
 }
@@ -1107,11 +1244,38 @@ async function getComparativeStats(sport, statCategory, scope) {
   const rows = result.rows;
   if (!rows.length) return `No comparative data found for ${sport} ${statCategory} tonight.`;
 
+  // Fetch chalk projections for these players (best match by name)
+  const playerNames = rows.map(r => r.player_name);
+  let projMap = {};
+  if (playerNames.length > 0) {
+    const projRows = await db.query(`
+      SELECT DISTINCT ON (player_name) player_name, prop_type, proj_value,
+             (factors_json->>'market_line')::numeric as market_line,
+             (factors_json->>'edge')::numeric as edge,
+             confidence_score
+      FROM chalk_projections
+      WHERE sport = $1 AND game_date = CURRENT_DATE
+      AND prop_type IS NOT NULL AND proj_value IS NOT NULL
+      ORDER BY player_name, confidence_score DESC NULLS LAST
+    `, [sport]).catch(() => ({ rows: [] }));
+
+    for (const r of projRows.rows) {
+      projMap[r.player_name.toLowerCase()] = r;
+    }
+  }
+
   const formatRow = (r, i) => {
     const recentStr = (r.recent_vals || []).slice(0, 5)
       .map(v => v != null ? parseFloat(v).toFixed(1) : '?')
       .join(', ');
-    return `${i + 1}. ${r.player_name} (${r.team}): ${parseFloat(r.avg_val).toFixed(2)} ${statInfo.label}/g [${r.games}g] — L5: ${recentStr}`;
+    const proj = projMap[r.player_name.toLowerCase()];
+    let projStr = '';
+    if (proj?.proj_value != null) {
+      const ml   = proj.market_line != null ? ` / Line ${parseFloat(proj.market_line).toFixed(1)}` : '';
+      const edge = proj.edge != null ? ` / Edge ${proj.edge > 0 ? '+' : ''}${parseFloat(proj.edge).toFixed(2)}` : '';
+      projStr = ` [Model: ${parseFloat(proj.proj_value).toFixed(1)}${ml}${edge}]`;
+    }
+    return `${i + 1}. ${r.player_name} (${r.team}): ${parseFloat(r.avg_val).toFixed(2)} ${statInfo.label}/g [${r.games}g] — L5: ${recentStr}${projStr}`;
   };
 
   return `COMPARATIVE: ${statInfo.label} — Tonight's ${sport} Slate (last ${n} games used)
