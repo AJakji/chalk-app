@@ -352,22 +352,52 @@ def get_position_defense_factor(conn, opponent: str, position: str, stat: str) -
     """
     Returns factor relative to league average. 1.0 = average defense.
     < 1.0 = tough defense (fewer allowed). > 1.0 = soft defense (more allowed).
+    opponent is the team abbreviation — we match against team_name with ILIKE.
     """
     if not position or not opponent:
         return 1.0
+
+    # Map stat name to DB column
+    stat_col_map = {
+        'points':     'pts_allowed',
+        'pts':        'pts_allowed',
+        'rebounds':   'reb_allowed',
+        'reb':        'reb_allowed',
+        'assists':    'ast_allowed',
+        'ast':        'ast_allowed',
+        'threes':     'three_allowed',
+        'three_made': 'three_allowed',
+        'fg3m':       'three_allowed',
+    }
+    col = stat_col_map.get(stat)
+    if not col:
+        return 1.0
+
+    # Map DB column to LEAGUE_AVG key for normalization
+    lg_key_map = {
+        'pts_allowed':   'pts_pg',
+        'reb_allowed':   'reb_pg',
+        'ast_allowed':   'ast_pg',
+        'three_allowed': 'fg3m_pg',
+    }
+    lg_key = lg_key_map.get(col, 'pts_pg')
+    league_avg_val = LEAGUE_AVG.get(lg_key, 0.0)
+    if league_avg_val <= 0:
+        return 1.0
+
     try:
         with conn.cursor() as cur:
             cur.execute(
-                """SELECT allowed_vs_league_avg
-                   FROM position_defense_ratings
-                   WHERE team_abbr = %s AND position = %s AND stat_name = %s
-                     AND sport = 'NBA'
-                   ORDER BY computed_date DESC LIMIT 1""",
-                (opponent, position.upper(), stat)
+                f"""SELECT {col}
+                    FROM position_defense_ratings
+                    WHERE team_name ILIKE %s AND position = %s AND sport = 'NBA'
+                    ORDER BY updated_at DESC LIMIT 1""",
+                (f'%{opponent}%', position.upper())
             )
             row = cur.fetchone()
             if row and row[0] is not None:
-                return clamp(float(row[0]), 0.70, 1.30)
+                factor = float(row[0]) / league_avg_val
+                return clamp(factor, 0.70, 1.30)
     except Exception:
         pass
     return 1.0
@@ -400,19 +430,19 @@ def get_player_season_avgs(conn, player_id: int) -> dict:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """SELECT
-                     AVG(pts)   AS pts_pg,
-                     AVG(reb)   AS reb_pg,
-                     AVG(ast)   AS ast_pg,
-                     AVG(fg3m)  AS fg3m_pg,
-                     AVG(fg3a)  AS fg3a_pg,
-                     AVG(stl)   AS stl_pg,
-                     AVG(blk)   AS blk_pg,
-                     AVG(min)   AS min_pg,
-                     AVG(fga)   AS fga_pg,
-                     AVG(fgm)   AS fgm_pg,
-                     AVG(fta)   AS fta_pg,
-                     AVG(ftm)   AS ftm_pg,
-                     COUNT(*)   AS games_played
+                     AVG(points)     AS pts_pg,
+                     AVG(rebounds)   AS reb_pg,
+                     AVG(assists)    AS ast_pg,
+                     AVG(three_made) AS fg3m_pg,
+                     AVG(three_att)  AS fg3a_pg,
+                     AVG(steals)     AS stl_pg,
+                     AVG(blocks)     AS blk_pg,
+                     AVG(minutes)    AS min_pg,
+                     AVG(fg_att)     AS fga_pg,
+                     AVG(fg_made)    AS fgm_pg,
+                     AVG(ft_att)     AS fta_pg,
+                     AVG(ft_made)    AS ftm_pg,
+                     COUNT(*)        AS games_played
                    FROM player_game_logs
                    WHERE player_id = %s AND sport = 'NBA'""",
                 (player_id,)
@@ -438,9 +468,9 @@ def weighted_base(logs: list[dict], season_avg: float, stat: str) -> float:
 
 def weighted_base_threes(logs: list[dict], season_avg: float) -> float:
     """Threes special: L5×0.50 + L10×0.25 + L20×0.15 + season×0.10"""
-    l5  = rolling_avg(logs, 'fg3m', 5)
-    l10 = rolling_avg(logs, 'fg3m', 10)
-    l20 = rolling_avg(logs, 'fg3m', 20)
+    l5  = rolling_avg(logs, 'three_made', 5)
+    l10 = rolling_avg(logs, 'three_made', 10)
+    l20 = rolling_avg(logs, 'three_made', 20)
     return l5*0.50 + l10*0.25 + l20*0.15 + season_avg*0.10
 
 
@@ -453,10 +483,13 @@ def get_team_pace(conn, team_abbr: str) -> float:
     try:
         with conn.cursor() as cur:
             cur.execute(
-                """SELECT AVG(pace)
-                   FROM team_game_logs
-                   WHERE team_name ILIKE %s AND sport = 'NBA'
-                   ORDER BY game_date DESC LIMIT 15""",
+                """SELECT AVG(pace) FROM (
+                     SELECT pace FROM team_game_logs
+                     WHERE team_name ILIKE %s AND sport = 'NBA'
+                       AND pace IS NOT NULL
+                     ORDER BY game_date DESC
+                     LIMIT 15
+                   ) recent""",
                 (f'%{team_abbr}%',)
             )
             row = cur.fetchone()
@@ -468,20 +501,22 @@ def get_team_pace(conn, team_abbr: str) -> float:
 
 
 def get_team_record(conn, team_abbr: str) -> tuple[int, int]:
-    """Returns (wins, losses) from team_game_logs."""
+    """Returns (wins, losses) from recent team_game_logs."""
     try:
         with conn.cursor() as cur:
             cur.execute(
-                """SELECT
-                     SUM(CASE WHEN team_score > opp_score THEN 1 ELSE 0 END) as wins,
-                     SUM(CASE WHEN team_score <= opp_score THEN 1 ELSE 0 END) as losses
+                """SELECT result
                    FROM team_game_logs
-                   WHERE team_name ILIKE %s AND sport = 'NBA'""",
+                   WHERE team_name ILIKE %s AND sport = 'NBA'
+                   ORDER BY game_date DESC
+                   LIMIT 20""",
                 (f'%{team_abbr}%',)
             )
-            row = cur.fetchone()
-            if row:
-                return (int(row[0] or 0), int(row[1] or 0))
+            rows = cur.fetchall()
+            if rows:
+                wins   = sum(1 for r in rows if r[0] == 'W')
+                losses = len(rows) - wins
+                return (wins, losses)
     except Exception:
         pass
     return (41, 41)
@@ -628,9 +663,9 @@ def project_player(
         rest_f = 1.00
 
     # Home/away factor (per stat)
-    home_pts_avg  = get_home_away_split(conn, player_id, 'pts', is_home)
-    home_reb_avg  = get_home_away_split(conn, player_id, 'reb', is_home)
-    home_ast_avg  = get_home_away_split(conn, player_id, 'ast', is_home)
+    home_pts_avg  = get_home_away_split(conn, player_id, 'points', is_home)
+    home_reb_avg  = get_home_away_split(conn, player_id, 'rebounds', is_home)
+    home_ast_avg  = get_home_away_split(conn, player_id, 'assists', is_home)
 
     def home_away_f(split_avg: float, base: float) -> float:
         if split_avg > 0 and base > 0:
@@ -642,10 +677,10 @@ def project_player(
     ha_ast_f = home_away_f(home_ast_avg, ast_season)
 
     # Opponent position defense factors
-    pos_def_pts  = get_position_defense_factor(conn, opponent, position, 'pts')
-    pos_def_reb  = get_position_defense_factor(conn, opponent, position, 'reb')
-    pos_def_ast  = get_position_defense_factor(conn, opponent, position, 'ast')
-    pos_def_3pm  = get_position_defense_factor(conn, opponent, position, 'fg3m')
+    pos_def_pts  = get_position_defense_factor(conn, opponent, position, 'points')
+    pos_def_reb  = get_position_defense_factor(conn, opponent, position, 'rebounds')
+    pos_def_ast  = get_position_defense_factor(conn, opponent, position, 'assists')
+    pos_def_3pm  = get_position_defense_factor(conn, opponent, position, 'three_made')
 
     # Implied total factor (team scoring context)
     # league avg ~225, each team scores ~112.5
@@ -666,9 +701,9 @@ def project_player(
     # ────────────────────────────────────────────────────────────────────────
     # POINTS
     # ────────────────────────────────────────────────────────────────────────
-    base_pts   = weighted_base(logs, pts_season, 'pts')
-    l5_pts     = rolling_avg(logs, 'pts', 5)
-    l10_pts    = rolling_avg(logs, 'pts', 10)
+    base_pts   = weighted_base(logs, pts_season, 'points')
+    l5_pts     = rolling_avg(logs, 'points', 5)
+    l10_pts    = rolling_avg(logs, 'points', 10)
 
     proj_pts   = (base_pts
                   * pos_def_pts
@@ -714,9 +749,9 @@ def project_player(
     # ────────────────────────────────────────────────────────────────────────
     # REBOUNDS
     # ────────────────────────────────────────────────────────────────────────
-    base_reb = weighted_base(logs, reb_season, 'reb')
-    l5_reb   = rolling_avg(logs, 'reb', 5)
-    l10_reb  = rolling_avg(logs, 'reb', 10)
+    base_reb = weighted_base(logs, reb_season, 'rebounds')
+    l5_reb   = rolling_avg(logs, 'rebounds', 5)
+    l10_reb  = rolling_avg(logs, 'rebounds', 10)
 
     # Big man bonus
     big_bonus = 1.08 if archetype == TRUE_BIG else 1.00
@@ -758,9 +793,9 @@ def project_player(
     # ────────────────────────────────────────────────────────────────────────
     # ASSISTS
     # ────────────────────────────────────────────────────────────────────────
-    base_ast = weighted_base(logs, ast_season, 'ast')
-    l5_ast   = rolling_avg(logs, 'ast', 5)
-    l10_ast  = rolling_avg(logs, 'ast', 10)
+    base_ast = weighted_base(logs, ast_season, 'assists')
+    l5_ast   = rolling_avg(logs, 'assists', 5)
+    l10_ast  = rolling_avg(logs, 'assists', 10)
 
     # Playmaker bonus
     pg_bonus = 1.08 if archetype == TRUE_PLAYMAKER else 1.00
@@ -801,8 +836,8 @@ def project_player(
     # THREES (fg3m) — special L5 weighting
     # ────────────────────────────────────────────────────────────────────────
     base_3pm = weighted_base_threes(logs, fg3m_season)
-    l5_3pm   = rolling_avg(logs, 'fg3m', 5)
-    l10_3pm  = rolling_avg(logs, 'fg3m', 10)
+    l5_3pm   = rolling_avg(logs, 'three_made', 5)
+    l10_3pm  = rolling_avg(logs, 'three_made', 10)
 
     # 3-and-D archetype bonus
     threes_bonus = 1.10 if archetype == THREE_AND_D else 1.00
@@ -929,25 +964,29 @@ def project_team_props(
     total_base   = implied_total if implied_total > 0 else LEAGUE_AVG['game_total']
 
     # Position defense aggregates per team
+    # Compute a single composite factor = avg pts_allowed / league_avg pts
+    lg_pts = LEAGUE_AVG.get('pts_pg', 15.0)
     try:
         with conn.cursor() as cur:
             cur.execute(
-                """SELECT AVG(allowed_vs_league_avg)
+                """SELECT AVG(pts_allowed)
                    FROM position_defense_ratings
-                   WHERE team_abbr = %s AND sport = 'NBA'""",
-                (home_team,)
+                   WHERE team_name ILIKE %s AND sport = 'NBA'""",
+                (f'%{home_team}%',)
             )
             row = cur.fetchone()
-            home_def_f = clamp(float(row[0]) if row and row[0] else 1.0, 0.85, 1.15)
+            raw_home = float(row[0]) if row and row[0] else None
+            home_def_f = clamp(raw_home / lg_pts, 0.85, 1.15) if raw_home else 1.0
 
             cur.execute(
-                """SELECT AVG(allowed_vs_league_avg)
+                """SELECT AVG(pts_allowed)
                    FROM position_defense_ratings
-                   WHERE team_abbr = %s AND sport = 'NBA'""",
-                (away_team,)
+                   WHERE team_name ILIKE %s AND sport = 'NBA'""",
+                (f'%{away_team}%',)
             )
             row = cur.fetchone()
-            away_def_f = clamp(float(row[0]) if row and row[0] else 1.0, 0.85, 1.15)
+            raw_away = float(row[0]) if row and row[0] else None
+            away_def_f = clamp(raw_away / lg_pts, 0.85, 1.15) if raw_away else 1.0
     except Exception:
         home_def_f = 1.0
         away_def_f = 1.0
@@ -1101,62 +1140,111 @@ def get_players_for_team(conn, team_abbr: str, game_date: str) -> list[dict]:
 # Write projections to DB
 # ---------------------------------------------------------------------------
 
+# Maps prop_type to the correct edge column in chalk_projections
+EDGE_COL: dict[str, str] = {
+    'points':   'edge_pts',
+    'rebounds': 'edge_reb',
+    'assists':  'edge_ast',
+    'threes':   'edge_threes',
+    'pra':      'edge_pra',
+    'pr':       'edge_pts_reb',
+    'pa':       'edge_pts_ast',
+    'ar':       'edge_ast_reb',
+}
+
+
+def get_market_line(conn, player_name: str, prop_type: str, game_date: str) -> float | None:
+    """
+    Read the market prop line from player_props_history.
+    Populated by oddsService.js before the model runs.
+    Returns None if no line posted yet — prop is skipped.
+    """
+    prop_map = {
+        'points':   'player_points',
+        'rebounds': 'player_rebounds',
+        'assists':  'player_assists',
+        'threes':   'player_threes',
+        'pra':      'player_points_rebounds_assists',
+        'pr':       'player_points_rebounds',
+        'pa':       'player_points_assists',
+        'ar':       'player_assists_rebounds',
+    }
+    pph_type = prop_map.get(prop_type, prop_type)
+
+    # Match on last name since name formats can differ
+    last_name = player_name.split()[-1] if player_name else ''
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT prop_line
+                   FROM player_props_history
+                   WHERE player_name ILIKE %s
+                     AND prop_type = %s
+                     AND game_date = %s
+                   ORDER BY created_at DESC LIMIT 1""",
+                (f'%{last_name}%', pph_type, game_date)
+            )
+            row = cur.fetchone()
+            if row and row[0] is not None:
+                return float(row[0])
+    except Exception:
+        pass
+    return None
+
+
 def upsert_player_projections(conn, proj: PlayerProjection) -> int:
     """Writes all props for a player. Returns count written."""
     written = 0
     with conn.cursor() as cur:
         for prop_type, data in proj.props.items():
-            raw_proj  = data['proj']
-            raw_conf  = data['conf']
-            factors   = data['factors']
+            raw_proj = data['proj']
+            raw_conf = data['conf']
+            factors  = data['factors']
 
             if raw_proj <= 0:
                 continue
 
-            # Fetch current line from DB (set by odds ingestion)
-            try:
-                cur.execute(
-                    """SELECT line FROM chalk_projections
-                       WHERE player_id = %s AND prop_type = %s AND game_date = %s
-                         AND sport = 'NBA'
-                       LIMIT 1""",
-                    (proj.player_id, prop_type, proj.game_date)
-                )
-                row = cur.fetchone()
-                line = float(row[0]) if row and row[0] is not None else raw_proj - 0.5
-            except Exception:
-                line = raw_proj - 0.5
+            # Read market line from player_props_history (Bug 7)
+            line = get_market_line(conn, proj.player_name, prop_type, proj.game_date)
+            if line is None:
+                # No market line posted yet — skip this prop
+                continue
 
-            edge = abs(raw_proj - line)
+            edge_val  = round(raw_proj - line, 2)
             threshold = MIN_EDGE.get(prop_type, 0.5)
+            if abs(edge_val) < threshold:
+                continue  # edge too small — not a pick
 
-            cur.execute(
-                """INSERT INTO chalk_projections
-                     (player_id, player_name, team, opponent, is_home, position,
-                      sport, game_date, prop_type,
-                      projection, line, edge, confidence, factors_json,
-                      created_at, updated_at)
-                   VALUES
-                     (%s, %s, %s, %s, %s, %s,
-                      'NBA', %s, %s,
-                      %s, %s, %s, %s, %s,
-                      NOW(), NOW())
-                   ON CONFLICT (player_id, prop_type, game_date, sport)
-                   DO UPDATE SET
-                     projection   = EXCLUDED.projection,
-                     line         = EXCLUDED.line,
-                     edge         = EXCLUDED.edge,
-                     confidence   = EXCLUDED.confidence,
-                     factors_json = EXCLUDED.factors_json,
-                     updated_at   = NOW()""",
-                (
-                    proj.player_id, proj.player_name, proj.team, proj.opponent,
-                    proj.is_home, proj.position,
-                    proj.game_date, prop_type,
-                    round(raw_proj, 2), round(line, 2), round(edge, 2),
-                    round(raw_conf, 1), json.dumps({**factors, 'meets_threshold': edge >= threshold}),
-                )
-            )
+            edge_col  = EDGE_COL.get(prop_type, 'edge_pts')
+            home_away = 'home' if proj.is_home else 'away'
+
+            sql = f"""
+                INSERT INTO chalk_projections
+                  (player_id, player_name, team, opponent, home_away, position,
+                   sport, game_date, prop_type,
+                   proj_value, {edge_col}, confidence_score, factors_json,
+                   created_at, updated_at)
+                VALUES
+                  (%s, %s, %s, %s, %s, %s,
+                   'NBA', %s, %s,
+                   %s, %s, %s, %s,
+                   NOW(), NOW())
+                ON CONFLICT (player_id, game_date, prop_type)
+                DO UPDATE SET
+                  proj_value       = EXCLUDED.proj_value,
+                  {edge_col}       = EXCLUDED.{edge_col},
+                  confidence_score = EXCLUDED.confidence_score,
+                  factors_json     = EXCLUDED.factors_json,
+                  updated_at       = NOW()
+            """
+            cur.execute(sql, (
+                proj.player_id, proj.player_name, proj.team, proj.opponent,
+                home_away, proj.position,
+                proj.game_date, prop_type,
+                round(raw_proj, 2), round(edge_val, 2),
+                round(raw_conf, 1), json.dumps({**factors, 'meets_threshold': abs(edge_val) >= threshold}),
+            ))
             written += 1
     conn.commit()
     return written
@@ -1175,18 +1263,18 @@ def upsert_team_props(conn, home_team: str, away_team: str, game_date: str, team
                     """INSERT INTO team_projections
                          (team_name, opponent, sport, game_date, prop_type,
                           proj_total, over_probability, under_probability,
-                          confidence, factors_json, created_at, updated_at)
+                          confidence_score, factors_json, created_at, updated_at)
                        VALUES
                          (%s, %s, 'NBA', %s, %s,
                           %s, %s, %s,
                           %s, %s,
                           NOW(), NOW())
-                       ON CONFLICT (team_name, game_date, sport, prop_type)
+                       ON CONFLICT (team_name, game_date, prop_type)
                        DO UPDATE SET
                          proj_total        = EXCLUDED.proj_total,
                          over_probability  = EXCLUDED.over_probability,
                          under_probability = EXCLUDED.under_probability,
-                         confidence        = EXCLUDED.confidence,
+                         confidence_score  = EXCLUDED.confidence_score,
                          factors_json      = EXCLUDED.factors_json,
                          updated_at        = NOW()""",
                     (
