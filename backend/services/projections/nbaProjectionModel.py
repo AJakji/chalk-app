@@ -49,7 +49,9 @@ log = logging.getLogger(__name__)
 
 DATABASE_URL        = os.getenv('DATABASE_URL', '')
 BALLDONTLIE_API_KEY = os.getenv('BALLDONTLIE_API_KEY', '')
+ODDS_API_KEY        = os.getenv('ODDS_API_KEY', '')
 BDL_BASE            = 'https://api.balldontlie.io/v1'
+ODDS_BASE           = 'https://api.the-odds-api.com/v4'
 MODEL_VERSION       = 'v1.2'
 CURRENT_SEASON      = '2025-26'
 
@@ -96,6 +98,9 @@ ABBR_TO_FULL_NAME = {
     'SAS': 'San Antonio Spurs',     'TOR': 'Toronto Raptors',
     'UTA': 'Utah Jazz',             'WAS': 'Washington Wizards',
 }
+
+# Reverse lookup: full name → abbreviation (for Odds API matching)
+FULL_NAME_TO_ABBR = {v.lower(): k for k, v in ABBR_TO_FULL_NAME.items()}
 
 
 def get_db():
@@ -156,6 +161,114 @@ def fetch_tonight_schedule(game_date: date) -> dict:
             'opponent_full': home_full,
         }
     return schedule
+
+
+# ── Live odds fetch ────────────────────────────────────────────────────────────
+
+def fetch_nba_odds() -> dict:
+    """
+    Fetch tonight's NBA odds from The Odds API.
+    Returns a dict keyed by (home_abbr, away_abbr) tuples:
+      { ('BOS', 'MIA'): { 'total': 218.5, 'home_spread': -5.5, 'home_ml': -220 } }
+
+    Falls back to empty dict on any error so the model runs without odds.
+    """
+    if not ODDS_API_KEY:
+        log.warning('  ODDS_API_KEY not set — game_total_factor and game_script will be 1.0')
+        return {}
+
+    url = (f'{ODDS_BASE}/sports/basketball_nba/odds'
+           f'?apiKey={ODDS_API_KEY}&regions=us&markets=totals,spreads,h2h&oddsFormat=american')
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'ChalkApp/3.2'})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            games = json.loads(resp.read())
+    except Exception as e:
+        log.warning(f'  NBA odds fetch failed: {e}')
+        return {}
+
+    odds_map = {}
+    for game in games:
+        home_full = game.get('home_team', '').lower()
+        away_full = game.get('away_team', '').lower()
+        home_abbr = FULL_NAME_TO_ABBR.get(home_full)
+        away_abbr = FULL_NAME_TO_ABBR.get(away_full)
+        if not home_abbr or not away_abbr:
+            continue
+
+        entry = {'total': None, 'home_spread': None, 'home_ml': None}
+
+        for bookmaker in game.get('bookmakers', []):
+            for market in bookmaker.get('markets', []):
+                key = market.get('key')
+                outcomes = market.get('outcomes', [])
+                if key == 'totals' and entry['total'] is None:
+                    for o in outcomes:
+                        if o.get('name') == 'Over':
+                            entry['total'] = float(o.get('point', 0))
+                            break
+                elif key == 'spreads' and entry['home_spread'] is None:
+                    for o in outcomes:
+                        if o.get('name', '').lower() in (home_full, home_abbr.lower()):
+                            entry['home_spread'] = float(o.get('point', 0))
+                            break
+                elif key == 'h2h' and entry['home_ml'] is None:
+                    for o in outcomes:
+                        if o.get('name', '').lower() in (home_full, home_abbr.lower()):
+                            entry['home_ml'] = float(o.get('price', 0))
+                            break
+            if entry['total'] and entry['home_spread']:
+                break  # got what we need from first bookmaker
+
+        odds_map[(home_abbr, away_abbr)] = entry
+
+    log.info(f'  NBA odds loaded for {len(odds_map)} games')
+    return odds_map
+
+
+def get_out_players(conn, team_abbr: str, game_date: date) -> list:
+    """
+    Return player names confirmed OUT tonight for this team (from nightly_roster).
+    Returns a list of lowercased player names.
+    """
+    full_name = ABBR_TO_FULL_NAME.get(team_abbr, team_abbr)
+    with conn.cursor() as cur:
+        cur.execute(
+            """SELECT player_name FROM nightly_roster
+               WHERE (team = %s OR team ILIKE %s)
+                 AND sport = 'NBA'
+                 AND game_date = %s
+                 AND is_confirmed_playing = false""",
+            (full_name, f'%{team_abbr}%', game_date)
+        )
+        return [row[0].lower() for row in cur.fetchall()]
+
+
+def load_league_averages(conn) -> None:
+    """
+    Read the latest league averages from the DB and update LEAGUE_AVG in-place.
+    Falls back to hardcoded values if table is empty or query fails.
+    """
+    global LEAGUE_AVG
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT DISTINCT ON (stat_name) stat_name, stat_value
+                FROM league_averages
+                WHERE sport = 'NBA'
+                ORDER BY stat_name, computed_date DESC
+            """)
+            rows = cur.fetchall()
+        if rows:
+            for row in rows:
+                name = row['stat_name']
+                if name in LEAGUE_AVG:
+                    LEAGUE_AVG[name] = float(row['stat_value'])
+            log.info(f'  League averages loaded from DB ({len(rows)} stats)')
+        else:
+            log.info('  No DB league averages found — using hardcoded constants')
+    except Exception as e:
+        log.warning(f'  Could not load league averages from DB: {e}')
 
 
 # ── Rolling average calculations ──────────────────────────────────────────────
@@ -531,6 +644,7 @@ def project_player(
     game_date:     date,
     spread:        Optional[float] = None,
     implied_total: Optional[float] = None,
+    usage_boost:   float          = 0.0,  # added when a star teammate is OUT
 ) -> Optional[dict]:
 
     logs = get_player_logs(conn, player_id, limit=60)
@@ -561,7 +675,8 @@ def project_player(
     ts_f = max(0.85, min(1.20, ts_f))
 
     # Clamp usage_f to [0.70, 1.40] — bench floor to primary scorer ceiling
-    usage_f = max(0.70, min(1.40, usage_f))
+    # usage_boost is added when a star teammate is confirmed OUT tonight
+    usage_f = max(0.70, min(1.45, usage_f + usage_boost))
 
     fta_f = 1.04 if base_fta > 5 else 1.0
 
@@ -1027,6 +1142,9 @@ def main():
 
     conn = get_db()
 
+    # ── Step 0: Load rolling league averages from DB ───────────────────────────
+    load_league_averages(conn)
+
     # ── Step 1: Fetch tonight's schedule ──────────────────────────────────────
     log.info('\n▶ TONIGHT\'S SCHEDULE')
     tonight_games = fetch_tonight_schedule(game_date)
@@ -1039,6 +1157,35 @@ def main():
     playing_teams = set(tonight_games.keys())
     for abbr, info in sorted(tonight_games.items()):
         log.info(f'  {abbr} ({info["home_away"]}) vs {info["opponent"]}')
+
+    # ── Step 1b: Fetch live NBA odds (total + spread per game) ─────────────────
+    log.info('\n▶ LIVE ODDS')
+    nba_odds = fetch_nba_odds()
+
+    # Build per-team odds lookup: team_abbr → { total, spread (from team's POV) }
+    team_odds: dict = {}
+    for (home_abbr, away_abbr), entry in nba_odds.items():
+        total       = entry.get('total')
+        home_spread = entry.get('home_spread')
+        away_spread = (-home_spread) if home_spread is not None else None
+        team_odds[home_abbr] = {'total': total, 'spread': home_spread}
+        team_odds[away_abbr] = {'total': total, 'spread': away_spread}
+
+    # ── Step 1c: OUT players + usage redistribution ────────────────────────────
+    log.info('\n▶ INJURY / USAGE REDISTRIBUTION')
+    out_by_team: dict[str, set] = {}
+    for abbr in playing_teams:
+        out_names = set(get_out_players(conn, abbr, game_date))
+        if out_names:
+            log.info(f'  {abbr}: {len(out_names)} player(s) OUT — redistributing usage')
+            out_by_team[abbr] = out_names
+        else:
+            out_by_team[abbr] = set()
+
+    # Pre-compute usage boost per active player on teams with OUT players
+    # Each OUT player's ~22% usage share is distributed (×0.85 efficiency) to active teammates
+    LEAGUE_USAGE_RATE = 0.22   # rough per-player usage fraction
+    usage_boost_map: dict[str, float] = {}   # player_name.lower() → boost amount
 
     # ── Step 2: Player projections (only players on teams playing tonight) ─────
     log.info('\n▶ PLAYER PROJECTIONS')
@@ -1057,6 +1204,20 @@ def main():
     players_tonight = [p for p in all_recent if p['team'] in playing_teams]
     log.info(f'  {len(players_tonight)} players on tonight\'s teams (from {len(all_recent)} recently active)')
 
+    # Compute usage boosts: for each team with OUT players, distribute usage to active teammates
+    for abbr, out_names in out_by_team.items():
+        if not out_names:
+            continue
+        active = [p for p in players_tonight
+                  if p['team'] == abbr and p['player_name'].lower() not in out_names]
+        if not active:
+            continue
+        # Each OUT player carried ~22% usage; 85% of that transfers to active players
+        total_boost = len(out_names) * LEAGUE_USAGE_RATE * 0.85
+        per_player_boost = total_boost / len(active)
+        for p in active:
+            usage_boost_map[p['player_name'].lower()] = round(per_player_boost, 4)
+
     projected = 0
     skipped   = 0
     for player in players_tonight:
@@ -1067,6 +1228,18 @@ def main():
         opponent  = game_info['opponent']
         location  = game_info['home_away']
 
+        # Skip confirmed OUT players (no projection needed)
+        if name.lower() in out_by_team.get(team, set()):
+            log.info(f'  SKIP {name} — confirmed OUT')
+            skipped += 1
+            continue
+
+        # Get live odds for this game
+        t_odds        = team_odds.get(team, {})
+        implied_total = t_odds.get('total')
+        spread        = t_odds.get('spread')
+        u_boost       = usage_boost_map.get(name.lower(), 0.0)
+
         proj = project_player(
             conn=conn,
             player_id=pid,
@@ -1075,6 +1248,9 @@ def main():
             opponent=opponent,
             location=location,
             game_date=game_date,
+            spread=spread,
+            implied_total=implied_total,
+            usage_boost=u_boost,
         )
 
         if proj:
@@ -1105,6 +1281,9 @@ def main():
         if game_key in seen_games:
             continue
         seen_games.add(game_key)
+
+        # Get live odds for this game
+        t_odds = team_odds.get(abbr, {})
 
         # Project home team
         proj = project_team(

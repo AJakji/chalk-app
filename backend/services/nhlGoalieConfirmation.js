@@ -273,6 +273,44 @@ async function runGoalieConfirmation(gameDate) {
 
     let recalcResult = null;
 
+    // ── Write confirmed goalie status to nightly_roster ──────────────────────
+    // is_confirmed_starter = true  → starting goalie
+    // is_confirmed_starter = false → backup (not starting tonight)
+    if (goalies.homeConfirmed && goalies.homeGoalieName) {
+      // Mark confirmed home starter
+      await db.query(
+        `UPDATE nightly_roster
+         SET is_confirmed_starter = true, confirmed_at = NOW()
+         WHERE player_name ILIKE $1 AND team = $2 AND sport = 'NHL' AND game_date = $3`,
+        [goalies.homeGoalieName, game.homeTeam, today]
+      );
+      // Mark all other home goalies as not starting
+      await db.query(
+        `UPDATE nightly_roster
+         SET is_confirmed_starter = false
+         WHERE team = $1 AND sport = 'NHL' AND game_date = $2
+           AND position = 'G' AND player_name NOT ILIKE $3`,
+        [game.homeTeam, today, goalies.homeGoalieName]
+      );
+    }
+    if (goalies.awayConfirmed && goalies.awayGoalieName) {
+      // Mark confirmed away starter
+      await db.query(
+        `UPDATE nightly_roster
+         SET is_confirmed_starter = true, confirmed_at = NOW()
+         WHERE player_name ILIKE $1 AND team = $2 AND sport = 'NHL' AND game_date = $3`,
+        [goalies.awayGoalieName, game.awayTeam, today]
+      );
+      // Mark all other away goalies as not starting
+      await db.query(
+        `UPDATE nightly_roster
+         SET is_confirmed_starter = false
+         WHERE team = $1 AND sport = 'NHL' AND game_date = $2
+           AND position = 'G' AND player_name NOT ILIKE $3`,
+        [game.awayTeam, today, goalies.awayGoalieName]
+      );
+    }
+
     if (goalies.homeIsBackup) {
       recalcResult = await recalculateForBackup(
         game.gameId, game.homeTeam, game.awayTeam, 'home', today

@@ -1279,6 +1279,112 @@ async function buildNightlyRoster(gameDate) {
   const outCount          = Object.values(injuryMap).filter(i => i.status.includes('out')).length;
   const questionableCount = Object.values(injuryMap).filter(i => i.status.includes('questionable') || i.status.includes('gtd')).length;
   console.log(`  ✅ nightly_roster: ${inserted} players inserted (${outCount} OUT, ${questionableCount} questionable)`);
+
+  // Build NHL roster for tonight's games
+  await buildNHLRoster(today);
+}
+
+/**
+ * Populate nightly_roster for NHL:
+ *  1. Get tonight's games from the NHL schedule API
+ *  2. For each playing team, fetch current active roster
+ *  3. Insert all players as is_confirmed_playing = true (active roster = healthy)
+ *     Goalies are inserted with is_confirmed_starter = null (set by runGoalieConfirmation)
+ *
+ * Note: IR players don't appear on the active roster endpoint, so filtering is automatic.
+ * Goalie starter status is resolved separately at puck-drop minus 90 min.
+ */
+async function buildNHLRoster(gameDate) {
+  const today = gameDate || new Date().toISOString().split('T')[0];
+  console.log(`\n🏒 Building NHL nightly_roster for ${today}…`);
+
+  let schedData = null;
+  try {
+    const res = await fetch(`https://api-web.nhle.com/v1/schedule/${today}`, {
+      signal: AbortSignal.timeout(10000),
+    });
+    schedData = await res.json();
+  } catch (e) {
+    console.log(`  [WARN] NHL schedule fetch failed: ${e.message}`);
+    return;
+  }
+
+  const games = schedData?.gameWeek?.[0]?.games || [];
+  if (games.length === 0) {
+    console.log('  No NHL games tonight.');
+    return;
+  }
+
+  // Collect unique team abbreviations for tonight's games
+  const teams = new Set();
+  for (const g of games) {
+    if (g.homeTeam?.abbrev) teams.add(g.homeTeam.abbrev);
+    if (g.awayTeam?.abbrev) teams.add(g.awayTeam.abbrev);
+  }
+  console.log(`  ${games.length} NHL games — ${teams.size} teams`);
+
+  // Delete today's existing NHL roster entries before rebuild
+  await db.query(
+    `DELETE FROM nightly_roster WHERE game_date = $1 AND sport = 'NHL'`,
+    [today]
+  );
+
+  let totalInserted = 0;
+
+  for (const teamAbbrev of teams) {
+    let rosterData = null;
+    try {
+      const res = await fetch(`https://api-web.nhle.com/v1/roster/${teamAbbrev}/current`, {
+        signal: AbortSignal.timeout(8000),
+      });
+      rosterData = await res.json();
+    } catch (e) {
+      console.log(`  [WARN] Roster fetch failed for ${teamAbbrev}: ${e.message}`);
+      continue;
+    }
+
+    const forwards   = rosterData?.forwards   || [];
+    const defensemen = rosterData?.defensemen || [];
+    const goalies    = rosterData?.goalies    || [];
+
+    const allPlayers = [
+      ...forwards.map(p => ({ ...p, posGroup: 'F' })),
+      ...defensemen.map(p => ({ ...p, posGroup: 'D' })),
+      ...goalies.map(p => ({ ...p, posGroup: 'G' })),
+    ];
+
+    for (const player of allPlayers) {
+      const pid      = player.id;
+      const fullName = `${player.firstName?.default || ''} ${player.lastName?.default || ''}`.trim();
+      const position = player.positionCode || player.posGroup;
+      const isGoalie = player.posGroup === 'G';
+
+      try {
+        await db.query(
+          `INSERT INTO nightly_roster
+             (player_id, player_name, team, sport, game_date, position,
+              is_confirmed_playing, is_confirmed_starter, injury_status)
+           VALUES ($1, $2, $3, 'NHL', $4, $5, $6, $7, NULL)
+           ON CONFLICT (player_id, game_date, sport) DO UPDATE SET
+             is_confirmed_playing  = EXCLUDED.is_confirmed_playing,
+             position              = EXCLUDED.position,
+             is_confirmed_starter  = EXCLUDED.is_confirmed_starter`,
+          [
+            pid,
+            fullName,
+            teamAbbrev,
+            today,
+            position,
+            true,           // active roster = confirmed playing
+            isGoalie ? null : null,  // goalie starter status set later by runGoalieConfirmation
+          ]
+        );
+        totalInserted++;
+      } catch { /* skip individual insert errors */ }
+    }
+  }
+
+  console.log(`  ✅ NHL nightly_roster: ${totalInserted} players inserted across ${teams.size} teams`);
 }
 
 // ── Teammate injury cascading for assist props ──────────────────────────────────

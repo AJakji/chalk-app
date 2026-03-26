@@ -2331,16 +2331,49 @@ def _extract_sps_from_boxscore(boxscore):
     return home_sp, away_sp
 
 
+def get_confirmed_lineup_from_cache(conn, game_pk: int, side: str, game_date) -> list:
+    """
+    Tier 0: Query mlb_lineups table populated by mlbLineupFetcher.py (runs at noon ET).
+    Returns a lineup list identical in format to Tier 1 if confirmed, else empty list.
+    """
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """SELECT player_name, player_id, batting_order
+                   FROM mlb_lineups
+                   WHERE game_pk = %s AND side = %s AND game_date = %s
+                   ORDER BY batting_order""",
+                (game_pk, side, game_date)
+            )
+            rows = cur.fetchall()
+        if len(rows) >= 9:
+            return [{'id':            r['player_id'] or 0,
+                     'name':          r['player_name'],
+                     'batting_order': r['batting_order'],
+                     'position':      'DH'} for r in rows]
+    except Exception as exc:
+        log.warning(f'  mlb_lineups cache lookup failed: {exc}')
+    return []
+
+
 def get_batting_lineup_with_fallback(
     conn, game_pk, home_team, away_team, home_team_id, away_team_id, game_date
 ):
     """
+    Tier 0: mlb_lineups cache (populated by mlbLineupFetcher.py at noon ET)
     Tier 1: statsapi.boxscore_data (official if >= 9 batters each side)
     Tier 2: yesterday's player_game_logs
     Tier 3: MLB active roster API (non-pitchers, first 9)
     Returns: (home_lineup, away_lineup, lineup_confirmed, home_sp, away_sp)
     """
     home_sp = away_sp = None
+
+    # Tier 0 — confirmed lineup cache (populated by noon run)
+    home_t0 = get_confirmed_lineup_from_cache(conn, game_pk, 'home', game_date)
+    away_t0 = get_confirmed_lineup_from_cache(conn, game_pk, 'away', game_date)
+    if len(home_t0) >= 9 and len(away_t0) >= 9:
+        log.info(f'  Lineup Tier 0 (cache): {len(home_t0)} home / {len(away_t0)} away')
+        return home_t0, away_t0, True, home_sp, away_sp
 
     # Tier 1
     try:

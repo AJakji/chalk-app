@@ -315,6 +315,10 @@ def fetch_player_game_log(player_id: int, season: str,
                 'true_shooting_pct': None,
             })
         else:
+            # PP TOI per game: powerPlayToi is in seconds in the NHL game log → convert to minutes
+            pp_toi_raw = safe_float(g.get('powerPlayToi'))
+            pp_toi_min = round(pp_toi_raw / 60.0, 4) if (pp_toi_raw is not None and pp_toi_raw > 0) else None
+
             rows.append({**base,
                 'minutes':    parse_toi(g.get('toi')),          # toi field (not timeOnIce)
                 # Skater score columns
@@ -329,12 +333,13 @@ def fetch_player_game_log(player_id: int, season: str,
                 'fg_made':    safe_float(g.get('shots')),          # SOG → fg_made (Fix 1)
                 'three_att':  safe_float(g.get('powerPlayGoals')), # PP goals → three_att
                 'plus_minus': safe_float(g.get('plusMinus')),
-                # NULL columns (steals/blocks now cleared; fg_att = PP TOI injected later)
+                # PP TOI per game (seconds → minutes). Fallback to season summary if null.
+                'fg_att':     pp_toi_min,
+                # NULL columns
                 'rebounds':   None,
                 'steals':     None,
                 'blocks':     None,
                 'fouls':      None,
-                'fg_att':     None,   # PP TOI per game — injected from season summary
                 'fg_pct':     None,
                 'three_pct':  None,
                 'ft_pct':     None,
@@ -506,11 +511,13 @@ def collect_season(conn, season: str,
             if not game_rows:
                 continue
 
-            # Inject PP TOI into skater rows from season summary
+            # Inject season-average PP TOI only for rows where per-game data was unavailable
+            # (powerPlayToi absent from older game log entries or pre-season records)
             if not is_goalie and pid in pp_toi_map:
                 pp_toi_val = pp_toi_map[pid]
                 for row in game_rows:
-                    row['fg_att'] = pp_toi_val
+                    if row.get('fg_att') is None:
+                        row['fg_att'] = pp_toi_val
 
             new_count = 0
             for row in game_rows:

@@ -516,3 +516,33 @@ CREATE TABLE IF NOT EXISTS player_statcast (
   updated_at          TIMESTAMPTZ DEFAULT NOW(),
   PRIMARY KEY (player_id, season)
 );
+
+-- v3.2: nightly_roster extended for NHL goalie confirmation
+ALTER TABLE nightly_roster ADD COLUMN IF NOT EXISTS position            TEXT;
+ALTER TABLE nightly_roster ADD COLUMN IF NOT EXISTS is_confirmed_starter BOOLEAN DEFAULT NULL;
+ALTER TABLE nightly_roster ADD COLUMN IF NOT EXISTS confirmed_at         TIMESTAMPTZ;
+
+-- v3.2: confirmed MLB batting orders (populated by mlbLineupFetcher.py at noon ET)
+-- Tier 0 source for get_teammates_obp / get_teammates_rbi_rate
+CREATE TABLE IF NOT EXISTS mlb_lineups (
+  game_date     DATE         NOT NULL,
+  game_pk       INTEGER      NOT NULL,
+  team_name     VARCHAR(100) NOT NULL,
+  player_name   VARCHAR(100) NOT NULL,
+  player_id     INTEGER,
+  batting_order INTEGER      NOT NULL,
+  side          VARCHAR(4)   NOT NULL,  -- 'home' or 'away'
+  PRIMARY KEY (game_date, game_pk, player_name)
+);
+CREATE INDEX IF NOT EXISTS idx_mlb_lineups_date_team ON mlb_lineups (game_date, team_name);
+
+-- v3.2: rolling league averages (recomputed weekly Monday 3 AM)
+-- Each model reads from this table at startup; falls back to hardcoded if empty.
+CREATE TABLE IF NOT EXISTS league_averages (
+  sport         VARCHAR(10)   NOT NULL,
+  stat_name     VARCHAR(50)   NOT NULL,
+  stat_value    DECIMAL(10,4) NOT NULL,
+  computed_date DATE          NOT NULL,
+  PRIMARY KEY (sport, stat_name, computed_date)
+);
+CREATE INDEX IF NOT EXISTS idx_la_sport_stat ON league_averages (sport, stat_name, computed_date DESC);
