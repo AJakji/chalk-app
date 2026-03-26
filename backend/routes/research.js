@@ -227,6 +227,9 @@ If the section heading exists in the tool result, the data is there — use it.
 
 If data is genuinely absent from all tool results, say: "I don't have [specific data] — here's what I do have: [best available]."
 
+SMALL SAMPLE RULE:
+If a split has fewer than 3 games, still report the available data. Never refuse to answer because of small sample size. Say "Small sample (1 game): 28 pts / 6 reb / 8 ast" then offer the larger sample as context. Always give a number even if the sample is limited.
+
 RESPONSE LENGTH — match to the question:
 1. Single stat / line lookup: 1-2 sentences max.
 2. Recent form or trend: 2-3 sentences with key numbers.
@@ -431,14 +434,14 @@ function validateResponse(responseText, toolCtx) {
 
 // ── Tool use loop ─────────────────────────────────────────────────────────────
 
-async function runWithTools(messages) {
+async function runWithTools(messages, maxTokens = 300) {
   const MAX_ITERATIONS = 5;
   const collectedToolResults = []; // accumulate all tool result strings for validation
 
   for (let i = 0; i < MAX_ITERATIONS; i++) {
     const response = await client.messages.create({
       model:      'claude-sonnet-4-6',
-      max_tokens: 3500,
+      max_tokens: maxTokens,
       system:     SYSTEM_PROMPT,
       tools:      TOOLS,
       messages,
@@ -549,8 +552,11 @@ router.post('/chat', async (req, res) => {
     { role: 'user', content: userContent },
   ];
 
+  const isDeepAnalysis = /break.?down|full analysis|walk me through|everything about|deep dive|tell me everything/i.test(msg);
+  const maxTokens = isDeepAnalysis ? 600 : 300;
+
   try {
-    const raw = await runWithTools(messages);
+    const raw = await runWithTools(messages, maxTokens);
 
     if (!raw) {
       return res.status(500).json({ error: "Chalky is studying the numbers. Try again in a moment." });
