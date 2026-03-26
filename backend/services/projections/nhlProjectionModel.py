@@ -1558,6 +1558,11 @@ def upsert_player_projection(conn, player_id: int, player_name: str,
     }
     proj_col = col_map.get(prop_type, 'proj_points')
 
+    # Skip zero projections for goals/SOG — indicates no data, not a pick
+    # For assists/points, proj=0 is a valid "under 0.5" signal — allow through
+    if proj_value == 0 and prop_type in ('goals', 'shots_on_goal', 'toi', 'saves'):
+        return
+
     # Gate on market line from player_props_history — skip if no line posted
     line = get_market_line(conn, player_name, prop_type, game_date)
     if line is None:
@@ -1568,6 +1573,9 @@ def upsert_player_projection(conn, player_id: int, player_name: str,
     threshold = NHL_MIN_EDGE.get(prop_type, 0.3)
     if abs(edge) < threshold:
         return  # Edge too small — not a pick
+
+    # Store line and edge in factors for UI display and audit
+    stored_factors = {**factors, 'market_line': line, 'edge': edge}
 
     try:
         with conn.cursor() as cur:
@@ -1587,7 +1595,7 @@ def upsert_player_projection(conn, player_id: int, player_name: str,
                        updated_at      = NOW()""",
                 (player_id, player_name, team, opponent, game_date,
                  prop_type, proj_value, proj_value,
-                 confidence, json.dumps(factors), MODEL_VERSION)
+                 confidence, json.dumps(stored_factors), MODEL_VERSION)
             )
         conn.commit()
     except Exception as e:
@@ -1646,6 +1654,8 @@ def main():
     parser = argparse.ArgumentParser(description='Chalk NHL Projection Model v2.0')
     parser.add_argument('--date', default=str(date.today()),
                         help='Game date YYYY-MM-DD (default: today)')
+    parser.add_argument('--props-only', action='store_true',
+                        help='Re-run market line gating on existing projections (fast, no recompute)')
     args = parser.parse_args()
     game_date = date.fromisoformat(args.date)
 
@@ -1654,6 +1664,28 @@ def main():
     log.info('═══════════════════════════════════════════════════')
 
     conn = get_db()
+
+    # ── Props-only shortcut ──────────────────────────────────────────────────
+    if args.props_only:
+        log.info('▶ PROPS-ONLY: re-running market line gate on existing projections')
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT player_id, player_name, team, opponent,
+                          prop_type, proj_value, confidence_score, factors_json
+                   FROM chalk_projections
+                   WHERE sport='NHL' AND game_date=%s""",
+                (game_date,)
+            )
+            rows = cur.fetchall()
+        updated = 0
+        for pid, pname, team, opp, ptype, pval, conf, factors in rows:
+            f = factors if isinstance(factors, dict) else {}
+            upsert_player_projection(conn, pid, pname, team, opp, game_date,
+                                     ptype, float(pval or 0), conf or 60, f)
+            updated += 1
+        log.info(f'  Props-only complete — re-checked {updated} projections')
+        conn.close()
+        return
 
     # ── Step 1: Schedule ──────────────────────────────────────────────────────
     log.info('\n▶ STEP 1: Fetching NHL schedule')

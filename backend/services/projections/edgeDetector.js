@@ -62,8 +62,8 @@ const MIN_EDGE_BY_SPORT = {
 
 // Minimum confidence score to include in top-picks list
 const MIN_CONFIDENCE = 62;
-// Max prop picks to generate per day (across all sports combined)
-const MAX_PICKS      = 15;
+// Max prop picks to generate per sport per day
+const MAX_PICKS      = 25;
 
 // Convenience: NBA minimum edge (existing logic uses this constant)
 const MIN_EDGE = MIN_EDGE_BY_SPORT.NBA.default;
@@ -242,13 +242,12 @@ const MLB_MARKET_TO_PROJ = {
 };
 
 // ── NHL prop market maps ───────────────────────────────────────────────────────
+// player_saves and player_goals_against are not offered by Odds API — omitted to prevent 422
+// player_goals on Odds API is a season-remaining goals market (lines 1.5-5.5), not per-game — omitted
 const NHL_PROP_MARKET_MAP = {
-  goals:         'player_goals',
   assists:       'player_assists',
   points:        'player_points',
   shots_on_goal: 'player_shots_on_goal',
-  saves:         'player_saves',
-  goals_against: 'player_goals_against',
 };
 
 const NHL_MARKET_TO_PROJ = {
@@ -556,7 +555,14 @@ function calculateConfidence({
   else if (absEdge >= 3.0) edgeBonus = 22;
   else if (absEdge >= 2.5) edgeBonus = 18;
   else if (absEdge >= 2.0) edgeBonus = 14;
-  else if (absEdge >= 1.5) edgeBonus = 8;
+  else if (absEdge >= 1.5) edgeBonus =  8;
+  // NHL/MLB: markets with small absolute edges need relative scaling
+  // A 0.4 edge on a 0.5 line is 80% — very strong signal
+  else if (sport === 'NHL' && absEdge >= 0.3) edgeBonus = 6;
+  else if (sport === 'NHL' && absEdge >= 0.15) edgeBonus = 3;
+  else if (sport === 'MLB' && absEdge >= 0.8) edgeBonus = 10;
+  else if (sport === 'MLB' && absEdge >= 0.5) edgeBonus = 6;
+  else if (sport === 'MLB' && absEdge >= 0.3) edgeBonus = 3;
   confidence += edgeBonus;
   breakdown.edge_bonus = edgeBonus;
 
@@ -632,7 +638,7 @@ async function storeEdge({
        dk_odds, fd_odds, mgm_odds, bet365_odds,
        chalk_projection, chalk_edge, confidence, model_version
      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-     ON CONFLICT (player_id, game_date, prop_type) DO UPDATE SET
+     ON CONFLICT (player_name, sport, prop_type, game_date) DO UPDATE SET
        prop_line        = EXCLUDED.prop_line,
        dk_odds          = EXCLUDED.dk_odds,
        fd_odds          = EXCLUDED.fd_odds,
@@ -1639,7 +1645,7 @@ async function detectEdges(gameDate) {
           ? parseFloat(projRow.proj_value)
           : (legacyCol ? parseFloat(proj[legacyCol]) : NaN);
 
-        if (!projValue || isNaN(projValue)) continue;
+        if (projValue == null || isNaN(projValue)) continue;
 
         const line = parseFloat(lineData.line);
         if (!line || isNaN(line)) continue;
@@ -1838,7 +1844,7 @@ async function detectEdgesForSport(sport, gameDate) {
 
       const proj = playerProjs[0]; // use first row for team/position/injury metadata
       const sampleSize = (() => {
-        try { return JSON.parse(typeof proj.factors_json === 'string' ? proj.factors_json : JSON.stringify(proj.factors_json || {}))?.context?.games_used ?? 0; } catch { return 0; }
+        try { return JSON.parse(typeof proj.factors_json === 'string' ? proj.factors_json : JSON.stringify(proj.factors_json || {}))?.context?.games_used ?? null; } catch { return null; }
       })();
 
       for (const [marketKey, lineData] of Object.entries(marketData)) {
@@ -1853,7 +1859,7 @@ async function detectEdgesForSport(sport, gameDate) {
           ? parseFloat(projRow.proj_value)
           : (legacyCol ? parseFloat(proj[legacyCol]) : NaN);
 
-        if (!projValue || isNaN(projValue)) continue;
+        if (projValue == null || isNaN(projValue)) continue;
 
         const line = parseFloat(lineData.line);
         if (!line || isNaN(line)) continue;

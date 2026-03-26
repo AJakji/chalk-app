@@ -1359,6 +1359,7 @@ def project_total_bases(
     proj_tb = base × iso × platoon_slg × sp_hr9 × matchup_ops
                    × wind × temp × park_hr × altitude × home_away × arsenal_tb
     """
+    using_player_logs = False
     if batter_logs:
         hits = new_weighted_avg(batter_logs, 'fg_made')
         dbls = new_weighted_avg(batter_logs, 'off_reb')
@@ -1368,11 +1369,14 @@ def project_total_bases(
         base = sg + 2*dbls + 3*trpl + 4*hrs
         if base <= 0:
             base = LEAGUE_AVG['tb_per_game']
+        else:
+            using_player_logs = True
     else:
         base = LEAGUE_AVG['tb_per_game']
 
     iso       = compute_iso(batter_logs, 20) if batter_logs else LEAGUE_AVG['iso']
-    iso_f     = max(0.50, min(2.00, iso / LEAGUE_AVG['iso']))
+    # iso_f only applied when base is league average; player logs already reflect power
+    iso_f     = 1.0 if using_player_logs else max(0.50, min(2.00, iso / LEAGUE_AVG['iso']))
     szn_slg   = compute_season_slg(batter_logs) if batter_logs else LEAGUE_AVG['slg']
     pt_slg_f  = platoon_slg_f(splits, sp_hand, szn_slg)
     sp_hr_f   = sp_hr9_factor(sp_logs)
@@ -2322,6 +2326,8 @@ def upsert_player_projection(
             if 'context' in factors_all:
                 merged['context'] = factors_all['context']
             merged['lineup_confirmed'] = proj.get('lineup_confirmed', True)
+            merged['market_line'] = line
+            merged['edge'] = edge
 
             cur.execute(
                 """INSERT INTO chalk_projections (
@@ -2426,6 +2432,7 @@ def get_confirmed_lineup_from_cache(conn, game_pk: int, side: str, game_date) ->
                      'batting_order': r['batting_order'],
                      'position':      'DH'} for r in rows]
     except Exception as exc:
+        conn.rollback()
         log.warning(f'  mlb_lineups cache lookup failed: {exc}')
     return []
 
@@ -2533,6 +2540,8 @@ def get_batting_lineup_with_fallback(
 def main():
     parser = argparse.ArgumentParser(description='Chalk MLB Projection Model v3.1')
     parser.add_argument('--date', default=str(date.today()), help='Game date YYYY-MM-DD')
+    parser.add_argument('--props-only', action='store_true',
+                        help='Re-run market line gating on existing projections (fast, no recompute)')
     args      = parser.parse_args()
     game_date = date.fromisoformat(args.date)
 
@@ -2541,6 +2550,55 @@ def main():
     log.info('═══════════════════════════════════════════════════')
 
     conn = get_db()
+
+    # ── Props-only shortcut ──────────────────────────────────────────────────
+    if args.props_only:
+        log.info('▶ PROPS-ONLY: re-running market line gate on existing projections')
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT player_id, player_name, team, opponent,
+                          prop_type, proj_value, confidence_score, factors_json
+                   FROM chalk_projections
+                   WHERE sport='MLB' AND game_date=%s""",
+                (game_date,)
+            )
+            rows = cur.fetchall()
+        updated = 0
+        for pid, pname, team, opp, ptype, pval, conf, factors in rows:
+            f = factors if isinstance(factors, dict) else {}
+            home_away = f.get('home_away', 'home')
+            line = get_market_line(conn, pname, ptype, game_date)
+            if line is None:
+                continue
+            edge = round(float(pval or 0) - line, 2)
+            threshold = MLB_MIN_EDGE.get(ptype, 0.15)
+            if abs(edge) < threshold:
+                continue
+            stored_f = {**f, 'market_line': line, 'edge': edge}
+            try:
+                with conn.cursor() as cur2:
+                    cur2.execute(
+                        """INSERT INTO chalk_projections (
+                             player_id, player_name, team, sport, game_date, opponent, home_away,
+                             prop_type, proj_value, confidence_score, model_version, factors_json
+                           ) VALUES (%s,%s,%s,'MLB',%s,%s,%s,%s,%s,%s,%s,%s)
+                           ON CONFLICT (player_id, game_date, prop_type) DO UPDATE SET
+                             proj_value       = EXCLUDED.proj_value,
+                             confidence_score = EXCLUDED.confidence_score,
+                             factors_json     = EXCLUDED.factors_json,
+                             model_version    = EXCLUDED.model_version""",
+                        (pid, pname, team, game_date, opp, home_away,
+                         ptype, float(pval or 0), conf or 60, MODEL_VERSION,
+                         json.dumps(stored_f))
+                    )
+                conn.commit()
+                updated += 1
+            except Exception as e:
+                conn.rollback()
+                log.warning(f'  props-only upsert {pname} {ptype}: {e}')
+        log.info(f'  Props-only complete — re-checked {updated} projections')
+        conn.close()
+        return
 
     # ── Step 1: Schedule ──────────────────────────────────────────────────────
     log.info('\n▶ STEP 1: Fetching schedule')
