@@ -56,6 +56,17 @@ async function saveDailyCount(n) {
   } catch {}
 }
 
+// ── Backtick / JSON leak sanitizer ───────────────────────────────────────────
+
+function sanitizeMessage(text) {
+  if (!text || typeof text !== 'string') return text;
+  text = text.replace(/```json[\s\S]*?```/gi, '');
+  text = text.replace(/```[\s\S]*?```/gi, '');
+  text = text.replace(/`json[\s\S]*?`/gi, '');
+  text = text.replace(/\n*\{[\s]*"response"[\s\S]*/g, '');
+  return text.trim();
+}
+
 // ── Message bubble ────────────────────────────────────────────────────────────
 
 function ChatBubble({ message, onSend }) {
@@ -91,7 +102,7 @@ function ChatBubble({ message, onSend }) {
               </TouchableOpacity>
             </>
           ) : (
-            <FormattedText text={message.content || ''} style={styles.bubbleText} />
+            <FormattedText text={sanitizeMessage(message.content || '')} style={styles.bubbleText} />
           )}
         </View>
 

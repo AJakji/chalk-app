@@ -255,7 +255,16 @@ YOUR VOICE:
 - When chalk model is present: always cite projected value vs line
 - End when the question is answered. No follow-up offers.
 
-RESPONSE FORMAT — return valid JSON only, nothing else:
+TIMEFRAMES — ALWAYS CITE CORRECTLY:
+Season stats = full current season. Always say "this season (N games)" or "full 2025-26 season".
+Recent form = L5 or L10. Always say "last 5" or "last 10".
+Never say "last 10" when showing season PP stats, home/away splits, or B2B splits.
+The HOME vs AWAY section and BACK-TO-BACK section in tool results are FULL SEASON data — cite them as such.
+
+OUTPUT FORMAT — CRITICAL:
+Return a single JSON object. No backticks. No code blocks. No markdown fences. No triple backticks. No \`\`\`json. The response must start with { and end with }.
+
+RESPONSE FORMAT:
 {
   "response": "Your answer as a string.",
   "hasPick": false,
@@ -371,6 +380,23 @@ Set visualData to null.
 ═══════════════════════════════════════
 
 hasPick must ALWAYS be false. Return ONLY valid JSON. No markdown. No code blocks. No text outside the JSON object.`;
+
+// ── JSON backtick sanitizer ───────────────────────────────────────────────────
+
+function sanitizeResponse(text) {
+  if (!text) return text;
+  // Strip ```json ... ``` blocks (with or without newlines)
+  text = text.replace(/```json[\s\S]*?```/gi, '');
+  // Strip any remaining ``` blocks
+  text = text.replace(/```[\s\S]*?```/gi, '');
+  // Strip trailing JSON object leak ({"response":...)
+  text = text.replace(/\n*\{[\s]*"response"[\s\S]*$/g, '');
+  // Strip single-line backtick json
+  text = text.replace(/`json\s*\{[\s\S]*?\}`/gi, '');
+  // Collapse 3+ blank lines to 2
+  text = text.replace(/\n{3,}/g, '\n\n');
+  return text.trim();
+}
 
 // ── Hallucination validator ───────────────────────────────────────────────────
 
@@ -583,9 +609,11 @@ router.post('/chat', async (req, res) => {
       };
     }
 
-    const responseText = typeof parsed.response === 'string' && parsed.response.trim()
-      ? parsed.response
-      : raw;
+    const responseText = sanitizeResponse(
+      typeof parsed.response === 'string' && parsed.response.trim()
+        ? parsed.response
+        : raw
+    );
     const components   = Array.isArray(parsed.components) ? parsed.components : [];
     const visualData   = parsed.visualData && parsed.visualData.type ? parsed.visualData : null;
 

@@ -747,11 +747,16 @@ function buildNHLSkaterOutput(fullName, abbr, position, logs, apiLog, hasDB, ton
     }
   });
 
-  // PP vs EV split (three_made = PPG, points = total G)
-  const ppgAvg = hasDB ? avg(l10, 'three_made') : 'N/A';
-  const totalGAvg = hasDB ? avg(l10, 'points') : 'N/A';
-  const evGAvg = hasDB && l10.length > 0
-    ? (l10.reduce((sum, g) => sum + Math.max(0, (parseFloat(g.points) || 0) - (parseFloat(g.three_made) || 0)), 0) / l10.length).toFixed(2)
+  // Full season logs (combined home + away) for situational splits
+  const allSeasonLogs = [...seasonHome, ...seasonAway].sort((a, b) => new Date(a.game_date) - new Date(b.game_date));
+  const ppSource  = allSeasonLogs.length > 0 ? allSeasonLogs : l10;
+  const ppLabel   = allSeasonLogs.length > 0 ? `full 2025-26 season (${allSeasonLogs.length}g)` : 'last 10 games';
+
+  // PP vs EV split — three_made = PPG, points = total G
+  const ppgAvg    = hasDB ? avg(ppSource, 'three_made') : 'N/A';
+  const totalGAvg = hasDB ? avg(ppSource, 'points') : 'N/A';
+  const evGAvg    = hasDB && ppSource.length > 0
+    ? (ppSource.reduce((sum, g) => sum + Math.max(0, (parseFloat(g.points) || 0) - (parseFloat(g.three_made) || 0)), 0) / ppSource.length).toFixed(2)
     : 'N/A';
 
   return `NHL SKATER DATA: ${fullName} (${abbr})${position ? ` — ${position}` : ''}
@@ -764,7 +769,7 @@ L20: ${avg(l20, 'points')}G / ${avg(l20, 'assists')}A / ${avgPtsG(l20)} PTS | ${
 +/-: L10 ${avg(l10, 'plus_minus')} | L20 ${avg(l20, 'plus_minus')}
 TOI: ${avg(l10, 'minutes')} min/g | PIM: ${avg(l10, 'turnovers')}/g
 
-POWER PLAY vs EVEN STRENGTH (last 10):
+POWER PLAY vs EVEN STRENGTH (${ppLabel}):
 Total G/g: ${totalGAvg} | PP G/g: ${ppgAvg} | EV G/g: ${evGAvg}
 ${parseFloat(ppgAvg) > 0 ? `PP production present — ${ppgAvg} PP goals/g of ${totalGAvg} total` : 'Scoring is primarily at even strength.'}
 
