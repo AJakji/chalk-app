@@ -61,7 +61,7 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 DATABASE_URL   = os.getenv('DATABASE_URL', '')
-MODEL_VERSION  = 'v3.0'
+MODEL_VERSION  = 'v3.1'
 CURRENT_SEASON = '2025'
 
 # ── League-average baselines (2024 MLB) ─────────────────────────────────────────
@@ -545,8 +545,8 @@ def get_career_matchup_db(conn, pitcher_id: int, batter_id: int) -> dict:
         return {}
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
-            """SELECT career_ab, career_hits, career_hr, career_bb,
-                      career_k, career_avg, career_ops
+            """SELECT ab AS career_ab, hits AS career_hits, hr AS career_hr,
+                      bb AS career_bb, k AS career_k, avg AS career_avg, ops AS career_ops
                FROM pitcher_batter_matchups
                WHERE pitcher_id = %s AND batter_id = %s
                ORDER BY season DESC LIMIT 1""",
@@ -562,8 +562,8 @@ def get_arsenal_data(conn, pitcher_id: int) -> list:
         return []
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
-            """SELECT pitch_type, velocity, usage_pct, whiff_rate,
-                      ba_against, slg_against, spin_rate
+            """SELECT pitch_type, avg_velocity AS velocity, usage_pct, whiff_rate,
+                      ba_against, slg_against, avg_spin_rate AS spin_rate
                FROM pitcher_arsenal
                WHERE pitcher_id = %s
                AND season = (SELECT MAX(season) FROM pitcher_arsenal WHERE pitcher_id = %s)""",
@@ -1165,12 +1165,96 @@ def get_team_obp(team_logs: list) -> float:
     return max(0.270, min(0.370, obp))
 
 
-def opp_lineup_hand_f(lineup: list, sp_hand: str) -> float:
+def get_batter_obp_from_logs(batter_logs: list) -> float:
+    """Return season OBP for a single batter from their game logs."""
+    return compute_obp(batter_logs, len(batter_logs)) if batter_logs else LEAGUE_AVG['obp']
+
+
+def get_teammates_obp(conn, lineup: list, pos: int) -> float:
     """
-    Handedness advantage: if SP throws R and lineup > 55% LHB → ×1.05 K bonus.
-    We don't have batter handedness, so neutral for now.
+    GAP 6: Real OBP of the 3 batters hitting ahead of 'pos' in the lineup.
+    lineup: list of dicts with 'id' and 'batting_order'
+    pos: 1-based batting order position of the batter we're projecting
+    Returns avg OBP of up to 3 slots ahead (wrapping around the lineup).
     """
-    return 1.00   # placeholder — batter handedness not in our schema
+    ahead_ids = []
+    for offset in (-1, -2, -3):
+        slot = ((pos - 1 + offset) % 9) + 1  # wrap: slot 1 → preceding is slot 9
+        for b in lineup:
+            if b.get('batting_order') == slot:
+                ahead_ids.append(b['id'])
+                break
+
+    if not ahead_ids:
+        return LEAGUE_AVG['obp']
+
+    obp_vals = []
+    for pid in ahead_ids:
+        logs = get_batter_logs(conn, pid, 30)
+        if logs:
+            obp_vals.append(get_batter_obp_from_logs(logs))
+
+    return round(sum(obp_vals) / len(obp_vals), 3) if obp_vals else LEAGUE_AVG['obp']
+
+
+def get_teammates_rbi_rate(conn, lineup: list, pos: int) -> float:
+    """
+    GAP 7: Real RBI/game of the 3 batters hitting behind 'pos' in the lineup.
+    Used in project_runs_scored() — batters behind you drive you in.
+    """
+    behind_ids = []
+    for offset in (1, 2, 3):
+        slot = ((pos - 1 + offset) % 9) + 1
+        for b in lineup:
+            if b.get('batting_order') == slot:
+                behind_ids.append(b['id'])
+                break
+
+    if not behind_ids:
+        return LEAGUE_AVG['rbi_per_game']
+
+    rbi_vals = []
+    for pid in behind_ids:
+        logs = get_batter_logs(conn, pid, 20)
+        if logs:
+            avg_rbi = new_weighted_avg(logs, 'rebounds')
+            if avg_rbi > 0:
+                rbi_vals.append(avg_rbi)
+
+    return round(sum(rbi_vals) / len(rbi_vals), 3) if rbi_vals else LEAGUE_AVG['rbi_per_game']
+
+
+def opp_lineup_hand_f(lineup_splits: list, sp_hand: str) -> float:
+    """
+    GAP 8: Real handedness factor using bat_side from player_splits.
+    lineup_splits: list of splits dicts for batters in this lineup.
+    If SP is RHP and >55% of lineup is LHB  → pitchers struggle → batters benefit
+    If SP is RHP and <35% LHB (mostly RHB)  → platoon disadvantage for batters
+    Same logic mirrored for LHP.
+    """
+    if not lineup_splits:
+        return 1.00
+
+    sides = [s.get('bat_side') for s in lineup_splits if s.get('bat_side')]
+    if len(sides) < 5:
+        return 1.00   # not enough data
+
+    lhb = sum(1 for s in sides if s == 'L')
+    rhb = sum(1 for s in sides if s == 'R')
+    total = lhb + rhb
+    if total == 0:
+        return 1.00
+
+    pct_lhb = lhb / total
+    pct_rhb = rhb / total
+
+    if sp_hand == 'R':
+        if pct_lhb > 0.55:  return 1.05   # mostly LHBs vs RHP → LHBs get platoon adv
+        if pct_rhb > 0.65:  return 0.95   # mostly RHBs vs RHP → platoon disadvantage
+    elif sp_hand == 'L':
+        if pct_rhb > 0.55:  return 1.05   # mostly RHBs vs LHP → platoon advantage
+        if pct_lhb > 0.65:  return 0.95   # mostly LHBs vs LHP → platoon disadvantage
+    return 1.00
 
 
 def is_day_game(game_time: str) -> bool:
@@ -1497,6 +1581,8 @@ def project_stolen_bases(
     lineup_pos:       int,
     sp_hand:          str,
     opp_sb_per_game:  float,
+    splits:           dict   = None,
+    live_ml:          float  = None,   # GAP 11: live implied moneyline for this batter's team
 ) -> tuple:
     """
     proj_sb = base × sb_rate × obp × success × pitcher_hold
@@ -1509,26 +1595,33 @@ def project_stolen_bases(
 
     sb_rate_f  = max(0.10, min(5.0, base / LEAGUE_AVG['sb_rate']))
     if sb_rate_f < 1.5:
-        # Only generate for players with elite SB rate per spec
         return round(base, 3), {'base': round(base, 3), 'sb_rate_f': round(sb_rate_f, 3), 'below_threshold': True}
 
     obp_val    = compute_obp(batter_logs, 20) if batter_logs else LEAGUE_AVG['obp']
     obp_f      = max(0.70, min(1.40, obp_val / LEAGUE_AVG['obp']))
 
-    # Success rate factor
-    total_sb = sum(safe(r.get('steals', 0)) for r in batter_logs)
-    # CS not in schema; use fixed 78% default
-    success_f = 1.05   # assume average success until CS column added
+    # GAP 9: Real caught-stealing success rate from player_splits
+    sb_sr = float(splits.get('sb_success_rate') or 0) if splits else 0
+    if sb_sr > 0:
+        # 78% is league average → factor is sb_sr / 0.78
+        success_f = max(0.80, min(1.25, sb_sr / 0.78))
+    else:
+        success_f = 1.05   # fallback: slightly above average (insufficient CS data)
 
-    # Pitcher hold: LHP holds runners better (harder to steal on)
+    # Pitcher hold: LHP holds runners better
     hold_f     = 0.85 if sp_hand == 'L' else 1.10
 
     # Catcher factor: proxy from opp SB allowed vs league avg
-    league_sb_allowed = LEAGUE_AVG['sb_rate'] * 9  # per game team total
+    league_sb_allowed = LEAGUE_AVG['sb_rate'] * 9
     catcher_f  = max(0.88, min(1.12, opp_sb_per_game / league_sb_allowed)) if league_sb_allowed > 0 else 1.0
 
-    # Game script: neutral (no live odds in projection phase)
-    gs_f       = 1.00
+    # GAP 11: Game script — heavy favourites run up score less on SB
+    # live_ml is this batter's team moneyline (e.g. -210 means heavy fav)
+    gs_f = 1.00
+    if live_ml is not None and live_ml <= -200:
+        gs_f = 0.82   # heavy favourite team → less likely to steal late
+    elif live_ml is not None and live_ml >= 160:
+        gs_f = 1.10   # heavy underdog → more aggressive running
 
     lp_f       = lineup_sb_factor(lineup_pos)
 
@@ -1539,9 +1632,11 @@ def project_stolen_bases(
         'sb_rate_f': round(sb_rate_f, 3),
         'obp_f': round(obp_f, 3),
         'success_f': round(success_f, 3),
+        'sb_success_rate': round(sb_sr, 3) if sb_sr else None,
         'pitcher_hold_f': round(hold_f, 3),
         'catcher_f': round(catcher_f, 3),
         'game_script_f': round(gs_f, 3),
+        'live_ml': live_ml,
         'lineup_pos_f': round(lp_f, 3),
         'sp_hand': sp_hand,
     }
@@ -1551,15 +1646,16 @@ def project_stolen_bases(
 # ── Pitcher projection functions ─────────────────────────────────────────────────
 
 def project_strikeouts(
-    sp_logs:    list,
-    opp_logs:   list,   # opponent team_game_logs
-    weather:    dict,
-    home_away:  str,
-    opp_k_rate: float,
-    days_rest:  int,
-    sp_hand:    str,
-    arsenal:    list,
-    ump:        dict,
+    sp_logs:           list,
+    opp_logs:          list,   # opponent team_game_logs
+    weather:           dict,
+    home_away:         str,
+    opp_k_rate:        float,
+    days_rest:         int,
+    sp_hand:           str,
+    arsenal:           list,
+    ump:               dict,
+    opp_lineup_splits: list = None,  # GAP 8: splits dicts for opp lineup batters
 ) -> tuple:
     """
     proj_k = base × arsenal × trend × velo × opp_k × hand_lineup
@@ -1586,8 +1682,8 @@ def project_strikeouts(
     # Opponent K rate
     opp_k_f = max(0.82, min(1.20, opp_k_rate / LEAGUE_AVG['k_pct']))
 
-    # Handedness (neutral — no batter hand data)
-    hand_f = opp_lineup_hand_f([], sp_hand)
+    # GAP 8: Real handedness factor from opp batter splits
+    hand_f = opp_lineup_hand_f(opp_lineup_splits or [], sp_hand)
 
     # Umpire K factor
     ump_k  = umpire_k_f(ump)
@@ -1806,6 +1902,116 @@ def project_outs_recorded(
     return round(max(0.0, proj), 3), factors
 
 
+# ── GAP 11/13: Live odds fetch ───────────────────────────────────────────────────
+
+_live_odds_cache: dict = {}
+
+def fetch_live_odds(home_team: str, away_team: str) -> dict:
+    """
+    Fetch live moneyline from The Odds API for this game.
+    Returns {'home_ml': -150, 'away_ml': +130} or {} on failure.
+    Cached per (home, away) for the model run.
+    """
+    key = f'{away_team}@{home_team}'
+    if key in _live_odds_cache:
+        return _live_odds_cache[key]
+
+    api_key = os.getenv('ODDS_API_KEY', '')
+    if not api_key:
+        _live_odds_cache[key] = {}
+        return {}
+
+    try:
+        url = 'https://api.the-odds-api.com/v4/sports/baseball_mlb/odds/'
+        params = {
+            'apiKey': api_key,
+            'regions': 'us',
+            'markets': 'h2h',
+            'oddsFormat': 'american',
+        }
+        r = requests.get(url, params=params, timeout=10)
+        if not r.ok:
+            log.warning(f'  [Odds API] HTTP {r.status_code}')
+            _live_odds_cache[key] = {}
+            return {}
+
+        games = r.json()
+        for game in games:
+            ht = game.get('home_team', '').lower()
+            at = game.get('away_team', '').lower()
+            if home_team.lower()[:5] in ht or at in away_team.lower()[:5]:
+                for bm in game.get('bookmakers', []):
+                    for mkt in bm.get('markets', []):
+                        if mkt.get('key') == 'h2h':
+                            outcomes = mkt.get('outcomes', [])
+                            result = {}
+                            for o in outcomes:
+                                price = o.get('price', 0)
+                                if o.get('name', '').lower() in ht:
+                                    result['home_ml'] = price
+                                else:
+                                    result['away_ml'] = price
+                            if result:
+                                _live_odds_cache[key] = result
+                                return result
+
+    except Exception as e:
+        log.warning(f'  [Odds API] Fetch error: {e}')
+
+    _live_odds_cache[key] = {}
+    return {}
+
+
+# ── GAP 12: Head-to-head total factor ────────────────────────────────────────────
+
+def get_h2h_total_factor(conn, home_team: str, away_team: str) -> float:
+    """
+    GAP 12: Look up last 5 H2H meetings in team_game_logs.
+    If avg total in those games > league avg + 1.0 → h2h_f 1.06
+    If avg total < league avg - 1.0 → h2h_f 0.94
+    Otherwise neutral 1.00.
+    Applied at 0.10 weight in project_total().
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT t1.game_date,
+                       t1.points_scored + t2.points_scored AS total_runs
+                FROM team_game_logs t1
+                JOIN team_game_logs t2
+                  ON t1.game_date = t2.game_date
+                 AND t1.sport = t2.sport
+                 AND t1.season = t2.season
+                 AND t1.team_name != t2.team_name
+                WHERE t1.sport = 'MLB'
+                  AND t1.team_name ILIKE %s
+                  AND t2.team_name ILIKE %s
+                  AND t1.points_scored IS NOT NULL
+                  AND t2.points_scored IS NOT NULL
+                ORDER BY t1.game_date DESC
+                LIMIT 5
+            """, (f'%{home_team[:6]}%', f'%{away_team[:6]}%'))
+            rows = cur.fetchall()
+    except Exception:
+        return 1.00
+
+    if len(rows) < 3:
+        return 1.00   # insufficient history
+
+    avg_total = sum(float(r[1]) for r in rows) / len(rows)
+    league_avg = LEAGUE_AVG['game_total']
+
+    if avg_total > league_avg + 1.0:
+        raw_f = 1.06
+    elif avg_total < league_avg - 1.0:
+        raw_f = 0.94
+    else:
+        raw_f = 1.00
+
+    # Apply at 0.10 weight: final_f = 1.0 + (raw_f - 1.0) * 0.10
+    return round(1.0 + (raw_f - 1.0) * 0.10, 4)
+
+
 # ── Team projection functions ────────────────────────────────────────────────────
 
 def _project_team_runs(
@@ -1865,28 +2071,46 @@ def project_total(
     home_sp_logs: list, away_sp_logs: list,
     weather: dict, park: dict, ump: dict,
     home_bullpen_tired: bool, away_bullpen_tired: bool,
+    h2h_f: float = 1.00,   # GAP 12: head-to-head historical total factor
 ) -> tuple:
     proj_home, home_f = _project_team_runs(home_logs, away_sp_logs, weather, park, True,  ump, away_bullpen_tired)
     proj_away, away_f = _project_team_runs(away_logs, home_sp_logs, weather, park, False, ump, home_bullpen_tired)
-    proj_total = proj_home + proj_away
+    proj_total = (proj_home + proj_away) * h2h_f
     factors = {
         'home_runs_f': home_f,
         'away_runs_f': away_f,
         'proj_home_runs': round(proj_home, 3),
         'proj_away_runs': round(proj_away, 3),
         'altitude_f': 1.12 if park.get('altitude_ft', 0) >= 5000 else 1.0,
+        'h2h_total_f': round(h2h_f, 4),
     }
     return round(proj_total, 3), proj_home, proj_away, factors
 
 
-def project_run_line(proj_run_diff: float) -> tuple:
+def project_run_line(
+    proj_run_diff: float,
+    home_ml: float = None,  # GAP 13: live home moneyline from Odds API
+) -> tuple:
     """
     Underdogs historically cover +1.5 at ~58% — baked into std_dev.
+    GAP 13: If home team is implied >-200 favourite, apply 0.91 regression
+            to proj_run_diff (big favourites have compressed run differentials).
     Returns (home_cover_prob, away_cover_prob).
     """
-    home_cover = round(_normal_cdf((proj_run_diff - 1.5) / SPREAD_STD_DEV), 4)
+    rl_diff = proj_run_diff
+    regression_applied = False
+
+    # Large-favourite regression: when implied ML > -200, winning margin shrinks
+    if home_ml is not None and home_ml <= -200:
+        rl_diff = proj_run_diff * 0.91
+        regression_applied = True
+    elif home_ml is not None and home_ml >= 200:
+        # Away team is heavy fav — flip
+        rl_diff = proj_run_diff * (1.0 / 0.91)  # makes diff more negative
+
+    home_cover = round(_normal_cdf((rl_diff - 1.5) / SPREAD_STD_DEV), 4)
     away_cover = round(1 - home_cover, 4)
-    return home_cover, away_cover
+    return home_cover, away_cover, regression_applied
 
 
 def project_moneyline(
@@ -2200,13 +2424,13 @@ def get_batting_lineup_with_fallback(
 # ── Main ─────────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description='Chalk MLB Projection Model v3.0')
+    parser = argparse.ArgumentParser(description='Chalk MLB Projection Model v3.1')
     parser.add_argument('--date', default=str(date.today()), help='Game date YYYY-MM-DD')
     args      = parser.parse_args()
     game_date = date.fromisoformat(args.date)
 
     log.info('═══════════════════════════════════════════════════')
-    log.info(f'Chalk MLB Projection Model v3.0 — {game_date}')
+    log.info(f'Chalk MLB Projection Model v3.1 — {game_date}')
     log.info('═══════════════════════════════════════════════════')
 
     conn = get_db()
@@ -2286,12 +2510,24 @@ def main():
 
         home_k_rate = get_team_k_rate(conn, home_team)
         away_k_rate = get_team_k_rate(conn, away_team)
-        home_obp    = get_team_obp(home_tl)
-        away_obp    = get_team_obp(away_tl)
+        home_obp    = get_team_obp(home_tl)   # fallback only
+        away_obp    = get_team_obp(away_tl)   # fallback only
         home_sb_pg  = get_team_sb_allowed(conn, home_team)
         away_sb_pg  = get_team_sb_allowed(conn, away_team)
 
         day_game = is_day_game(gtime)
+
+        # GAP 11: Fetch live moneyline from Odds API for game-script factors
+        live_odds   = fetch_live_odds(home_team, away_team)
+        home_live_ml = live_odds.get('home_ml')
+        away_live_ml = live_odds.get('away_ml')
+        if live_odds:
+            log.info(f'  [Live odds] home_ml={home_live_ml} away_ml={away_live_ml}')
+
+        # GAP 12: H2H total factor
+        h2h_total_f = get_h2h_total_factor(conn, home_team, away_team)
+        if h2h_total_f != 1.00:
+            log.info(f'  [H2H total_f] {h2h_total_f:.4f} ({home_team} vs {away_team})')
 
         # ── Step 5: Batter projections ────────────────────────────────────────
         for side, lineup, opp_sp_logs, opp_sp_info, opp_sp_hand, team_obp, loc, opp_sb_pg in [
@@ -2302,6 +2538,11 @@ def main():
             opponent  = away_team if side == 'home' else home_team
             opp_sp_id = opp_sp_info['id'] if opp_sp_info else None
 
+            # GAP 6/7: pre-load splits for all lineup members (for teammates OBP/RBI)
+            lineup_splits_map = {}
+            for _b in lineup:
+                lineup_splits_map[_b['id']] = get_batter_splits_db(conn, _b['id'])
+
             for batter in lineup:
                 pid  = batter['id']
                 name = batter['name']
@@ -2311,7 +2552,7 @@ def main():
                 if len(bat_logs) < 3:
                     continue
 
-                splits  = get_batter_splits_db(conn, pid)
+                splits  = lineup_splits_map.get(pid, {})
                 matchup = get_career_matchup_db(conn, opp_sp_id, pid)
                 career_ab = int(safe(matchup.get('career_ab', 0)))
 
@@ -2351,12 +2592,19 @@ def main():
                     weather_aligns  = wx_avail and (weather.get('wind_mph', 0) > 12 or weather.get('temp_f', 72) > 80),
                 )
 
+                # GAP 6: real OBP of 3 batters ahead (for RBI projection)
+                real_tm_obp  = get_teammates_obp(conn, lineup, lp)
+                # GAP 7: real RBI/game of 3 batters behind (for runs scored projection)
+                real_tm_rbi  = get_teammates_rbi_rate(conn, lineup, lp)
+                # Live ML for this batter's team (GAP 11)
+                my_live_ml   = home_live_ml if side == 'home' else away_live_ml
+
                 proj_hits_v,  fac_h  = project_hits(bat_logs, opp_sp_logs, weather, park, loc, lp, lu_confirmed, splits, opp_sp_hand, matchup, day_game)
                 proj_tb_v,    fac_tb = project_total_bases(bat_logs, opp_sp_logs, weather, park, loc, lp, splits, opp_sp_hand, matchup, whiff_r)
                 proj_hr_v,    fac_hr = project_home_runs(bat_logs, opp_sp_logs, weather, park, loc, lp, splits, opp_sp_hand, matchup, whiff_r, ump)
-                proj_rbi_v,   fac_r  = project_rbi(bat_logs, opp_sp_logs, weather, park, loc, lp, splits, opp_sp_hand, matchup, team_obp, ump, away_bp_tired if side == 'home' else home_bp_tired)
-                proj_runs_v,  fac_ru = project_runs_scored(bat_logs, opp_sp_logs, weather, park, loc, lp, splits, opp_sp_hand, LEAGUE_AVG['rbi_per_game'], ump)
-                proj_sb_v,    fac_sb = project_stolen_bases(bat_logs, opp_sp_logs, loc, lp, opp_sp_hand, opp_sb_pg)
+                proj_rbi_v,   fac_r  = project_rbi(bat_logs, opp_sp_logs, weather, park, loc, lp, splits, opp_sp_hand, matchup, real_tm_obp, ump, away_bp_tired if side == 'home' else home_bp_tired)
+                proj_runs_v,  fac_ru = project_runs_scored(bat_logs, opp_sp_logs, weather, park, loc, lp, splits, opp_sp_hand, real_tm_rbi, ump)
+                proj_sb_v,    fac_sb = project_stolen_bases(bat_logs, opp_sp_logs, loc, lp, opp_sp_hand, opp_sb_pg, splits=splits, live_ml=my_live_ml)
 
                 all_factors = {
                     'hits':  fac_h,
@@ -2371,7 +2619,7 @@ def main():
                         'opp_sp_hand':      opp_sp_hand,
                         'park_name':        vname,
                         'day_game':         day_game,
-                        'ump_name':         ump.get('ump_name') if ump else None,
+                        'ump_name':         ump.get('umpire_name') if ump else None,
                         'weather_available': wx_avail,
                         'ump_available':    ump_avail,
                         'career_ab':        career_ab,
@@ -2436,7 +2684,14 @@ def main():
                 sp_fip_confirms = sp_fip_confirms,
             )
 
-            proj_k_v,    fac_k    = project_strikeouts(sp_logs, opp_tl, weather, loc, opp_k_rate, dr, sp_hand, arsenal, ump)
+            # GAP 8: collect opp lineup splits for handedness factor
+            opp_lu = home_lu if side == 'away' else away_lu
+            opp_lu_splits = [lineup_splits_map.get(b['id'], {}) for b in opp_lu] if (side == 'home' and away_lu) or (side == 'away' and home_lu) else []
+            # Rebuild lineup_splits_map for opp lineup (may differ from current side)
+            if not opp_lu_splits and opp_lu:
+                opp_lu_splits = [get_batter_splits_db(conn, b['id']) for b in opp_lu]
+
+            proj_k_v,    fac_k    = project_strikeouts(sp_logs, opp_tl, weather, loc, opp_k_rate, dr, sp_hand, arsenal, ump, opp_lineup_splits=opp_lu_splits)
             proj_er_v,   fac_er   = project_earned_runs(sp_logs, opp_tl, weather, park, loc, dr, whiff_r)
             proj_bb_v,   fac_bb   = project_walks(sp_logs, opp_tl, weather, loc, dr, ump, whiff_r)
             proj_out_v,  fac_out  = project_outs_recorded(sp_logs, weather, loc, dr, opp_bullpen_tired, opp_tl, arsenal)
@@ -2451,7 +2706,7 @@ def main():
                     'days_rest':        dr,
                     'park_name':        vname,
                     'arsenal_whiff':    round(whiff_r, 3) if whiff_r else None,
-                    'ump_name':         ump.get('ump_name') if ump else None,
+                    'ump_name':         ump.get('umpire_name') if ump else None,
                     'ump_available':    ump_avail,
                     'weather_available': wx_avail,
                     'sp_starts_in_db':  len(sp_logs),
@@ -2488,8 +2743,13 @@ def main():
         proj_total_v, proj_home_r, proj_away_r, total_f = project_total(
             home_tl, away_tl, home_sp_logs, away_sp_logs,
             weather, park, ump, home_bp_tired, away_bp_tired,
+            h2h_f=h2h_total_f,
         )
-        home_cover, away_cover = project_run_line(proj_home_r - proj_away_r)
+        # GAP 13: pass live home ML for large-favourite regression
+        home_cover, away_cover, rl_regressed = project_run_line(
+            proj_home_r - proj_away_r,
+            home_ml=home_live_ml,
+        )
         home_win, away_win, home_ml, away_ml, ml_factors = project_moneyline(
             home_tl, away_tl, home_sp_logs, away_sp_logs,
         )
@@ -2516,7 +2776,7 @@ def main():
                 'park_runs_f': park.get('runs', 1.0),
                 'weather_temp': weather.get('temp_f') if weather else None,
                 'weather_wind': weather.get('wind_mph') if weather else None,
-                'ump_name': ump.get('ump_name') if ump else None,
+                'ump_name': ump.get('umpire_name') if ump else None,
             },
         }
 
@@ -2553,7 +2813,7 @@ def main():
 
     conn.close()
     log.info('\n═══════════════════════════════════════════════════')
-    log.info(f'v3.0 complete — batters:{total_b}  pitchers:{total_p}  teams:{total_t}')
+    log.info(f'v3.1 complete — batters:{total_b}  pitchers:{total_p}  teams:{total_t}')
     log.info('═══════════════════════════════════════════════════')
 
 

@@ -187,6 +187,17 @@ if (process.env.MOCK_MODE !== 'true') {
     }
   }, { timezone: 'America/New_York' });
 
+  // ── Every Monday 2:00 AM — Statcast collector (pitcher whiff + batter barrel/sprint) ──
+  cron.schedule('0 2 * * 1', async () => {
+    console.log('\n⏰ [Mon 2:00 AM] Statcast Collector (Baseball Savant)…');
+    try {
+      await runPythonScript('statcastCollector.py');
+      console.log('✅ Statcast collection complete');
+    } catch (err) {
+      console.error('❌ Statcast collection failed:', err.message);
+    }
+  }, { timezone: 'America/New_York' });
+
   // ── 8:00 AM — Weather + grading ──────────────────────────────────────────────
   cron.schedule('0 8 * * *', async () => {
     console.log('\n⏰ [8:00 AM] Weather fetch + pick grading…');

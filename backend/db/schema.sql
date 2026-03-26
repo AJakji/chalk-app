@@ -489,3 +489,30 @@ ALTER TABLE player_splits ADD COLUMN IF NOT EXISTS risp_ops NUMERIC(5,3);
 ALTER TABLE player_splits ADD COLUMN IF NOT EXISTS ahead_count_avg NUMERIC(5,3);
 ALTER TABLE player_splits ADD COLUMN IF NOT EXISTS behind_count_avg NUMERIC(5,3);
 ALTER TABLE player_splits ADD COLUMN IF NOT EXISTS two_strike_avg NUMERIC(5,3);
+
+-- v3.1: batter handedness + caught stealing on splits
+ALTER TABLE player_splits ADD COLUMN IF NOT EXISTS bat_side        VARCHAR(1);   -- 'L', 'R', 'S'
+ALTER TABLE player_splits ADD COLUMN IF NOT EXISTS sb_success_rate NUMERIC(5,3); -- season SB/(SB+CS)
+
+-- v3.1: batter handedness on game logs
+ALTER TABLE player_game_logs ADD COLUMN IF NOT EXISTS bat_side VARCHAR(1);  -- 'L', 'R', 'S'
+
+-- v3.1: hard_hit_pct on pitcher arsenal (from Baseball Savant)
+ALTER TABLE pitcher_arsenal ADD COLUMN IF NOT EXISTS hard_hit_pct NUMERIC(5,3);
+
+-- v3.1: Statcast batter table (from Baseball Savant leaderboard CSV)
+CREATE TABLE IF NOT EXISTS player_statcast (
+  player_id           INTEGER NOT NULL,
+  player_name         TEXT,
+  season              INTEGER NOT NULL DEFAULT 2025,
+  barrel_pct          NUMERIC(5,3),   -- barrel_batted_rate
+  hard_hit_pct        NUMERIC(5,3),   -- hard_hit_percent
+  exit_velocity_avg   NUMERIC(5,1),   -- exit_velocity_avg
+  launch_angle_avg    NUMERIC(5,1),   -- launch_angle_avg
+  sprint_speed        NUMERIC(5,1),   -- sprint_speed (ft/s)
+  xba                 NUMERIC(5,3),   -- expected batting average
+  xslg                NUMERIC(5,3),   -- expected slugging
+  xwoba               NUMERIC(5,3),   -- expected wOBA
+  updated_at          TIMESTAMPTZ DEFAULT NOW(),
+  PRIMARY KEY (player_id, season)
+);
