@@ -1256,4 +1256,4 @@ function buildVisualHint(intent, depth) {
   return 'Set visualData to null if no clear visual adds value.';
 }
 
-module.exports = { buildDataContext, generateSuggestions, isOffTopic, detectSport, detectIntent, classifyDepth, buildVisualHint };
+module.exports = { buildDataContext, isOffTopic, detectSport, detectIntent, classifyDepth, buildVisualHint };

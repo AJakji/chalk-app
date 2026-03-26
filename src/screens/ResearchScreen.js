@@ -16,7 +16,7 @@ import {
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { colors, spacing, radius } from '../theme';
-import { askChalky, fetchResearchSuggestions } from '../services/api';
+import { askChalky } from '../services/api';
 import ChalkyMenuButton from '../components/ChalkyMenuButton';
 import ChalkyLogo from '../components/ChalkyLogo';
 import {
@@ -30,14 +30,6 @@ const CHALKY_PNG = require('../../assets/chalky.png');
 const DAILY_LIMIT = 5;
 const RL_COUNT_KEY = 'chalk_rl_count';
 const RL_DATE_KEY = 'chalk_rl_date';
-
-// Static fallback questions used before API suggestions load
-const FALLBACK_SUGGESTIONS = [
-  'How has Nikola Jokic been playing this month?',
-  "What are Jokic's prop lines tonight?",
-  'Who is starting in goal for the Oilers tonight?',
-  'What does line movement tell you before a game?',
-];
 
 // ── Daily limit helpers ───────────────────────────────────────────────────────
 
@@ -114,22 +106,6 @@ function ChatBubble({ message, onSend }) {
             <ComponentRenderer key={i} component={comp} index={i} />
           ))}
 
-        {/* Follow-up suggestion chips (only shown on final assistant messages) */}
-        {!message.isStreaming && !isUser && !message.isLimitMsg &&
-          message.followUpSuggestions?.length > 0 && (
-            <View style={styles.followUpRow}>
-              {message.followUpSuggestions.map((q, i) => (
-                <TouchableOpacity
-                  key={i}
-                  style={styles.followUpChip}
-                  onPress={() => onSend && onSend(q)}
-                  activeOpacity={0.75}
-                >
-                  <Text style={styles.followUpText}>{q}</Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-          )}
       </View>
     </Animated.View>
   );
@@ -206,7 +182,6 @@ export default function ResearchScreen() {
   const [isStreaming, setIsStreaming] = useState(false);
   const [dailyCount, setDailyCount] = useState(0);
   const [limitLoaded, setLimitLoaded] = useState(false);
-  const [suggestions, setSuggestions] = useState(FALLBACK_SUGGESTIONS);
   const scrollRef = useRef(null);
   const streamTimerRef = useRef(null);
   const conversationHistory = useRef([]);
@@ -217,10 +192,6 @@ export default function ResearchScreen() {
     loadDailyCount().then((count) => {
       setDailyCount(count);
       setLimitLoaded(true);
-    });
-    // Fetch dynamic suggestions from tonight's slate
-    fetchResearchSuggestions().then((data) => {
-      if (data && data.length >= 4) setSuggestions(data);
     });
     return () => {
       if (streamTimerRef.current) clearInterval(streamTimerRef.current);
@@ -236,7 +207,7 @@ export default function ResearchScreen() {
     scrollToBottom();
   }, [scrollToBottom]);
 
-  const startStreaming = useCallback((fullText, components, hasPick, visualData, followUpSuggestions) => {
+  const startStreaming = useCallback((fullText, components, hasPick, visualData) => {
     const words = fullText.split(' ').filter(Boolean);
     if (words.length === 0) return;
     setIsStreaming(true);
@@ -252,7 +223,7 @@ export default function ResearchScreen() {
       } else {
         clearInterval(streamTimerRef.current);
         streamTimerRef.current = null;
-        // Commit to messages — reveal visualData and followUpSuggestions after text finishes
+        // Commit to messages — reveal visualData after text finishes
         setTimeout(() => {
           addMessage({
             role: 'assistant',
@@ -260,7 +231,6 @@ export default function ResearchScreen() {
             components,
             hasPick,
             visualData: visualData || null,
-            followUpSuggestions: followUpSuggestions || [],
             isStreaming: false,
           });
           setStreamingMsg(null);
@@ -315,7 +285,6 @@ export default function ResearchScreen() {
         data.components || [],
         data.hasPick || false,
         data.visualData || null,
-        data.followUpSuggestions || [],
       );
     } catch {
       setLoading(false);
@@ -364,20 +333,8 @@ export default function ResearchScreen() {
             <Image source={CHALKY_PNG} style={styles.emptyAvatar} resizeMode="contain" />
             <Text style={styles.emptyTitle}>Research</Text>
             <Text style={styles.emptySubtitle}>
-              Research is your personal sports analyst — stats, trends, matchups, and betting lines. For today's picks powered by Chalky's Proprietary Model, head to the Picks tab.
+              Stats, trends, matchups, and betting lines. Ask about any player, team, or game.
             </Text>
-            <View style={styles.suggestionsWrap}>
-              {suggestions.map((q, i) => (
-                <TouchableOpacity
-                  key={i}
-                  style={styles.suggestionChip}
-                  onPress={() => send(q)}
-                  activeOpacity={0.75}
-                >
-                  <Text style={styles.suggestionText}>{q}</Text>
-                </TouchableOpacity>
-              ))}
-            </View>
           </ScrollView>
         ) : (
           /* Messages list */
@@ -543,24 +500,6 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginBottom: spacing.md,
   },
-  suggestionsWrap: {
-    width: '100%',
-    gap: spacing.sm,
-  },
-  suggestionChip: {
-    backgroundColor: colors.surface,
-    borderRadius: radius.md,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  suggestionText: {
-    fontSize: 14,
-    color: colors.offWhite,
-    lineHeight: 20,
-  },
-
   // Chat
   chatList: {
     paddingHorizontal: spacing.md,
@@ -683,24 +622,4 @@ const styles = StyleSheet.create({
     color: colors.grey,
   },
 
-  // Follow-up suggestion chips
-  followUpRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 6,
-    marginTop: spacing.sm,
-  },
-  followUpChip: {
-    backgroundColor: colors.background,
-    borderRadius: radius.full,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  followUpText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: colors.grey,
-  },
 });

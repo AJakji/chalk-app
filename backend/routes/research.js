@@ -11,8 +11,7 @@
 const express   = require('express');
 const router    = express.Router();
 const Anthropic  = require('@anthropic-ai/sdk');
-const { executeTool }       = require('../services/researchTools');
-const { generateSuggestions } = require('../services/researchService');
+const { executeTool } = require('../services/researchTools');
 
 const client = new Anthropic();
 
@@ -207,15 +206,15 @@ YOUR VOICE:
 - Bold key numbers and phrases with **double asterisks**
 - No filler phrases: never use "that said", "it's worth noting", "interestingly", "it's important to mention", "additionally"
 - When chalk model projections are available — cite the projected value vs the market line (e.g. "model projects **28.2**, line is **26.5**")
-- One follow-up question maximum, only if genuinely useful
+- End your response when the question is fully answered. Do not add follow-up offers or suggestions.
+- TONIGHT'S GAME — CRITICAL: Only state a player is playing tonight if their team appears in the live schedule data. If no game is found in the tool result, say "[Player] is not on the schedule tonight." Never infer or assume a player is playing based on old context.
 
 RESPONSE FORMAT — return valid JSON only, nothing else:
 {
   "response": "Your answer as a string.",
   "hasPick": false,
   "components": [],
-  "visualData": <see VISUAL DATA RULES below>,
-  "followUpSuggestions": ["One follow-up max"]
+  "visualData": <see VISUAL DATA RULES below>
 }
 
 ═══════════════════════════════════════
@@ -325,7 +324,7 @@ Set visualData to null.
 
 ═══════════════════════════════════════
 
-hasPick must ALWAYS be false. followUpSuggestions: maximum 1 question, under 6 words. Return ONLY valid JSON. No markdown. No code blocks. No text outside the JSON object.`;
+hasPick must ALWAYS be false. Return ONLY valid JSON. No markdown. No code blocks. No text outside the JSON object.`;
 
 // ── Tool use loop ─────────────────────────────────────────────────────────────
 
@@ -458,21 +457,24 @@ router.post('/chat', async (req, res) => {
         .trim();
       parsed = JSON.parse(cleaned);
     } catch {
+      // JSON parse failed — try to regex-extract the response field so raw JSON never leaks to UI
+      const match = raw.match(/"response"\s*:\s*"((?:[^"\\]|\\.)*)"/s);
+      const extracted = match
+        ? match[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\t/g, '\t')
+        : raw;
       parsed = {
-        response:             raw,
-        hasPick:              false,
-        components:           [],
-        visualData:           null,
-        followUpSuggestions:  [],
+        response:   extracted,
+        hasPick:    false,
+        components: [],
+        visualData: null,
       };
     }
 
-    const responseText        = typeof parsed.response === 'string' ? parsed.response : raw;
-    const components          = Array.isArray(parsed.components) ? parsed.components : [];
-    const visualData          = parsed.visualData && parsed.visualData.type ? parsed.visualData : null;
-    const followUpSuggestions = Array.isArray(parsed.followUpSuggestions)
-      ? parsed.followUpSuggestions.slice(0, 1)
-      : [];
+    const responseText = typeof parsed.response === 'string' && parsed.response.trim()
+      ? parsed.response
+      : raw;
+    const components   = Array.isArray(parsed.components) ? parsed.components : [];
+    const visualData   = parsed.visualData && parsed.visualData.type ? parsed.visualData : null;
 
     // Store conversation without tool calls in history (clean for next turn)
     const updatedHistory = [
@@ -482,12 +484,11 @@ router.post('/chat', async (req, res) => {
     ];
 
     res.json({
-      response: responseText,
-      hasPick:  false,
+      response:   responseText,
+      hasPick:    false,
       components,
       visualData,
-      followUpSuggestions,
-      history:  updatedHistory,
+      history:    updatedHistory,
     });
 
   } catch (err) {
@@ -496,23 +497,5 @@ router.post('/chat', async (req, res) => {
   }
 });
 
-// ── GET /api/research/suggestions ────────────────────────────────────────────
-
-router.get('/suggestions', async (req, res) => {
-  try {
-    const suggestions = await generateSuggestions();
-    res.json({ suggestions });
-  } catch (err) {
-    console.error('[Research] Suggestions error:', err.message);
-    res.json({
-      suggestions: [
-        'How has Nikola Jokic been playing this month?',
-        'Break down tonight\'s best NBA matchup',
-        'Who are the best value plays on tonight\'s NHL board?',
-        'What does line movement tell you before a game?',
-      ],
-    });
-  }
-});
 
 module.exports = router;

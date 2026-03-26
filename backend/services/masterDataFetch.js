@@ -69,6 +69,12 @@ function getB2BGames(rows) {
   });
 }
 
+// Use Eastern Time for all schedule lookups — NBA/NHL/MLB games are scheduled in ET
+// Using UTC can flip the date at midnight ET (e.g. 11pm ET = next day UTC)
+function getTodayET() {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+}
+
 function normName(s) {
   return (s || '').toLowerCase()
     .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
@@ -262,11 +268,12 @@ async function getNBAPlayerComplete(playerName, displayNameHint) {
     projBlock = `CHALK PROPRIETARY MODEL — Tonight's Projections:\n${header}${lines.join('\n')}`;
   }
 
-  // 6. Tonight's game via BDL
-  const today    = new Date().toISOString().split('T')[0];
+  // 6. Tonight's game via BDL — use ET date, verify game.date matches exactly
+  const today    = getTodayET();
   const bdlGames = await bdl.getGames(today).catch(() => []);
   const tonightGame = bdlGames?.find(g =>
-    g.home_team?.abbreviation === abbr || g.visitor_team?.abbreviation === abbr
+    g.date === today &&
+    (g.home_team?.abbreviation === abbr || g.visitor_team?.abbreviation === abbr)
   );
 
   let oddsContext = '';
@@ -549,8 +556,8 @@ async function getNHLPlayerComplete(playerName) {
 
   const hasDB = logs.length >= 5;
 
-  // 5. Tonight's game + odds
-  const today    = new Date().toISOString().split('T')[0];
+  // 5. Tonight's game + odds — use ET date
+  const today    = getTodayET();
   const nhlGames = await nhlApi.getSchedule(today).catch(() => []);
   const tonightGame = teamAbbr
     ? nhlGames?.find(g => g.homeTeam?.abbrev === teamAbbr || g.awayTeam?.abbrev === teamAbbr)
@@ -914,8 +921,8 @@ vs RHP: AVG ${vsR?.avg || 'N/A'} | OBP ${vsR?.obp || 'N/A'} | SLG ${vsR?.slg || 
     }
   }
 
-  // 3. Tonight's MLB schedule + weather
-  const today    = new Date().toISOString().split('T')[0];
+  // 3. Tonight's MLB schedule + weather — use ET date
+  const today    = getTodayET();
   const mlbDate  = toMLBDate(today);
   const schedule = await mlbStats.getSchedule(mlbDate).catch(() => []);
   const tonightGame = schedule?.find(g =>
@@ -1176,7 +1183,7 @@ ${propLines ? `PROP LINES TONIGHT:\n${propLines}` : ''}`.trim();
 
 async function getComparativeStats(sport, statCategory, scope) {
   const n     = scope === 'last_5' ? 5 : scope === 'last_10' ? 10 : 20;
-  const today = new Date().toISOString().split('T')[0];
+  const today = getTodayET();
 
   let tonightTeams = [];
   if (sport === 'NBA') {

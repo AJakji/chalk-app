@@ -274,16 +274,6 @@ export async function askChalky(message, history = []) {
   return res.json(); // { response: string, history: [...] }
 }
 
-export async function fetchResearchSuggestions() {
-  try {
-    const res = await fetch(`${API_URL}/api/research/suggestions`);
-    if (!res.ok) return null;
-    const { suggestions } = await res.json();
-    return Array.isArray(suggestions) ? suggestions : null;
-  } catch {
-    return null;
-  }
-}
 
 // ── Users ─────────────────────────────────────────────────────────────────────
 
