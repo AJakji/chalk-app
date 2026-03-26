@@ -534,6 +534,7 @@ function parseClaudeResponse(raw) {
  */
 async function generateModelPicks() {
   const today = new Date().toISOString().split('T')[0];
+  const _start = Date.now();
   console.log(`🤖 Chalky model picks — ${today}`);
 
   // Load today's top edges from DB (written by edgeDetector.js)
@@ -579,6 +580,9 @@ ${JSON.stringify(edgesForClaude, null, 2)}`;
   console.log(`  ✅ Chalky generated ${picks.length} model picks`);
 
   await storeModelPicks(picks, headshotMap);
+
+  const duration = ((Date.now() - _start) / 1000).toFixed(1);
+  console.log(`⏱  generateModelPicks completed in ${duration}s`);
   return picks;
 }
 
@@ -640,6 +644,7 @@ async function storeModelPicks(picks, headshotMap = {}) {
 // ── FALLBACK: Standard game picks from raw odds ───────────────────────────────
 
 async function generatePicks() {
+  const _start = Date.now();
   console.log('🤖 Fetching odds from The Odds API...');
   const games = await fetchAllOdds();
 
@@ -696,6 +701,9 @@ async function generatePicks() {
   console.log(`✅ Claude generated ${picks.length} picks`);
 
   await storePicks(picks);
+
+  const duration = ((Date.now() - _start) / 1000).toFixed(1);
+  console.log(`⏱  generatePicks completed in ${duration}s`);
   return picks;
 }
 
