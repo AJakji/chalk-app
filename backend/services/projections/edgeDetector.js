@@ -104,7 +104,7 @@ const PROP_MARKET_MAP = {
   blocks:   'player_blocks',
 };
 
-// Reverse: Odds API market key → our projection column name
+// Reverse: Odds API market key → our projection column name (legacy named-column schema)
 const MARKET_TO_PROJ = {
   player_points:                    'proj_points',
   player_rebounds:                  'proj_rebounds',
@@ -116,6 +116,50 @@ const MARKET_TO_PROJ = {
   player_rebounds_assists:          'proj_ast_reb',
   player_steals:                    'proj_steals',
   player_blocks:                    'proj_blocks',
+};
+
+// Odds API market key → prop_type value stored in chalk_projections.prop_type
+// (matches PROP_TYPE_TO_DB values in nbaProjectionModel.py)
+// Used to look up the correct row when each prop is stored as its own row with proj_value.
+const MARKET_TO_DB_PROP = {
+  player_points:                    'points',
+  player_rebounds:                  'rebounds',
+  player_assists:                   'assists',
+  player_threes:                    'threes',
+  player_steals:                    'steals',
+  player_blocks:                    'blocks',
+  player_points_rebounds_assists:   'points_rebounds_assists',
+  player_points_assists:            'points_assists',
+  player_points_rebounds:           'points_rebounds',
+  player_rebounds_assists:          'rebounds_assists',
+};
+
+// Odds API market key → prop_type stored in chalk_projections (NHL)
+const NHL_MARKET_TO_DB_PROP = {
+  player_goals:          'goals',
+  player_assists:        'assists',
+  player_points:         'points',
+  player_shots_on_goal:  'shots_on_goal',
+  player_saves:          'saves',
+  player_goals_against:  'goals_against',
+};
+
+// Odds API market key → prop_type stored in chalk_projections (MLB)
+// Model stores: batters → hits/total_bases/home_runs/rbis/runs_scored/stolen_bases
+//               pitchers → strikeouts/earned_runs/walks/outs_recorded
+// batter_strikeouts, batter_walks, batter_hits_runs_rbis, pitcher_hits_allowed
+// are not projected by the model — omitted here so they're skipped gracefully.
+const MLB_MARKET_TO_DB_PROP = {
+  batter_hits:                  'hits',
+  batter_total_bases:           'total_bases',
+  batter_rbis:                  'rbis',
+  batter_runs_scored:           'runs_scored',
+  batter_home_runs:             'home_runs',
+  batter_stolen_bases:          'stolen_bases',
+  pitcher_strikeouts:           'strikeouts',
+  pitcher_walks:                'walks',
+  pitcher_earned_runs:          'earned_runs',
+  pitcher_outs:                 'outs',
 };
 
 // Odds API market key → edge column name in chalk_projections
@@ -205,8 +249,6 @@ const NHL_PROP_MARKET_MAP = {
   shots_on_goal: 'player_shots_on_goal',
   saves:         'player_saves',
   goals_against: 'player_goals_against',
-  hits:          'player_hits',
-  blocks:        'player_blocked_shots',
 };
 
 const NHL_MARKET_TO_PROJ = {
@@ -228,9 +270,9 @@ function getMinEdge(sport, propType) {
 
 // ── Helper: get prop map for a sport ──────────────────────────────────────────
 function getPropMapsForSport(sport) {
-  if (sport === 'MLB') return { propMap: MLB_PROP_MARKET_MAP, projMap: MLB_MARKET_TO_PROJ };
-  if (sport === 'NHL') return { propMap: NHL_PROP_MARKET_MAP, projMap: NHL_MARKET_TO_PROJ };
-  return { propMap: PROP_MARKET_MAP, projMap: MARKET_TO_PROJ };
+  if (sport === 'MLB') return { propMap: MLB_PROP_MARKET_MAP, projMap: MLB_MARKET_TO_PROJ, dbPropMap: MLB_MARKET_TO_DB_PROP };
+  if (sport === 'NHL') return { propMap: NHL_PROP_MARKET_MAP, projMap: NHL_MARKET_TO_PROJ, dbPropMap: NHL_MARKET_TO_DB_PROP };
+  return { propMap: PROP_MARKET_MAP, projMap: MARKET_TO_PROJ, dbPropMap: MARKET_TO_DB_PROP };
 }
 
 // ── BallDontLie player props helper ───────────────────────────────────────────
@@ -1065,6 +1107,36 @@ function matchPlayerName(oddsName, projectionRows) {
   return null;
 }
 
+/**
+ * Return ALL chalk_projections rows for a player (one per prop type).
+ * Used by detectEdges when the schema stores one row per prop_type + proj_value
+ * instead of a single row with named columns (proj_points, proj_pra, etc.).
+ */
+function matchAllPlayerRows(oddsName, projectionRows) {
+  if (!oddsName) return [];
+  const norm = normalizePlayerName(oddsName);
+
+  let rows = projectionRows.filter(p => normalizePlayerName(p.player_name) === norm);
+  if (rows.length) return rows;
+
+  const oddsLast = norm.split(' ').pop();
+  rows = projectionRows.filter(p => normalizePlayerName(p.player_name).endsWith(oddsLast));
+  if (rows.length) return rows;
+
+  const parts = norm.split(' ');
+  if (parts.length >= 2) {
+    const first = parts[0];
+    const last  = parts[parts.length - 1];
+    rows = projectionRows.filter(p => {
+      const pl = normalizePlayerName(p.player_name);
+      return pl.includes(first) && pl.includes(last);
+    });
+    if (rows.length) return rows;
+  }
+
+  return [];
+}
+
 // ── Hot/cold streak detection ──────────────────────────────────────────────────
 
 function detectStreak(factors) {
@@ -1524,8 +1596,11 @@ async function detectEdges(gameDate) {
 
     // ── Step 4: Compare each player's line to our projection ──────────────────
     for (const [oddsPlayerName, marketData] of Object.entries(playerLines)) {
-      const proj = matchPlayerName(oddsPlayerName, projections);
-      if (!proj) continue;  // player not in our DB
+      // The model writes one row per prop_type (using proj_value column).
+      // Get ALL rows for this player so we can look up the right one per market.
+      const playerProjs = matchAllPlayerRows(oddsPlayerName, projections);
+      if (!playerProjs || playerProjs.length === 0) continue;
+      const proj = playerProjs[0]; // use first row for team/position/injury metadata
 
       // ── Team gate: skip players whose team isn't in tonight's Odds API events ─
       if (!teamAbbrsPlayingTonight.has(proj.team)) {
@@ -1544,16 +1619,6 @@ async function detectEdges(gameDate) {
       // 'questionable'  → GTD; will reduce confidence by 10
       // true            → confirmed playing; full confidence
 
-      // ── Bug 2: Projection internal consistency check ───────────────────────
-      const projCheck = validateProjectionConsistency(proj, 'NBA');
-      if (!projCheck.ok) {
-        console.log(`  SKIP (bad projection): ${proj.player_name} — ${projCheck.reason}`);
-        continue;
-      }
-
-      let factors = {};
-      try { factors = typeof proj.factors_json === 'string' ? JSON.parse(proj.factors_json) : (proj.factors_json || {}); } catch {}
-
       const isQuestionable = playingStatus === 'questionable';
 
       // Determine opponent abbreviation from the event (proj.team is already an abbreviation)
@@ -1563,10 +1628,17 @@ async function detectEdges(gameDate) {
       const opponentFullName = proj.team === homeAbbr ? event.away_team : event.home_team;
 
       for (const [marketKey, lineData] of Object.entries(marketData)) {
-        const projCol = MARKET_TO_PROJ[marketKey];
-        if (!projCol) continue;
+        // Look up the row whose prop_type matches this market (new per-prop-row schema).
+        // Fallback: try legacy named column (proj_points etc.) for backwards compatibility.
+        const dbPropType = MARKET_TO_DB_PROP[marketKey];
+        const projRow    = dbPropType
+          ? playerProjs.find(p => p.prop_type === dbPropType)
+          : null;
+        const legacyCol  = MARKET_TO_PROJ[marketKey];
+        const projValue  = projRow
+          ? parseFloat(projRow.proj_value)
+          : (legacyCol ? parseFloat(proj[legacyCol]) : NaN);
 
-        const projValue = parseFloat(proj[projCol]);
         if (!projValue || isNaN(projValue)) continue;
 
         const line = parseFloat(lineData.line);
@@ -1579,6 +1651,11 @@ async function detectEdges(gameDate) {
           console.log(`  SKIP (bad line): ${proj.player_name} ${propTypeForCheck} line=${line} proj=${projValue} — ${lineCheck.reason}`);
           continue;
         }
+
+        // Read factors from the matching prop row (contains rest/pace context)
+        const activeRow = projRow || proj;
+        let factors = {};
+        try { factors = typeof activeRow.factors_json === 'string' ? JSON.parse(activeRow.factors_json) : (activeRow.factors_json || {}); } catch {}
 
         const edge = projValue - line;
 
@@ -1723,7 +1800,7 @@ async function detectEdgesForSport(sport, gameDate) {
   console.log(`  Loaded ${projections.length} ${sport} player projections`);
   if (projections.length === 0) return [];
 
-  const { propMap, projMap } = getPropMapsForSport(sport);
+  const { propMap, projMap, dbPropMap } = getPropMapsForSport(sport);
 
   // Fetch events from Odds API for this sport
   let events = [];
@@ -1756,33 +1833,44 @@ async function detectEdgesForSport(sport, gameDate) {
     console.log(`  ${event.away_team} @ ${event.home_team}: ${playerCount} players`);
 
     for (const [oddsPlayerName, marketData] of Object.entries(playerLines)) {
-      const proj = matchPlayerName(oddsPlayerName, projections);
-      if (!proj) continue;
+      const playerProjs = matchAllPlayerRows(oddsPlayerName, projections);
+      if (!playerProjs || playerProjs.length === 0) continue;
 
-      let factors = {};
-      try { factors = typeof proj.factors_json === 'string' ? JSON.parse(proj.factors_json) : (proj.factors_json || {}); } catch {}
-
-      const restDays   = factors?.context?.rest_days ?? 2;
-      const sampleSize = factors?.context?.games_used ?? 0;
+      const proj = playerProjs[0]; // use first row for team/position/injury metadata
+      const sampleSize = (() => {
+        try { return JSON.parse(typeof proj.factors_json === 'string' ? proj.factors_json : JSON.stringify(proj.factors_json || {}))?.context?.games_used ?? 0; } catch { return 0; }
+      })();
 
       for (const [marketKey, lineData] of Object.entries(marketData)) {
-        const projCol = projMap[marketKey];
-        if (!projCol) continue;
+        // Look up the row whose prop_type matches this market (new per-prop-row schema).
+        // Fallback: try legacy named column for backwards compatibility.
+        const dbPropType = dbPropMap[marketKey];
+        const projRow    = dbPropType
+          ? playerProjs.find(p => p.prop_type === dbPropType)
+          : null;
+        const legacyCol  = projMap[marketKey];
+        const projValue  = projRow
+          ? parseFloat(projRow.proj_value)
+          : (legacyCol ? parseFloat(proj[legacyCol]) : NaN);
 
-        const projValue = parseFloat(proj[projCol]);
         if (!projValue || isNaN(projValue)) continue;
 
         const line = parseFloat(lineData.line);
         if (!line || isNaN(line)) continue;
 
         const edge    = projValue - line;
-        const propTypeInternal = Object.entries(propMap).find(([k, v]) => v === marketKey)?.[0] || marketKey;
+        const propTypeInternal = Object.entries(propMap).find(([, v]) => v === marketKey)?.[0] || marketKey;
         const minEdge = getMinEdge(sport, propTypeInternal);
         if (Math.abs(edge) < minEdge) continue;
 
         const direction = edge > 0 ? 'over' : 'under';
 
-        const { confidence, breakdown } = calculateConfidence({
+        // Read factors from the matching prop row
+        const activeRow = projRow || proj;
+        let factors = {};
+        try { factors = typeof activeRow.factors_json === 'string' ? JSON.parse(activeRow.factors_json) : (activeRow.factors_json || {}); } catch {}
+
+        const { confidence } = calculateConfidence({
           edge,
           sport,
           gamesPlayedThisSeason: sampleSize,
