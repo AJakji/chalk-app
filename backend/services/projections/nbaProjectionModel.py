@@ -1164,17 +1164,8 @@ def get_market_line(conn, player_name: str, prop_type: str, game_date: str) -> f
     Populated by oddsService.js before the model runs.
     Returns None if no line posted yet — prop is skipped.
     """
-    prop_map = {
-        'points':   'player_points',
-        'rebounds': 'player_rebounds',
-        'assists':  'player_assists',
-        'threes':   'player_threes',
-        'pra':      'player_points_rebounds_assists',
-        'pr':       'player_points_rebounds',
-        'pa':       'player_points_assists',
-        'ar':       'player_assists_rebounds',
-    }
-    pph_type = prop_map.get(prop_type, prop_type)
+    # Use prop_type directly — oddsService.js strips the player_/batter_/pitcher_ prefix
+    # so stored values are bare: 'points', 'rebounds', 'assists', 'threes', etc.
 
     # Match on last name since name formats can differ
     last_name = player_name.split()[-1] if player_name else ''
@@ -1188,7 +1179,7 @@ def get_market_line(conn, player_name: str, prop_type: str, game_date: str) -> f
                      AND prop_type = %s
                      AND game_date = %s
                    ORDER BY created_at DESC LIMIT 1""",
-                (f'%{last_name}%', pph_type, game_date)
+                (f'%{last_name}%', prop_type, game_date)
             )
             row = cur.fetchone()
             if row and row[0] is not None:

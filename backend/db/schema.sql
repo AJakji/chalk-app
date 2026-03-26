@@ -340,6 +340,8 @@ CREATE TABLE IF NOT EXISTS chalk_projections (
 ALTER TABLE chalk_projections ADD COLUMN IF NOT EXISTS prop_type  TEXT;
 ALTER TABLE chalk_projections ADD COLUMN IF NOT EXISTS proj_value NUMERIC(7,3);
 ALTER TABLE chalk_projections ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+-- v4: position column for per-position defense factor in NBA model
+ALTER TABLE chalk_projections ADD COLUMN IF NOT EXISTS position   VARCHAR(10);
 -- Drop old single-row-per-player unique constraint (replaced by player+date+prop below)
 ALTER TABLE chalk_projections DROP CONSTRAINT IF EXISTS chalk_projections_player_id_game_date_key;
 
