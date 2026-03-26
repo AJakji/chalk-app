@@ -591,11 +591,11 @@ async function getNHLPlayerComplete(playerName) {
       db.query(`
         SELECT player_name, injury_status
         FROM nightly_roster
-        WHERE sport = 'NHL' AND position = 'G' AND game_date = CURRENT_DATE
-        AND (team ILIKE $1 OR team = $2)
+        WHERE sport = 'NHL' AND game_date = CURRENT_DATE
+        AND team ILIKE $1
         ORDER BY is_confirmed_playing DESC NULLS LAST
         LIMIT 3
-      `, [`%${opp}%`, oppAbbr]),
+      `, [`%${opp}%`]),
       db.query(`
         SELECT AVG(blocks::numeric) as avg_shots_against
         FROM team_game_logs
@@ -757,6 +757,8 @@ function buildNHLGoalieOutput(fullName, abbr, logs, apiLog, hasDB, tonightBlock,
   const l10 = logs.slice(0, 10);
   const l20 = logs;
 
+  const homeGames = l20.filter(g => g.home_away === 'home');
+  const awayGames = l20.filter(g => g.home_away === 'away');
   const wins   = (rows) => rows.filter(g => parseFloat(g.plus_minus) === 1).length;
   const losses = (rows) => rows.filter(g => parseFloat(g.plus_minus) < 0).length;
 
@@ -779,6 +781,10 @@ GAA:      L5 ${avg(l5, 'blocks')} | L10 ${avg(l10, 'blocks')} | L20 ${avg(l20, '
 GSAA:     L10 ${avg(l10.filter(g => g.off_reb), 'off_reb')}
 Saves/g:  L10 ${avg(l10, 'steals')}
 Record:   L10: ${wins(l10)}W-${losses(l10)}L-${l10.length - wins(l10) - losses(l10)}OT | L20: ${wins(l20)}W-${losses(l20)}L-${l20.length - wins(l20) - losses(l20)}OT
+
+HOME vs AWAY (last 20 starts):
+Home (${homeGames.length}g): SV% ${avgPct(homeGames.filter(g => g.fg_pct), 'fg_pct', 3)} | GAA ${avg(homeGames, 'blocks')} | Record: ${wins(homeGames)}W-${losses(homeGames)}L
+Away (${awayGames.length}g): SV% ${avgPct(awayGames.filter(g => g.fg_pct), 'fg_pct', 3)} | GAA ${avg(awayGames, 'blocks')} | Record: ${wins(awayGames)}W-${losses(awayGames)}L
 
 LAST 10 STARTS:
 ${logLines.join('\n')}
@@ -908,6 +914,10 @@ async function getMLBPlayerComplete(playerName) {
   const recent = gameLog.slice(0, 10);
   const dbRows = dbLogs.rows;
 
+  // Home/away splits from DB logs
+  const dbHomeRows = dbRows.filter(g => g.home_away === 'home');
+  const dbAwayRows = dbRows.filter(g => g.home_away === 'away');
+
   // Parse platoon splits
   let platoonBlock = '';
   if (!isPitch && splitsData?.stats?.[0]?.splits?.length) {
@@ -947,22 +957,17 @@ vs RHP: AVG ${vsR?.avg || 'N/A'} | OBP ${vsR?.obp || 'N/A'} | SLG ${vsR?.slg || 
   const awayAbbr2 = tonightGame?.teams?.away?.team?.abbreviation || null;
   const bullpenTeam = teamAbbr || null;
   const [umpireResult, bullpenResult] = await Promise.all([
-    tonightGame
-      ? db.query(`
-          SELECT umpire_name, k_rate, bb_rate, run_factor, tendency_note
-          FROM umpire_tendencies
-          WHERE game_date = CURRENT_DATE
-          AND (home_team = $1 OR away_team = $2)
-          LIMIT 1
-        `, [homeAbbr2, awayAbbr2]).catch(() => ({ rows: [] }))
-      : Promise.resolve({ rows: [] }),
+    // umpire_tendencies stores career aggregate stats per umpire — no game-to-umpire mapping in DB
+    // Return empty until umpire assignment data is available
+    Promise.resolve({ rows: [] }),
     bullpenTeam
       ? db.query(`
-          SELECT pitcher_name, role, era, appearances_l7, innings_pitched_l7
+          SELECT pitcher_name, is_closer, games_last_3, pitches_last_3, innings_last_3, days_since_last_app
           FROM bullpen_usage
-          WHERE team = $1 AND game_date >= CURRENT_DATE - 7
-          ORDER BY appearances_l7 DESC NULLS LAST
-          LIMIT 5
+          WHERE team_abbr = $1
+          AND collected_date >= CURRENT_DATE - 3
+          ORDER BY pitches_last_3 DESC NULLS LAST
+          LIMIT 6
         `, [bullpenTeam]).catch(() => ({ rows: [] }))
       : Promise.resolve({ rows: [] }),
   ]);
@@ -970,22 +975,24 @@ vs RHP: AVG ${vsR?.avg || 'N/A'} | OBP ${vsR?.obp || 'N/A'} | SLG ${vsR?.slg || 
   let umpireBlock = '';
   if (umpireResult.rows[0]) {
     const u = umpireResult.rows[0];
-    const parts = [`Umpire: ${u.umpire_name}`];
-    if (u.k_rate)       parts.push(`K-rate: ${parseFloat(u.k_rate).toFixed(1)}%`);
-    if (u.bb_rate)      parts.push(`BB-rate: ${parseFloat(u.bb_rate).toFixed(1)}%`);
-    if (u.run_factor)   parts.push(`Run factor: ${parseFloat(u.run_factor).toFixed(2)}`);
-    if (u.tendency_note) parts.push(u.tendency_note);
+    const parts = [`HP Umpire: ${u.umpire_name}`];
+    if (u.avg_k_per_game != null)   parts.push(`K/g: ${parseFloat(u.avg_k_per_game).toFixed(1)}`);
+    if (u.avg_bb_per_game != null)  parts.push(`BB/g: ${parseFloat(u.avg_bb_per_game).toFixed(1)}`);
+    if (u.avg_runs_per_game != null) parts.push(`Runs/g: ${parseFloat(u.avg_runs_per_game).toFixed(1)}`);
+    if (u.over_pct != null)         parts.push(`Over%: ${parseFloat(u.over_pct).toFixed(1)}%`);
+    if (u.zone_rating != null)      parts.push(`Zone rating: ${parseFloat(u.zone_rating).toFixed(2)}`);
     umpireBlock = parts.join(' | ');
   }
 
   let bullpenBlock = '';
   if (bullpenResult.rows.length > 0) {
     const lines = bullpenResult.rows.map(r => {
-      const era  = r.era        ? ` ERA ${parseFloat(r.era).toFixed(2)}`          : '';
-      const apps = r.appearances_l7 ? ` (${r.appearances_l7}G/last 7d)` : '';
-      return `  ${r.pitcher_name} [${r.role || '?'}]${era}${apps}`;
+      const role = r.is_closer ? ' [CL]' : '';
+      const days = r.days_since_last_app != null ? ` (${r.days_since_last_app}d rest)` : '';
+      const pitches = r.pitches_last_3 ? ` ${r.pitches_last_3}P` : '';
+      return `  ${r.pitcher_name}${role}: ${r.games_last_3 || 0}G/${r.innings_last_3 || '0.0'}IP last 3d${pitches}${days}`;
     });
-    bullpenBlock = `${teamAbbr} BULLPEN (last 7d usage):\n${lines.join('\n')}`;
+    bullpenBlock = `${teamAbbr} BULLPEN (last 3 days):\n${lines.join('\n')}`;
   }
 
   // 4. Odds + prop lines
@@ -1116,6 +1123,20 @@ ${formatSPBlock(awaySPStats, awayAbbr)}`;
       ? [`TONIGHT: ${tonightGame.teams?.away?.team?.name} @ ${tonightGame.teams?.home?.team?.name} — ${gameTimeET}`, weatherBlock, umpireBlock, spBlock].filter(Boolean).join('\n')
       : 'NOT SCHEDULED TONIGHT';
 
+    // Pitcher home/away ERA-proxy from DB (blocks = ER, minutes = IP)
+    let pitcherHomeAwayBlock = '';
+    if (dbRows.length >= 3) {
+      const pHomeRows = dbHomeRows;
+      const pAwayRows = dbAwayRows;
+      const avgER = (rows) => rows.length ? (rows.reduce((s, r) => s + (parseFloat(r.hr) || 0), 0) / rows.length).toFixed(2) : 'N/A';
+      const avgK  = (rows) => rows.length ? (rows.reduce((s, r) => s + (parseFloat(r.strikeouts) || 0), 0) / rows.length).toFixed(1) : 'N/A';
+      if (pHomeRows.length > 0 || pAwayRows.length > 0) {
+        pitcherHomeAwayBlock = `HOME vs AWAY (DB, this season):
+Home (${pHomeRows.length}g): avg ${avgER(pHomeRows)} ER/start | ${avgK(pHomeRows)} K/start
+Away (${pAwayRows.length}g): avg ${avgER(pAwayRows)} ER/start | ${avgK(pAwayRows)} K/start`;
+      }
+    }
+
     return `MLB PITCHER DATA: ${pName} (${teamAbbr}, ${pos}) — Throws: ${throws}
 ${season} Season Stats:
 ERA: ${stats.era || 'N/A'} | WHIP: ${stats.whip || 'N/A'} | W-L: ${stats.wins || 0}-${stats.losses || 0}
@@ -1124,6 +1145,8 @@ IP: ${stats.inningsPitched || 'N/A'} | HR/9: ${stats.homeRunsPer9 || 'N/A'}
 
 RECENT STARTS:
 ${recentLog || 'No recent starts on record.'}
+
+${pitcherHomeAwayBlock}
 
 ${arsenalBlock}
 
@@ -1144,6 +1167,16 @@ ${propLines ? `PROP LINES TONIGHT:\n${propLines}` : ''}`.trim();
 
   const dbL10    = dbRows.slice(0, 10);
   const dbL5     = dbRows.slice(0, 5);
+
+  // Home/Away splits for hitters from DB logs
+  let hitterHomeAwayBlock = '';
+  if (dbRows.length >= 5) {
+    const hAvg = (rows, col) => rows.length ? (rows.reduce((s, r) => s + (parseFloat(r[col]) || 0), 0) / rows.length).toFixed(2) : 'N/A';
+    hitterHomeAwayBlock = `HOME vs AWAY (DB, this season):
+Home (${dbHomeRows.length}g): ${hAvg(dbHomeRows, 'hits')}H/g | ${hAvg(dbHomeRows, 'hr')}HR/g | ${hAvg(dbHomeRows, 'rbi')}RBI/g
+Away (${dbAwayRows.length}g): ${hAvg(dbAwayRows, 'hits')}H/g | ${hAvg(dbAwayRows, 'hr')}HR/g | ${hAvg(dbAwayRows, 'rbi')}RBI/g`;
+  }
+
   const dbBlock  = dbRows.length > 0 ? `
 GAME LOG HISTORY (${dbRows.length} games, 2025 season):
 L5 avg: ${avg(dbL5, 'hits')}H / ${avg(dbL5, 'hr')}HR / ${avg(dbL5, 'rbi')}RBI per game
@@ -1167,6 +1200,8 @@ K: ${stats.strikeOuts || 0} | BB: ${stats.baseOnBalls || 0} | GP: ${stats.gamesP
 RECENT GAMES (${season} season):
 ${recentLog || 'No recent games on record yet.'}
 ${dbBlock}
+
+${hitterHomeAwayBlock}
 
 ${platoonBlock}
 
@@ -1251,7 +1286,16 @@ async function getComparativeStats(sport, statCategory, scope) {
   const rows = result.rows;
   if (!rows.length) return `No comparative data found for ${sport} ${statCategory} tonight.`;
 
-  // Fetch chalk projections for these players (best match by name)
+  // Map stat_category → chalk_projections prop_type for filtering
+  const STAT_TO_PROP = {
+    'points': 'points', 'rebounds': 'rebounds', 'assists': 'assists',
+    '3pm': 'threes', 'goals': 'goals', 'nhl_assists': 'assists',
+    'sog': 'shots_on_goal', 'saves': 'saves', 'hits': 'hits',
+    'strikeouts': 'strikeouts',
+  };
+  const propTypeFilter = STAT_TO_PROP[statCategory] || statCategory;
+
+  // Fetch chalk projections filtered by the matching prop_type so edge/line are relevant
   const playerNames = rows.map(r => r.player_name);
   let projMap = {};
   if (playerNames.length > 0) {
@@ -1262,9 +1306,9 @@ async function getComparativeStats(sport, statCategory, scope) {
              confidence_score
       FROM chalk_projections
       WHERE sport = $1 AND game_date = CURRENT_DATE
-      AND prop_type IS NOT NULL AND proj_value IS NOT NULL
+      AND prop_type = $2 AND proj_value IS NOT NULL
       ORDER BY player_name, confidence_score DESC NULLS LAST
-    `, [sport]).catch(() => ({ rows: [] }));
+    `, [sport, propTypeFilter]).catch(() => ({ rows: [] }));
 
     for (const r of projRows.rows) {
       projMap[r.player_name.toLowerCase()] = r;

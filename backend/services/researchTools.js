@@ -643,6 +643,18 @@ async function get_tonight_schedule({ sport }) {
 const { Pool: PgPool } = require('pg');
 const _matchupDb = new PgPool({ connectionString: process.env.DATABASE_URL });
 
+// Maps last word of Odds API team name → 3-letter abbreviation used in position_defense_ratings
+const NBA_TEAM_ABBR_MAP = {
+  'hawks': 'ATL',  'celtics': 'BOS',  'nets': 'BKN',   'hornets': 'CHA',
+  'bulls': 'CHI',  'cavaliers': 'CLE','mavericks': 'DAL','nuggets': 'DEN',
+  'pistons': 'DET','warriors': 'GSW', 'rockets': 'HOU', 'pacers': 'IND',
+  'clippers': 'LAC','lakers': 'LAL',  'grizzlies': 'MEM','heat': 'MIA',
+  'bucks': 'MIL',  'timberwolves': 'MIN','pelicans': 'NOP','knicks': 'NYK',
+  'thunder': 'OKC','magic': 'ORL',   '76ers': 'PHI',   'suns': 'PHX',
+  'blazers': 'POR','kings': 'SAC',   'spurs': 'SAS',   'raptors': 'TOR',
+  'jazz': 'UTA',   'wizards': 'WAS',
+};
+
 async function get_matchup_stats({ team1, team2, sport }) {
   const fmt  = n => (n > 0 ? `+${n}` : `${n}`);
   const t1   = (team1 || '').toLowerCase();
@@ -696,38 +708,154 @@ async function get_matchup_stats({ team1, team2, sport }) {
     }
   }
 
-  // Team situation splits — query for both teams
+  // Keyword for DB team name matching
+  const awayKw = event.away_team.split(' ').pop();
+  const homeKw = event.home_team.split(' ').pop();
+
+  // NBA-specific enrichment
   if (sport === 'NBA') {
-    const addSplits = async (teamName) => {
-      try {
-        const result = await _matchupDb.query(`
-          SELECT split_type, wins, games, win_pct, pts_scored, pts_allowed
-          FROM team_situation_splits
-          WHERE sport = 'NBA' AND team_name ILIKE $1
-          AND split_type IN ('home', 'away', 'rest_1', 'rest_2')
-          ORDER BY split_type
-        `, [`%${teamName.split(' ').pop()}%`]);
-        const rows = result.rows;
-        if (!rows.length) return null;
-        const fmt2 = (r) => r ? `${r.wins}-${r.games - r.wins} (${(parseFloat(r.win_pct) * 100).toFixed(0)}%) ${parseFloat(r.pts_scored).toFixed(1)} PPG` : 'N/A';
-        const home  = rows.find(r => r.split_type === 'home');
-        const away  = rows.find(r => r.split_type === 'away');
-        const b2b   = rows.find(r => r.split_type === 'rest_1');
-        const rest  = rows.find(r => r.split_type === 'rest_2');
-        return `${teamName} situation record:
-  Home: ${fmt2(home)} | Away: ${fmt2(away)}
-  B2B (rest_1): ${fmt2(b2b)} | With rest (2+ days): ${fmt2(rest)}`;
-      } catch {
-        return null;
-      }
+    const [awaySplitsRes, homeSplitsRes, awayPaceRes, homePaceRes, awayPosDefRes, homePosDefRes] = await Promise.all([
+      _matchupDb.query(`
+        SELECT split_type, wins, games, win_pct, pts_scored, pts_allowed
+        FROM team_situation_splits
+        WHERE sport = 'NBA' AND team_name ILIKE $1
+        AND split_type IN ('home', 'away', 'rest_1', 'rest_2')
+        ORDER BY split_type
+      `, [`%${awayKw}%`]).catch(() => ({ rows: [] })),
+      _matchupDb.query(`
+        SELECT split_type, wins, games, win_pct, pts_scored, pts_allowed
+        FROM team_situation_splits
+        WHERE sport = 'NBA' AND team_name ILIKE $1
+        AND split_type IN ('home', 'away', 'rest_1', 'rest_2')
+        ORDER BY split_type
+      `, [`%${homeKw}%`]).catch(() => ({ rows: [] })),
+      _matchupDb.query(`
+        SELECT AVG(pace) as avg_pace, AVG(points_scored) as avg_pts, AVG(points_allowed) as avg_pa
+        FROM team_game_logs
+        WHERE sport = 'NBA' AND team_name ILIKE $1
+        AND game_date >= CURRENT_DATE - 30
+      `, [`%${awayKw}%`]).catch(() => ({ rows: [] })),
+      _matchupDb.query(`
+        SELECT AVG(pace) as avg_pace, AVG(points_scored) as avg_pts, AVG(points_allowed) as avg_pa
+        FROM team_game_logs
+        WHERE sport = 'NBA' AND team_name ILIKE $1
+        AND game_date >= CURRENT_DATE - 30
+      `, [`%${homeKw}%`]).catch(() => ({ rows: [] })),
+      // Per-position defense — DB uses 3-letter abbrevs, map from team name last word
+      _matchupDb.query(`
+        WITH ranked AS (
+          SELECT team_name, position, pts_allowed,
+            RANK() OVER (PARTITION BY position ORDER BY pts_allowed ASC) as rank_in_league,
+            COUNT(*) OVER (PARTITION BY position) as total_teams
+          FROM position_defense_ratings
+          WHERE sport = 'NBA' AND position != 'ALL'
+        )
+        SELECT position, pts_allowed, rank_in_league, total_teams
+        FROM ranked WHERE team_name = $1
+        ORDER BY position
+      `, [NBA_TEAM_ABBR_MAP[awayKw.toLowerCase()] || awayKw]).catch(() => ({ rows: [] })),
+      _matchupDb.query(`
+        WITH ranked AS (
+          SELECT team_name, position, pts_allowed,
+            RANK() OVER (PARTITION BY position ORDER BY pts_allowed ASC) as rank_in_league,
+            COUNT(*) OVER (PARTITION BY position) as total_teams
+          FROM position_defense_ratings
+          WHERE sport = 'NBA' AND position != 'ALL'
+        )
+        SELECT position, pts_allowed, rank_in_league, total_teams
+        FROM ranked WHERE team_name = $1
+        ORDER BY position
+      `, [NBA_TEAM_ABBR_MAP[homeKw.toLowerCase()] || homeKw]).catch(() => ({ rows: [] })),
+    ]);
+
+    const fmtSplit = (rows, type) => {
+      const r = rows.find(x => x.split_type === type);
+      return r ? `${r.wins}-${r.games - r.wins} (${(parseFloat(r.win_pct) * 100).toFixed(0)}%) ${parseFloat(r.pts_scored).toFixed(1)} PPG` : 'N/A';
     };
 
-    const [awaySplits, homeSplits] = await Promise.all([
-      addSplits(event.away_team),
-      addSplits(event.home_team),
+    const formatSplits = (teamName, rows) => {
+      if (!rows.length) return null;
+      return `${teamName} record:
+  Home: ${fmtSplit(rows, 'home')} | Away: ${fmtSplit(rows, 'away')}
+  B2B: ${fmtSplit(rows, 'rest_1')} | With rest: ${fmtSplit(rows, 'rest_2')}`;
+    };
+
+    const awaySplitsStr = formatSplits(event.away_team, awaySplitsRes.rows);
+    const homeSplitsStr = formatSplits(event.home_team, homeSplitsRes.rows);
+    if (awaySplitsStr) lines.push('\n' + awaySplitsStr);
+    if (homeSplitsStr) lines.push(homeSplitsStr);
+
+    // Pace context
+    const ap = awayPaceRes.rows[0];
+    const hp = homePaceRes.rows[0];
+    if (ap?.avg_pace || hp?.avg_pace) {
+      const paceParts = [];
+      if (ap?.avg_pace) paceParts.push(`${event.away_team}: Pace ${parseFloat(ap.avg_pace).toFixed(1)} | Off ${parseFloat(ap.avg_pts).toFixed(1)} | Def ${parseFloat(ap.avg_pa).toFixed(1)} PPG (L30d)`);
+      if (hp?.avg_pace) paceParts.push(`${event.home_team}: Pace ${parseFloat(hp.avg_pace).toFixed(1)} | Off ${parseFloat(hp.avg_pts).toFixed(1)} | Def ${parseFloat(hp.avg_pa).toFixed(1)} PPG (L30d)`);
+      if (ap?.avg_pace && hp?.avg_pace) {
+        const combined = ((parseFloat(ap.avg_pace) + parseFloat(hp.avg_pace)) / 2).toFixed(1);
+        paceParts.push(`Combined pace: ${combined}`);
+      }
+      lines.push('\nPACE & SCORING:\n' + paceParts.join('\n'));
+    }
+
+    // Per-position defense
+    const formatPosDef = (teamName, rows) => {
+      if (!rows.length) return null;
+      const posLines = rows.map(r => {
+        const rank = r.rank_in_league && r.total_teams
+          ? ` (${r.rank_in_league}/${r.total_teams})` : '';
+        return `  ${r.position}: allows ${parseFloat(r.pts_allowed).toFixed(1)} pts/g${rank}`;
+      });
+      return `${teamName} POSITION DEFENSE:\n${posLines.join('\n')}`;
+    };
+
+    const awayPosDef = formatPosDef(event.away_team, awayPosDefRes.rows);
+    const homePosDef = formatPosDef(event.home_team, homePosDefRes.rows);
+    if (awayPosDef) lines.push('\n' + awayPosDef);
+    if (homePosDef) lines.push(homePosDef);
+  }
+
+  // MLB-specific enrichment
+  if (sport === 'MLB') {
+    // Extract team abbreviations from event name via MLB_TEAM_ABBR
+    const awayAbbr = Object.entries(MLB_TEAM_ABBR).find(([kw]) => event.away_team.toLowerCase().includes(kw))?.[1] || awayKw;
+    const homeAbbr = Object.entries(MLB_TEAM_ABBR).find(([kw]) => event.home_team.toLowerCase().includes(kw))?.[1] || homeKw;
+
+    const [awayBullpenRes, homeBullpenRes] = await Promise.all([
+      _matchupDb.query(`
+        SELECT pitcher_name, is_closer, games_last_3, pitches_last_3, innings_last_3, days_since_last_app
+        FROM bullpen_usage
+        WHERE team_abbr = $1
+        AND collected_date >= CURRENT_DATE - 3
+        ORDER BY pitches_last_3 DESC NULLS LAST
+        LIMIT 5
+      `, [awayAbbr]).catch(() => ({ rows: [] })),
+      _matchupDb.query(`
+        SELECT pitcher_name, is_closer, games_last_3, pitches_last_3, innings_last_3, days_since_last_app
+        FROM bullpen_usage
+        WHERE team_abbr = $1
+        AND collected_date >= CURRENT_DATE - 3
+        ORDER BY pitches_last_3 DESC NULLS LAST
+        LIMIT 5
+      `, [homeAbbr]).catch(() => ({ rows: [] })),
     ]);
-    if (awaySplits) lines.push('\n' + awaySplits);
-    if (homeSplits) lines.push(homeSplits);
+
+    const fmtBullpen = (teamLabel, rows) => {
+      if (!rows.length) return null;
+      const bullpenLines = rows.map(r => {
+        const role   = r.is_closer ? ' [CL]' : '';
+        const days   = r.days_since_last_app != null ? ` (${r.days_since_last_app}d rest)` : '';
+        const pitches = r.pitches_last_3 ? ` ${r.pitches_last_3}P` : '';
+        return `  ${r.pitcher_name}${role}: ${r.games_last_3 || 0}G/${r.innings_last_3 || '0.0'}IP last 3d${pitches}${days}`;
+      });
+      return `${teamLabel} BULLPEN (last 3 days):\n${bullpenLines.join('\n')}`;
+    };
+
+    const awayBullpen = fmtBullpen(event.away_team, awayBullpenRes.rows);
+    const homeBullpen = fmtBullpen(event.home_team, homeBullpenRes.rows);
+    if (awayBullpen) lines.push('\n' + awayBullpen);
+    if (homeBullpen) lines.push(homeBullpen);
   }
 
   return lines.join('\n');
