@@ -609,7 +609,7 @@ def project_shots_on_goal(logs: list, opp_team_logs: list,
     sog_pp_boost = (pp_toi_f - 1.0) * 0.25   # 25% weight as per spec
 
     # 4. Opponent shots allowed factor
-    opp_sa_l10 = rolling_avg(opp_team_logs, 'fg_att', 10) or LEAGUE['shots_against_pg']
+    opp_sa_l10 = rolling_avg(opp_team_logs, 'blocks', 10) or LEAGUE['shots_against_pg']
     opp_shot_f = cap(opp_sa_l10 / LEAGUE['shots_against_pg'], 0.88, 1.18)
 
     # 5. Game script factor (passed in from Odds API)
@@ -812,7 +812,7 @@ def project_assists(logs: list, opp_team_logs: list, own_team_logs: list,
 
     # 6. Passing lane factor (active D = fewer assists)
     # Proxy: opponent steals/deflections approximate — use shots against rate
-    opp_sa_l10 = rolling_avg(opp_team_logs, 'fg_att', 10) or LEAGUE['shots_against_pg']
+    opp_sa_l10 = rolling_avg(opp_team_logs, 'blocks', 10) or LEAGUE['shots_against_pg']
     if opp_sa_l10 > LEAGUE['shots_against_pg'] * 1.08:
         passing_lane_f = 0.94   # high-shot defence, active puck pursuit
     else:
@@ -999,7 +999,7 @@ def project_saves(goalie_logs: list, opp_team_logs: list,
         gsaa_f = 1.00
 
     # 3. Opponent shots factor (most important for save VOLUME)
-    opp_sf_l10 = rolling_avg(opp_team_logs, 'fg_made', 10) or LEAGUE['shots_for_pg']
+    opp_sf_l10 = rolling_avg(opp_team_logs, 'steals', 10) or LEAGUE['shots_for_pg']
     opp_shot_f = cap(opp_sf_l10 / LEAGUE['shots_for_pg'], 0.80, 1.30)
 
     # 4. Opponent shooting percentage regression
@@ -1034,7 +1034,7 @@ def project_saves(goalie_logs: list, opp_team_logs: list,
         rest_f = 1.00
 
     # 8. Team defence factor (subtle)
-    own_sa_l10 = rolling_avg(opp_team_logs, 'fg_att', 10) or LEAGUE['shots_against_pg']
+    own_sa_l10 = rolling_avg(opp_team_logs, 'blocks', 10) or LEAGUE['shots_against_pg']
     # Higher opp SA = goalie faces more = slightly more saves but also more GA
     team_def_f = cap(1.0 + (own_sa_l10 / LEAGUE['shots_against_pg'] - 1.0) * 0.03,
                      0.97, 1.03)
@@ -1097,7 +1097,7 @@ def project_goals_against(goalie_logs: list, opp_team_logs: list,
     opp_goals_f = cap(opp_gf_l10 / LEAGUE['team_goals_pg'], 0.75, 1.35)
 
     # 3. Opponent PP quality proxy
-    opp_sf_l10  = rolling_avg(opp_team_logs, 'fg_made', 10) or LEAGUE['shots_for_pg']
+    opp_sf_l10  = rolling_avg(opp_team_logs, 'steals', 10) or LEAGUE['shots_for_pg']
     opp_sh_pct  = (opp_gf_l10 / opp_sf_l10) if opp_sf_l10 > 0 else LEAGUE['sh_pct']
     if opp_sh_pct > LEAGUE['sh_pct'] * 1.15:
         pp_quality_f = 1.12

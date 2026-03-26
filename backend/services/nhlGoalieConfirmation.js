@@ -146,7 +146,7 @@ async function isBackupGoalie(goalieId, teamAbbr) {
                WHERE team_name ILIKE $2 AND sport = 'NHL') as team_games
        FROM player_game_logs
        WHERE player_id = $1 AND sport = 'NHL'
-         AND saves > 0`,
+         AND steals > 0`,
       [goalieId, `%${teamAbbr}%`]
     );
     const row = rows[0];
@@ -212,7 +212,7 @@ async function recalculateForBackup(gameId, homeTeam, awayTeam, backupSide, game
   const backupTeam = backupSide === 'home' ? homeTeam : awayTeam;
   await db.query(
     `UPDATE chalk_projections cp
-     SET proj_saves      = proj_saves * 0.85,
+     SET proj_value      = proj_value * 0.85,
          confidence      = GREATEST(40, COALESCE(confidence, 60) - 15),
          factors_json    = factors_json || '{"backup_goalie_starting": true}'::jsonb
      FROM player_game_logs pgl

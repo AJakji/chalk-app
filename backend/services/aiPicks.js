@@ -593,8 +593,11 @@ ${JSON.stringify(edgesForClaude, null, 2)}`;
 async function storeModelPicks(picks, headshotMap = {}) {
   for (const pick of picks) {
     try {
-      // Build a stable unique key: player + prop direction + date
-      const gameId = `model_${(pick.playerName || pick.pick || '').replace(/\s+/g, '_').toLowerCase()}_${new Date().toISOString().split('T')[0]}`;
+      // Build a stable unique key: player + prop type + date
+      // Include propType so the same player can have multiple picks (e.g. points + PRA)
+      const propSlug = (pick.propType || pick.pick || '').replace(/\s+/g, '_').toLowerCase();
+      const playerSlug = (pick.playerName || '').replace(/\s+/g, '_').toLowerCase();
+      const gameId = `model_${playerSlug}_${propSlug}_${new Date().toISOString().split('T')[0]}`;
 
       // Build the analysis object from Chalky's new 3-field format
       const analysis = {

@@ -188,7 +188,13 @@ def _paginate(endpoint: str, base_params: dict) -> list[dict]:
 def get_db() -> psycopg2.extensions.connection:
     if not DATABASE_URL:
         raise RuntimeError('DATABASE_URL env var not set')
-    conn = psycopg2.connect(DATABASE_URL)
+    conn = psycopg2.connect(
+        DATABASE_URL,
+        keepalives=1,
+        keepalives_idle=60,      # send keepalive after 60s idle
+        keepalives_interval=10,  # retry every 10s
+        keepalives_count=5,      # 5 retries before giving up
+    )
     conn.autocommit = False
     return conn
 
@@ -444,9 +450,69 @@ ON CONFLICT (player_id, game_date, sport) DO UPDATE SET
     home_away         = EXCLUDED.home_away
 """
 
-def upsert_player_game_log(conn, row: dict) -> None:
+def bulk_upsert_game_logs(conn, rows: list[dict]) -> None:
+    """
+    Bulk-insert a list of row dicts in one SQL statement using execute_values.
+    Single commit after all rows — dramatically faster than per-row execute+commit.
+    """
+    if not rows:
+        return
+
+    cols = [
+        'player_id', 'player_name', 'team', 'season',
+        'game_date', 'game_id', 'opponent', 'home_away',
+        'minutes', 'points', 'rebounds', 'assists', 'steals', 'blocks',
+        'turnovers', 'fouls',
+        'fg_made', 'fg_att', 'fg_pct',
+        'three_made', 'three_att', 'three_pct',
+        'ft_made', 'ft_att', 'ft_pct',
+        'off_reb', 'def_reb',
+        'usage_rate', 'true_shooting_pct',
+        'offensive_rating', 'defensive_rating',
+        'plus_minus', 'pace', 'position',
+    ]
+
+    sql = f"""
+        INSERT INTO player_game_logs (
+            {', '.join(cols)}, sport
+        ) VALUES %s
+        ON CONFLICT (player_id, game_date, sport) DO UPDATE SET
+            minutes           = EXCLUDED.minutes,
+            points            = EXCLUDED.points,
+            rebounds          = EXCLUDED.rebounds,
+            assists           = EXCLUDED.assists,
+            steals            = EXCLUDED.steals,
+            blocks            = EXCLUDED.blocks,
+            turnovers         = EXCLUDED.turnovers,
+            fouls             = EXCLUDED.fouls,
+            fg_made           = EXCLUDED.fg_made,
+            fg_att            = EXCLUDED.fg_att,
+            fg_pct            = EXCLUDED.fg_pct,
+            three_made        = EXCLUDED.three_made,
+            three_att         = EXCLUDED.three_att,
+            three_pct         = EXCLUDED.three_pct,
+            ft_made           = EXCLUDED.ft_made,
+            ft_att            = EXCLUDED.ft_att,
+            ft_pct            = EXCLUDED.ft_pct,
+            off_reb           = EXCLUDED.off_reb,
+            def_reb           = EXCLUDED.def_reb,
+            usage_rate        = EXCLUDED.usage_rate,
+            true_shooting_pct = EXCLUDED.true_shooting_pct,
+            offensive_rating  = EXCLUDED.offensive_rating,
+            defensive_rating  = EXCLUDED.defensive_rating,
+            plus_minus        = EXCLUDED.plus_minus,
+            pace              = EXCLUDED.pace,
+            position          = EXCLUDED.position,
+            team              = EXCLUDED.team,
+            opponent          = EXCLUDED.opponent,
+            home_away         = EXCLUDED.home_away
+    """
+
+    # Build tuple list — each row includes 'NBA' for sport at the end
+    values = [tuple(r.get(c) for c in cols) + ('NBA',) for r in rows]
+
     with conn.cursor() as cur:
-        cur.execute(_UPSERT_PLAYER_GAME_LOG, row)
+        psycopg2.extras.execute_values(cur, sql, values, page_size=500)
     conn.commit()
 
 
@@ -510,9 +576,21 @@ def collect_player_logs(conn, players: list[dict], full: bool) -> None:
             if pid and gid:
                 adv_map[(pid, gid)] = a
 
+        # ── Reconnect if Railway closed the idle connection during BDL API calls ──
+        if conn.closed:
+            log.warning('  DB connection was closed — reconnecting…')
+            conn = get_db()
+        else:
+            try:
+                conn.cursor().execute('SELECT 1')
+            except Exception:
+                log.warning('  DB connection lost — reconnecting…')
+                conn = get_db()
+
         # ── Normalise and write ────────────────────────────────────────────────
         batch_written = 0
         batch_skipped = 0
+        batch_rows: list[dict] = []
 
         for raw in raw_stats:
             player_info = raw.get('player') or {}
@@ -535,8 +613,6 @@ def collect_player_logs(conn, players: list[dict], full: bool) -> None:
             adv = adv_map.get((pid, gid))
 
             # Determine season year from game date (NBA season straddles two years)
-            # BallDontLie seasons[]: we use the season_yr embedded in our request,
-            # but game date is the authoritative label source.
             # Approximate: Oct-Dec → same year start; Jan-Jun → previous year start.
             if gdate.month >= 10:
                 season_yr = gdate.year
@@ -548,17 +624,22 @@ def collect_player_logs(conn, players: list[dict], full: bool) -> None:
                 batch_skipped += 1
                 continue
 
+            batch_rows.append(row)
+            # Update local cache so later rows in this batch don't re-insert a date we just staged
+            if pid not in last_dates or last_dates[pid] < gdate:
+                last_dates[pid] = gdate
+
+        # Bulk insert all rows in one SQL statement — replaces thousands of round-trips
+        try:
+            bulk_upsert_game_logs(conn, batch_rows)
+            batch_written = len(batch_rows)
+        except Exception as exc:
+            log.error(f'  Batch {batch_num} bulk insert failed: {exc}')
             try:
-                upsert_player_game_log(conn, row)
-                batch_written += 1
-                # Update our local cache so later rows in this same batch don't
-                # re-insert a date we just wrote
-                if pid not in last_dates or last_dates[pid] < gdate:
-                    last_dates[pid] = gdate
-            except Exception as exc:
                 conn.rollback()
-                log.error(f'  DB write error (player_id={pid}, game_id={gid}): {exc}')
-                batch_skipped += 1
+            except Exception:
+                pass
+            batch_skipped += len(batch_rows)
 
         total_written += batch_written
         total_skipped += batch_skipped
@@ -566,6 +647,7 @@ def collect_player_logs(conn, players: list[dict], full: bool) -> None:
         time.sleep(DELAY_BETWEEN_BATCHES)
 
     log.info(f'Phase 1 complete — total written: {total_written}, skipped: {total_skipped}')
+    return conn  # may have been reconnected mid-run
 
 
 def backfill_positions(conn, players: list[dict]) -> None:
@@ -647,7 +729,7 @@ def main() -> None:
         # Phase 1: player game logs
         players = fetch_active_players()
         if players:
-            collect_player_logs(conn, players, args.full)
+            conn = collect_player_logs(conn, players, args.full)
             # Backfill position for existing rows (idempotent — only updates NULL rows)
             backfill_positions(conn, players)
         else:

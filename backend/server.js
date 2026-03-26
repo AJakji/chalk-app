@@ -148,6 +148,19 @@ if (process.env.MOCK_MODE !== 'true') {
   }, { timezone: 'America/New_York' });
 
   // ── 12:30 AM — Derived stats (BABIP, ISO, TS%, usage rate) ───────────────────
+  // ── 12:15 AM — Build team_game_logs from player_game_logs ────────────────────
+  // populateTeamData.py aggregates player logs → team totals (pace, pts scored/allowed).
+  // Runs after the 12:00 AM data collector so player_game_logs has tonight's new games.
+  // The projection model reads team pace from team_game_logs; without this it defaults to
+  // league average pace for every game (picks still generate, but lose the pace factor).
+  cron.schedule('15 0 * * *', async () => {
+    console.log('\n⏰ [12:15 AM] Building team game logs from player data…');
+    await Promise.all([
+      runPipeline('NBA Team Data', () => runPythonScript('populateTeamData.py')),
+      runPipeline('NHL Team Data', () => runPythonScript('nhlTeamCollector.py')),
+    ]);
+  }, { timezone: 'America/New_York' });
+
   cron.schedule('30 0 * * *', async () => {
     console.log('\n⏰ [12:30 AM] Computing derived stats…');
     await runPipeline('Derived Stats', () => runPythonScript('computeDerivedStats.py'));
@@ -348,6 +361,29 @@ if (process.env.MOCK_MODE !== 'true') {
     await runPipeline('NBA Player Props Run',
       () => runPythonScript('nbaProjectionModel.py', ['--props-only'])
     );
+  }, { timezone: 'America/New_York' });
+
+  // ── 9:30 AM ET — NBA player prop edge detection ───────────────────────────────
+  // The 5:30 AM detectEdges() ran before player projections existed in chalk_projections.
+  // Now that --props-only has written player projections, run edge detection again to
+  // compare our projections against live prop lines and write chalk_edge + confidence
+  // to player_props_history. Required before generateModelPicks() can find player prop picks.
+  cron.schedule('30 9 * * *', async () => {
+    console.log('\n⏰ [9:30 AM] NBA player prop edge detection (post props-only run)…');
+    await runPipeline('NBA Player Prop Edges', () => detectEdges());
+  }, { timezone: 'America/New_York' });
+
+  // ── 9:45 AM ET — Generate Chalky's player prop picks ─────────────────────────
+  // The 6:00 AM aiPicks run found 0 model edges (player props not ready yet).
+  // Now that edges are written at 9:30 AM, generate Chalky's player prop picks.
+  // These are added on top of the team prop picks from the 6 AM run, giving the
+  // full slate of picks before the 10 AM delivery window.
+  cron.schedule('45 9 * * *', async () => {
+    console.log('\n⏰ [9:45 AM] Generating Chalky\'s player prop picks…');
+    await runPipeline('Chalky Player Prop Picks', async () => {
+      const picks = await generateModelPicks();
+      console.log(`  Player prop picks generated: ${picks.length}`);
+    });
   }, { timezone: 'America/New_York' });
 
 } else {

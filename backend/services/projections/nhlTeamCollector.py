@@ -108,6 +108,42 @@ def get_json(url: str) -> Optional[dict]:
         return None
 
 
+def populate_shot_data(conn) -> int:
+    """
+    Aggregate shots for/against from player_game_logs into team_game_logs.
+    Uses repurposed columns (shared table with NBA):
+      steals → NHL shots for  (shots the team generates)
+      blocks → NHL shots against (shots the team allows)
+    Returns count of rows updated.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """UPDATE team_game_logs tgl
+               SET steals = (
+                   SELECT SUM(pgl.fg_made)
+                   FROM player_game_logs pgl
+                   WHERE pgl.team = tgl.team_name
+                     AND pgl.game_date = tgl.game_date
+                     AND pgl.sport = 'NHL'
+                     AND pgl.position != 'G'
+                     AND pgl.fg_made IS NOT NULL
+               ),
+               blocks = (
+                   SELECT SUM(pgl.fg_made)
+                   FROM player_game_logs pgl
+                   WHERE pgl.team = tgl.opponent
+                     AND pgl.game_date = tgl.game_date
+                     AND pgl.sport = 'NHL'
+                     AND pgl.position != 'G'
+                     AND pgl.fg_made IS NOT NULL
+               )
+               WHERE tgl.sport = 'NHL'"""
+        )
+        updated = cur.rowcount
+    conn.commit()
+    return updated
+
+
 def upsert_team_game(conn, row: dict) -> bool:
     """Insert or update one team game log row. Returns True if upserted."""
     with conn.cursor() as cur:
@@ -251,6 +287,10 @@ def main():
 
         log.info(f'  Season {season} total: {season_rows} rows')
         total_rows += season_rows
+
+    log.info('\n▶ Aggregating shots for/against from player_game_logs…')
+    shot_rows = populate_shot_data(conn)
+    log.info(f'  Shot data populated for {shot_rows} team game rows')
 
     conn.close()
     log.info(f'\n✅ Done — {total_rows} total rows upserted across all teams/seasons')
