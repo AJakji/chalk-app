@@ -6,17 +6,10 @@ Runs at 1:00 AM nightly after computeDerivedStats.py.
 Computes position_defense_ratings from player_game_logs.
 No API calls. Reads what players have actually scored against each team.
 
-What it produces:
-  For every opponent team: how much they allow PER GAME (team totals, not per player).
-  Scale matches the projection model's LEAGUE_AVG (pts=112, reb=43.5, ast=24.5).
-
-  team_name is stored as the team ABBREVIATION (e.g. 'TOR', 'GSW') so the model's
-  exact-match query in get_defense_rating() works for every team including BKN, GSW,
-  NYK, OKC, LAC, LAL, PHX, NOP, SAS.
-
-Position-specific ratings:
-  Requires a position column in player_game_logs. Currently not populated, so
-  only position='ALL' is computed. Add position data to unlock per-position splits.
+Writes two sets of rows:
+  position='ALL'   — aggregate (always written, used as fallback)
+  position='PG/SG/SF/PF/C' — per-position splits (written when position
+                               column is populated in player_game_logs)
 """
 from __future__ import annotations
 import os, sys, logging
@@ -45,6 +38,7 @@ TEAM_ABBR_TO_ID = {
 AGGREGATE_SQL = """
 SELECT
     opponent                                                          AS team_abbr,
+    'ALL'                                                             AS position,
     ROUND((SUM(points)     / COUNT(DISTINCT game_date))::numeric, 3) AS pts_allowed,
     ROUND((SUM(rebounds)   / COUNT(DISTINCT game_date))::numeric, 3) AS reb_allowed,
     ROUND((SUM(assists)    / COUNT(DISTINCT game_date))::numeric, 3) AS ast_allowed,
@@ -64,13 +58,39 @@ HAVING COUNT(DISTINCT game_date) >= 5
 ORDER BY pts_allowed DESC
 """
 
+# Per-position split — only runs when position column is populated.
+POSITION_SQL = """
+SELECT
+    opponent                                                          AS team_abbr,
+    position,
+    ROUND((SUM(points)     / COUNT(DISTINCT game_date))::numeric, 3) AS pts_allowed,
+    ROUND((SUM(rebounds)   / COUNT(DISTINCT game_date))::numeric, 3) AS reb_allowed,
+    ROUND((SUM(assists)    / COUNT(DISTINCT game_date))::numeric, 3) AS ast_allowed,
+    ROUND((SUM(three_made) / COUNT(DISTINCT game_date))::numeric, 3) AS three_allowed,
+    CASE WHEN SUM(fg_att) > 0
+         THEN ROUND((SUM(fg_made) / SUM(fg_att))::numeric, 4)
+         ELSE NULL END                                                AS fg_pct_allowed,
+    COUNT(DISTINCT game_date)                                         AS sample_games
+FROM player_game_logs
+WHERE sport    = 'NBA'
+  AND season   = %s
+  AND minutes  > 5
+  AND opponent IS NOT NULL
+  AND opponent != ''
+  AND position IS NOT NULL
+  AND position IN ('PG','SG','SF','PF','C','G','F')
+GROUP BY opponent, position
+HAVING COUNT(DISTINCT game_date) >= 5
+ORDER BY opponent, position
+"""
+
 UPSERT_SQL = """
 INSERT INTO position_defense_ratings
     (team_id, team_name, sport, season, position,
      pts_allowed, reb_allowed, ast_allowed, three_allowed, fg_pct_allowed,
      updated_at)
 VALUES
-    (%(team_id)s, %(team_name)s, 'NBA', %(season)s, 'ALL',
+    (%(team_id)s, %(team_name)s, 'NBA', %(season)s, %(position)s,
      %(pts_allowed)s, %(reb_allowed)s, %(ast_allowed)s, %(three_allowed)s, %(fg_pct_allowed)s,
      NOW())
 ON CONFLICT (team_id, season, position) DO UPDATE SET
@@ -91,44 +111,57 @@ def main():
     conn = psycopg2.connect(DATABASE_URL)
     conn.autocommit = False
 
-    try:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(AGGREGATE_SQL, (CURRENT_SEASON,))
-            rows = cur.fetchall()
+    def run_batch(cur, sql, label):
+        cur.execute(sql, (CURRENT_SEASON,))
+        rows = cur.fetchall()
+        log.info(f'{label}: {len(rows)} rows found')
+        return rows
 
-        log.info(f'Computed defense ratings for {len(rows)} teams')
-
-        written  = 0
-        skipped  = 0
+    def upsert_rows(rows, label):
+        written = 0
+        skipped = 0
         for r in rows:
-            abbr = r['team_abbr']
+            abbr    = r['team_abbr']
             team_id = TEAM_ABBR_TO_ID.get(abbr)
             if not team_id:
-                log.warning(f'  Unknown abbreviation: {abbr} — skipped')
+                log.warning(f'  {label} — unknown abbr: {abbr} — skipped')
                 skipped += 1
                 continue
-
             record = {
-                'team_id':       team_id,
-                'team_name':     abbr,          # store abbreviation — model uses exact match
-                'season':        CURRENT_SEASON,
-                'pts_allowed':   float(r['pts_allowed']),
-                'reb_allowed':   float(r['reb_allowed']),
-                'ast_allowed':   float(r['ast_allowed']),
-                'three_allowed': float(r['three_allowed']),
+                'team_id':        team_id,
+                'team_name':      abbr,
+                'season':         CURRENT_SEASON,
+                'position':       r['position'],
+                'pts_allowed':    float(r['pts_allowed']),
+                'reb_allowed':    float(r['reb_allowed']),
+                'ast_allowed':    float(r['ast_allowed']),
+                'three_allowed':  float(r['three_allowed']),
                 'fg_pct_allowed': float(r['fg_pct_allowed']) if r['fg_pct_allowed'] else None,
             }
-
-            with conn.cursor() as cur:
-                cur.execute(UPSERT_SQL, record)
+            with conn.cursor() as wc:
+                wc.execute(UPSERT_SQL, record)
             conn.commit()
             written += 1
-            log.info(
-                f'  {abbr}: {r["pts_allowed"]} pts | {r["reb_allowed"]} reb | '
-                f'{r["ast_allowed"]} ast | {r["sample_games"]} games'
-            )
+        log.info(f'  {label}: {written} written, {skipped} skipped')
+        return written
 
-        log.info(f'Done — {written} teams written, {skipped} skipped')
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            # Pass 1 — aggregate ALL rows (always)
+            all_rows = run_batch(cur, AGGREGATE_SQL, 'Aggregate ALL')
+
+        upsert_rows(all_rows, 'ALL')
+
+        # Pass 2 — per-position rows (only when position column is populated)
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            pos_rows = run_batch(cur, POSITION_SQL, 'Per-position')
+
+        if pos_rows:
+            upsert_rows(pos_rows, 'position-specific')
+        else:
+            log.info('  No position data in player_game_logs — per-position splits skipped')
+
+        log.info(f'Done')
 
     except Exception as exc:
         conn.rollback()

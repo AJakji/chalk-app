@@ -193,7 +193,7 @@ def load_league_averages(conn) -> None:
                 LEAGUE_AVG[row[0]] = float(row[1])
         log.info("League averages loaded: %s", LEAGUE_AVG)
     except Exception as e:
-        log.warning("Could not load league averages: %s", e)
+        log.warning("Could not load league averages (using hardcoded defaults): %s", e)
 
 
 # ---------------------------------------------------------------------------
@@ -387,17 +387,19 @@ def get_position_defense_factor(conn, opponent: str, position: str, stat: str) -
 
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                f"""SELECT {col}
-                    FROM position_defense_ratings
-                    WHERE team_name ILIKE %s AND position = %s AND sport = 'NBA'
-                    ORDER BY updated_at DESC LIMIT 1""",
-                (f'%{opponent}%', position.upper())
-            )
-            row = cur.fetchone()
-            if row and row[0] is not None:
-                factor = float(row[0]) / league_avg_val
-                return clamp(factor, 0.70, 1.30)
+            # Try position-specific row first, then fall back to aggregate 'ALL' row
+            for pos_lookup in (position.upper(), 'ALL'):
+                cur.execute(
+                    f"""SELECT {col}
+                        FROM position_defense_ratings
+                        WHERE team_name ILIKE %s AND position = %s AND sport = 'NBA'
+                        ORDER BY updated_at DESC LIMIT 1""",
+                    (f'%{opponent}%', pos_lookup)
+                )
+                row = cur.fetchone()
+                if row and row[0] is not None:
+                    factor = float(row[0]) / league_avg_val
+                    return clamp(factor, 0.70, 1.30)
     except Exception:
         pass
     return 1.0
@@ -1111,7 +1113,7 @@ def get_players_for_team(conn, team_abbr: str, game_date: str) -> list[dict]:
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
-                """SELECT player_id, player_name, position
+                """SELECT player_id, player_name, NULL::text AS position
                    FROM nightly_roster
                    WHERE team = %s AND sport = 'NBA' AND game_date = %s
                      AND is_confirmed_playing = true""",
@@ -1121,10 +1123,13 @@ def get_players_for_team(conn, team_abbr: str, game_date: str) -> list[dict]:
             if rows:
                 return [dict(r) for r in rows]
 
-            # Fallback: players with game logs in last 14 days
+            # Fallback: players with game logs in last 14 days.
+            # Exclude position from SELECT — column may not exist on all DB instances.
+            # Position is added as NULL and populated later from nightly_roster.
             cutoff = (date.fromisoformat(game_date) - timedelta(days=14)).isoformat()
             cur.execute(
-                """SELECT DISTINCT ON (player_id) player_id, player_name, position, team
+                """SELECT DISTINCT ON (player_id) player_id, player_name,
+                          NULL::text AS position, team
                    FROM player_game_logs
                    WHERE team ILIKE %s AND sport = 'NBA' AND game_date >= %s
                    ORDER BY player_id, game_date DESC""",
@@ -1262,16 +1267,17 @@ def upsert_team_props(conn, home_team: str, away_team: str, game_date: str, team
                 cur.execute(
                     """INSERT INTO team_projections
                          (team_name, opponent, sport, game_date, prop_type,
-                          proj_total, over_probability, under_probability,
+                          proj_total, proj_value, over_probability, under_probability,
                           confidence_score, factors_json, created_at, updated_at)
                        VALUES
                          (%s, %s, 'NBA', %s, %s,
-                          %s, %s, %s,
+                          %s, %s, %s, %s,
                           %s, %s,
                           NOW(), NOW())
                        ON CONFLICT (team_name, game_date, prop_type)
                        DO UPDATE SET
                          proj_total        = EXCLUDED.proj_total,
+                         proj_value        = EXCLUDED.proj_value,
                          over_probability  = EXCLUDED.over_probability,
                          under_probability = EXCLUDED.under_probability,
                          confidence_score  = EXCLUDED.confidence_score,
@@ -1280,6 +1286,7 @@ def upsert_team_props(conn, home_team: str, away_team: str, game_date: str, team
                     (
                         team, opponent, game_date, prop_type,
                         round(float(proj_val), 2),
+                        round(float(proj_val), 2),   # proj_value mirrors proj_total
                         data.get('over_prob', 0),
                         data.get('under_prob', 0),
                         round(conf, 1),
@@ -1295,7 +1302,7 @@ def upsert_team_props(conn, home_team: str, away_team: str, game_date: str, team
 
 def main() -> None:
     parser = argparse.ArgumentParser(description='Chalk NBA Projection Model v2.0')
-    parser.add_argument('--date', default=date.today().isoformat(),
+    parser.add_argument('--date', default=__import__('datetime').datetime.utcnow().date().isoformat(),
                         help='Game date YYYY-MM-DD (default: today)')
     args = parser.parse_args()
     game_date = args.date
@@ -1303,6 +1310,10 @@ def main() -> None:
     log.info("=== Chalk NBA Projection Model v2.0 — %s ===", game_date)
 
     conn = psycopg2.connect(DATABASE_URL)
+    # autocommit=True means each query is its own transaction.
+    # A failed read (e.g. missing table) cannot abort subsequent queries.
+    # The upsert functions call conn.commit() explicitly after each INSERT.
+    conn.autocommit = True
 
     # ── Step 0: Load league averages ────────────────────────────────────────
     load_league_averages(conn)
