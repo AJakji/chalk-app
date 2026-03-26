@@ -96,8 +96,10 @@ function runPythonScript(scriptName, args = []) {
 //   6:00 AM — aiPicks.js (generate Chalky pick cards for all sports via Claude)
 //   6:55 AM — verification check (confirm picks are in DB before 7 AM)
 //
-//  MORNING CLEANUP:
+//  MORNING — PLAYER PROPS:
 //   8:00 AM — pickGrader.js (grade yesterday's picks using final scores)
+//   9:00 AM — writePropLinesToDB (NBA + NHL + MLB — lines now posted by books)
+//   9:15 AM — nbaProjectionModel.py --props-only (player props with real lines)
 //
 //  NHL SPECIAL: goalie confirmation jobs scheduled dynamically at 4:00 AM,
 //               running 90 min before each puck drop.
@@ -334,6 +336,18 @@ if (process.env.MOCK_MODE !== 'true') {
     } catch (err) {
       console.error('[cron] writePropLinesToDB error:', err.message);
     }
+  }, { timezone: 'America/New_York' });
+
+  // ── 9:15 AM ET — NBA player props run ────────────────────────────────────────
+  // The 4:30 AM model run skips player props because sportsbooks haven't posted lines yet.
+  // This second run fires 15 min after writePropLinesToDB fills player_props_history.
+  // --props-only skips team props (already written at 4:30 AM) and only generates
+  // player prop picks: points, rebounds, assists, threes, PRA, P+R, P+A, A+R.
+  cron.schedule('15 9 * * *', async () => {
+    console.log('\n⏰ [9:15 AM] NBA player props run (lines now posted)…');
+    await runPipeline('NBA Player Props Run',
+      () => runPythonScript('nbaProjectionModel.py', ['--props-only'])
+    );
   }, { timezone: 'America/New_York' });
 
 } else {

@@ -53,6 +53,7 @@ BDL_BASE       = 'https://api.balldontlie.io/v1'
 BDL_KEY        = os.getenv('BALLDONTLIE_API_KEY', '')
 ODDS_API_KEY   = os.getenv('ODDS_API_KEY', '')
 ODDS_BASE      = 'https://api.the-odds-api.com/v4'
+CURRENT_SEASON = '2025-26'
 
 # ---------------------------------------------------------------------------
 # Archetype constants
@@ -446,8 +447,8 @@ def get_player_season_avgs(conn, player_id: int) -> dict:
                      AVG(ft_made)    AS ftm_pg,
                      COUNT(*)        AS games_played
                    FROM player_game_logs
-                   WHERE player_id = %s AND sport = 'NBA'""",
-                (player_id,)
+                   WHERE player_id = %s AND sport = 'NBA' AND season = %s""",
+                (player_id, CURRENT_SEASON)
             )
             row = cur.fetchone()
             return dict(row) if row else {}
@@ -547,16 +548,21 @@ def get_rest_days(conn, player_id: int, game_date: str) -> int:
 
 
 def get_home_away_split(conn, player_id: int, stat: str, is_home: bool) -> float:
-    """Average stat in home or away games. Returns 0 if insufficient data."""
+    """Average stat across last 20 home or away games. Returns 0 if insufficient data."""
     side_filter = "home_away = 'home'" if is_home else "home_away = 'away'"
     try:
         with conn.cursor() as cur:
+            # LIMIT must be inside the subquery — LIMIT on AVG has no effect
             cur.execute(
-                f"""SELECT AVG({stat})
-                    FROM player_game_logs
-                    WHERE player_id = %s AND sport = 'NBA' AND {side_filter}
-                    LIMIT 20""",
-                (player_id,)
+                f"""SELECT AVG(v) FROM (
+                        SELECT {stat} AS v
+                        FROM player_game_logs
+                        WHERE player_id = %s AND sport = 'NBA'
+                          AND season = %s AND {side_filter}
+                        ORDER BY game_date DESC
+                        LIMIT 20
+                    ) recent""",
+                (player_id, CURRENT_SEASON)
             )
             row = cur.fetchone()
             if row and row[0]:
@@ -1350,10 +1356,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description='Chalk NBA Projection Model v2.0')
     parser.add_argument('--date', default=__import__('datetime').datetime.utcnow().date().isoformat(),
                         help='Game date YYYY-MM-DD (default: today)')
-    args = parser.parse_args()
-    game_date = args.date
+    parser.add_argument('--props-only', action='store_true',
+                        help='Skip team props — generate player props only (9:15 AM run after lines posted)')
+    args      = parser.parse_args()
+    game_date  = args.date
+    props_only = args.props_only
 
-    log.info("=== Chalk NBA Projection Model v2.0 — %s ===", game_date)
+    if props_only:
+        log.info("=== Chalk NBA Projection Model v2.0 — %s [PLAYER PROPS ONLY] ===", game_date)
+    else:
+        log.info("=== Chalk NBA Projection Model v2.0 — %s ===", game_date)
 
     conn = psycopg2.connect(DATABASE_URL)
     # autocommit=True means each query is its own transaction.
@@ -1407,16 +1419,17 @@ def main() -> None:
         log.info("\n  %s @ %s | total=%.1f spread=%.1f",
                  away, home, implied_total, spread)
 
-        # Team props
-        team_props = project_team_props(
-            conn, home, away, game_date,
-            implied_total, spread, home_ml, away_ml
-        )
-        upsert_team_props(conn, home, away, game_date, team_props)
-        log.info("  Team props: total=%.1f over_prob=%.2f home_ML=%.3f",
-                 team_props['total']['proj'],
-                 team_props['total']['over_prob'],
-                 team_props['moneyline']['home_prob'])
+        # Team props — skipped on props-only run (already written at 4:30 AM)
+        if not props_only:
+            team_props = project_team_props(
+                conn, home, away, game_date,
+                implied_total, spread, home_ml, away_ml
+            )
+            upsert_team_props(conn, home, away, game_date, team_props)
+            log.info("  Team props: total=%.1f over_prob=%.2f home_ML=%.3f",
+                     team_props['total']['proj'],
+                     team_props['total']['over_prob'],
+                     team_props['moneyline']['home_prob'])
 
         # Player props
         for team, opponent, is_home in [(home, away, True), (away, home, False)]:
@@ -1449,8 +1462,9 @@ def main() -> None:
                 total_props   += written
                 total_players += 1
 
-    log.info("\n=== NBA v2.0 complete: %d players, %d prop rows written ===",
-             total_players, total_props)
+    mode_label = 'player props only' if props_only else 'full model'
+    log.info("\n=== NBA v2.0 complete [%s]: %d players, %d prop rows written ===",
+             mode_label, total_players, total_props)
     conn.close()
 
 
