@@ -1,25 +1,46 @@
 """
-Chalk NHL Projection Model
-==========================
-Morning script (runs at 10:30 AM) that generates player and team projections
-for every NHL game tonight. Reads historical data from our PostgreSQL database
-(populated by nhlDataCollector.py) and writes projections to chalk_projections
-and team_projections tables.
+Chalk NHL Projection Model  v2.0
+=================================
+Runs at 4:30 AM ET daily. Generates player + team projections for every
+NHL game tonight. Reads from PostgreSQL, fetches live odds from The Odds API,
+and writes to chalk_projections and team_projections.
 
-The model uses a multi-factor weighted approach:
-  1. Weighted rolling average (L10 × 0.40, L20 × 0.30, L30 × 0.20, season × 0.10)
-  2. Goalie quality matchup (MOST IMPORTANT signal in NHL betting)
-  3. Special teams (PP/PK) matchup via PP TOI per game
-  4. TOI line proxy (top/2nd/3rd/4th line role)
-  5. Shot quality proxy (opponent team SH% allowed)
-  6. EV goals vs PP goals split for goal projection
-  7. Rest and back-to-back
-  8. Game script (spread size)
+DB column mappings (shared player_game_logs table):
+  Skaters
+  -------
+  points        = goals per game
+  three_made    = assists per game
+  fg_made       = shots on goal
+  ft_made       = hits
+  ft_att        = blocked shots
+  minutes       = TOI total (seconds or minutes — normalised below)
+  fg_att        = PP TOI per game
+  three_att     = PP goals
+  plus_minus    = plus/minus
+  turnovers     = PIM
+  position      = forward/D position code
 
-CRITICAL: Confirmed starting goalie is the single most important variable.
-Backup goalie detected → flag immediately, adjust all projections, add +15 confidence.
+  Goalies (position = 'G')
+  -------
+  steals        = saves
+  fg_pct        = save percentage (decimal, e.g. 0.921)
+  fg_att        = shots against
+  blocks        = goals against
+  off_reb       = GSAA
+  minutes       = TOI
+  plus_minus    = W=1, L=-1, OT=0
 
-All factor multipliers stored in factors_json for full audit trail.
+Team game logs
+  points_scored  = goals for
+  points_allowed = goals against
+  fg_made        = shots for
+  fg_att         = shots against
+
+Execution order:
+  1  Schedule           5  SOG           9  PM
+  2  Goalie confirm     6  Goals         10 Saves
+  3  Odds API           7  Assists       11 GA
+  4  TOI                8  Points        12 SV%  13 Team props
 
 Usage:
   python nhlProjectionModel.py [--date YYYY-MM-DD]
@@ -38,13 +59,8 @@ from typing import Optional
 
 import psycopg2
 import psycopg2.extras
+import requests
 from dotenv import load_dotenv
-
-try:
-    from nhl_api_py.core import NHLClient
-    _nhl = NHLClient()
-except ImportError:
-    _nhl = None
 
 load_dotenv(os.path.join(os.path.dirname(__file__), '../../.env'))
 
@@ -56,43 +72,44 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 DATABASE_URL   = os.getenv('DATABASE_URL', '')
-MODEL_VERSION  = 'v1.1'
+ODDS_API_KEY   = os.getenv('ODDS_API_KEY', '')
+MODEL_VERSION  = 'v2.0'
 CURRENT_SEASON = '20252026'
 
-# League-average baselines — calibrated to 2024-25 NHL season
-LEAGUE_AVG = {
-    'goals_per_game':         0.30,
-    'assists_per_game':       0.50,
-    'points_per_game':        0.80,
-    'sog_per_game':           2.8,
-    'hits_per_game':          1.8,
-    'blocks_per_game':        0.9,
-    'pim_per_game':           0.7,
-    'toi_per_game':           15.5,
-    'pp_toi_per_game':        1.2,
-    'shooting_pct':           0.105,
-    'sv_pct':                 0.900,
-    'gsaa_per_game':          0.0,
-    'hd_sv_pct':              0.830,
-    'saves_per_game':         27.5,
-    'goals_against_per_game': 3.0,
-    'shots_against_per_game': 30.5,
-    'xgf_per_game':           2.8,
-    'xga_per_game':           2.8,
-    'cf_pct':                 50.0,
-    'pp_pct':                 0.205,
-    'pk_pct':                 0.795,
-    'faceoff_pct':            50.0,
-    'team_goals_per_game':    3.0,
-    'home_win_pct':           0.54,
-    'ot_probability':         0.24,
+# ── League-average baselines (2024-25 NHL season) ────────────────────────────
+
+LEAGUE = {
+    # Skater per game
+    'goals_pg':          0.30,
+    'assists_pg':        0.50,
+    'points_pg':         0.80,
+    'sog_pg':            2.80,
+    'toi_pg':            15.5,
+    'pp_toi_pg':         2.10,   # updated from spec
+    # Shooting / scoring rates
+    'sh_pct':            0.105,
+    'shooting_pct':      0.105,
+    # Team
+    'team_goals_pg':     3.05,
+    'team_ga_pg':        3.05,
+    'shots_for_pg':      30.0,
+    'shots_against_pg':  30.0,
+    'sog_per_min':       0.156,   # 2.8 SOG / 18 min
+    # Goalie
+    'sv_pct':            0.906,
+    'backup_sv_pct':     0.889,
+    'saves_pg':          27.5,
+    'ga_pg':             3.05,
+    # Game
+    'nhl_total':         6.10,
+    'en_goals_pg':       0.15,
+    'ot_probability':    0.24,
+    # Std devs for probability calcs
+    'total_std_dev':     1.35,
+    'rl_std_dev':        1.90,
 }
 
-TOTAL_STD_DEV     = 1.5
-PUCK_LINE_STD_DEV = 1.4
-
-
-# ── DB connection ──────────────────────────────────────────────────────────────
+# ── DB connection ─────────────────────────────────────────────────────────────
 
 def get_db():
     if not DATABASE_URL:
@@ -102,61 +119,62 @@ def get_db():
     return conn
 
 
-def safe(val, default=0.0):
+# ── Utility helpers ───────────────────────────────────────────────────────────
+
+def safe(val, default: float = 0.0) -> float:
     try:
         return float(val) if val is not None else default
     except (TypeError, ValueError):
         return default
 
 
-# ── Normal CDF (no scipy dependency) ─────────────────────────────────────────
-
-def normal_cdf(x, mu=0.0, sigma=1.0):
-    """Standard normal CDF using math.erf."""
+def normal_cdf(x: float, mu: float = 0.0, sigma: float = 1.0) -> float:
     if sigma <= 0:
         return 0.5
     return 0.5 * (1.0 + math.erf((x - mu) / (sigma * math.sqrt(2.0))))
 
 
-# ── Rolling average calculations ──────────────────────────────────────────────
-
-def rolling_avg(rows: list[dict], col: str, n: int) -> float:
+def rolling_avg(rows: list, col: str, n: int) -> float:
     vals = [safe(r[col]) for r in rows[:n] if r.get(col) is not None]
     return sum(vals) / len(vals) if vals else 0.0
 
 
-def weighted_avg(rows: list[dict], col: str) -> float:
+def weighted_avg(rows: list, col: str) -> float:
     """
-    NHL weighted rolling average:
-      L10 × 0.40 + L20 × 0.30 + L30 × 0.20 + season × 0.10
-    Falls back gracefully when fewer games exist.
+    Per spec: L5×0.40 + L10×0.30 + L20×0.20 + season×0.10
+    L5 weighted most heavily because hockey hot/cold streaks are the most
+    predictive short-term signal in the sport.
     """
     n = len(rows)
     if n == 0:
         return 0.0
+    l5  = rolling_avg(rows, col, min(5, n))
     l10 = rolling_avg(rows, col, min(10, n))
     l20 = rolling_avg(rows, col, min(20, n))
-    l30 = rolling_avg(rows, col, min(30, n))
     szn = rolling_avg(rows, col, n)
 
-    if n >= 30:
-        return l10 * 0.40 + l20 * 0.30 + l30 * 0.20 + szn * 0.10
-    elif n >= 20:
-        return l10 * 0.50 + l20 * 0.35 + szn * 0.15
+    if n >= 20:
+        return l5 * 0.40 + l10 * 0.30 + l20 * 0.20 + szn * 0.10
     elif n >= 10:
-        return l10 * 0.65 + szn * 0.35
+        return l5 * 0.50 + l10 * 0.35 + szn * 0.15
+    elif n >= 5:
+        return l5 * 0.65 + szn * 0.35
     else:
         return szn
 
 
-def home_away_avg(rows: list[dict], col: str, location: str) -> float:
+def home_away_avg(rows: list, col: str, location: str) -> float:
     filtered = [r for r in rows if r.get('home_away') == location]
     return rolling_avg(filtered, col, len(filtered)) if filtered else 0.0
 
 
-# ── DB queries ─────────────────────────────────────────────────────────────────
+def cap(val: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, val))
 
-def get_skater_logs(conn, player_id: int, limit: int = 50) -> list[dict]:
+
+# ── DB queries ────────────────────────────────────────────────────────────────
+
+def get_skater_logs(conn, player_id: int, limit: int = 50) -> list:
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
             """SELECT * FROM player_game_logs
@@ -167,8 +185,7 @@ def get_skater_logs(conn, player_id: int, limit: int = 50) -> list[dict]:
         return cur.fetchall()
 
 
-def get_goalie_logs(conn, player_id: int, limit: int = 30) -> list[dict]:
-    """Only returns games where the goalie actually played (saves > 0)."""
+def get_goalie_logs(conn, player_id: int, limit: int = 30) -> list:
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
             """SELECT * FROM player_game_logs
@@ -180,13 +197,10 @@ def get_goalie_logs(conn, player_id: int, limit: int = 30) -> list[dict]:
         return cur.fetchall()
 
 
-def get_team_logs(conn, team_abbr: str, limit: int = 20) -> list[dict]:
+def get_team_logs(conn, team_abbr: str, limit: int = 20) -> list:
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
-            """SELECT *,
-                      points_scored  AS points_scored,
-                      points_allowed AS points_allowed
-               FROM team_game_logs
+            """SELECT * FROM team_game_logs
                WHERE (team_name = %s OR team_name ILIKE %s)
                  AND sport = 'NHL' AND season = %s
                ORDER BY game_date DESC LIMIT %s""",
@@ -212,52 +226,82 @@ def get_team_goalie(conn, team_abbr: str) -> Optional[dict]:
     """Return the most-used goalie for a team this season."""
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
-            """SELECT player_id, player_name, COUNT(*) as starts,
-                      AVG(steals)  as avg_saves,
-                      AVG(fg_pct)  as avg_sv_pct,
-                      AVG(off_reb) as avg_gsaa
+            """SELECT player_id, player_name,
+                      COUNT(*)     AS starts,
+                      AVG(steals)  AS avg_saves,
+                      AVG(fg_pct)  AS avg_sv_pct,
+                      AVG(off_reb) AS avg_gsaa
                FROM player_game_logs
-               WHERE team = %s AND sport = 'NHL' AND season = %s
+               WHERE (team = %s OR team ILIKE %s)
+                 AND sport = 'NHL' AND season = %s
                  AND position = 'G' AND steals > 0
                GROUP BY player_id, player_name
                ORDER BY starts DESC LIMIT 1""",
-            (team_abbr, CURRENT_SEASON)
+            (team_abbr, f'%{team_abbr}%', CURRENT_SEASON)
         )
         row = cur.fetchone()
         return dict(row) if row else None
 
 
-def classify_player_archetype(base_goals: float, base_assists: float) -> tuple[str, float]:
-    """
-    Classify a skater's archetype based on season scoring rates.
-    Returns (archetype_name, correlation_factor) for points projection.
-    """
-    if base_goals > 0.40 and base_assists > 0.40:
-        return ('TRUE_POINT_PRODUCER', 1.00)   # Draisaitl, MacKinnon — stats move together
-    if base_goals > 0.40 and base_assists < 0.35:
-        return ('GOAL_SCORER', 0.96)            # pure goal scorers
-    if base_assists > 0.45 and base_goals < 0.20:
-        return ('PURE_PLAYMAKER', 0.98)         # playmakers, PP QB D-men
-    return ('ROLE_PLAYER', 0.97)
+def get_nightly_roster(conn, team_abbr: str, game_date: date) -> list:
+    """Return nightly_roster rows for this team today."""
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            """SELECT * FROM nightly_roster
+               WHERE (team ILIKE %s OR team = %s)
+                 AND game_date = %s AND sport = 'NHL'""",
+            (f'%{team_abbr}%', team_abbr, game_date)
+        )
+        return cur.fetchall()
 
 
-# ── NHL API helpers ────────────────────────────────────────────────────────────
+def get_injury_context(roster_rows: list) -> dict:
+    """
+    Parse nightly_roster for injury context.
+    Returns:
+      forwards_out: count of unavailable forwards
+      star_scorer_out: bool (top scorer injured)
+      primary_pg_out: bool (primary playmaker injured)
+    """
+    out = [r for r in roster_rows
+           if not r.get('is_confirmed_playing', True)
+           and r.get('injury_status') not in (None, 'GTD')]
+
+    fwd_positions = {'C', 'LW', 'RW', 'F'}
+    fwds_out = sum(1 for r in out if (r.get('position') or '') in fwd_positions)
+
+    # Star scorer heuristic: first player alphabetically among scratches
+    # In production the edge detector has richer role data;
+    # here we flag if multiple forwards are out
+    star_out    = fwds_out >= 1
+    pg_out      = fwds_out >= 2
+    multi_out   = fwds_out >= 2
+
+    return {
+        'forwards_out':    fwds_out,
+        'star_scorer_out': star_out,
+        'primary_pg_out':  pg_out,
+        'multi_out':       multi_out,
+    }
+
+
+# ── NHL API helpers ───────────────────────────────────────────────────────────
 
 def nhl_get(path: str) -> Optional[dict]:
-    import requests as _req
     url = f'https://api-web.nhle.com/v1{path}'
     try:
-        r = _req.get(url, timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
+        r = requests.get(url, timeout=10,
+                         headers={'User-Agent': 'ChalkApp/2.0'})
         if r.status_code == 404:
             return None
         r.raise_for_status()
         return r.json()
     except Exception as e:
-        log.warning(f'NHL API failed {path}: {e}')
+        log.warning(f'NHL API error {path}: {e}')
         return None
 
 
-def get_todays_games(game_date: date) -> list[dict]:
+def get_todays_games(game_date: date) -> list:
     data = nhl_get(f'/schedule/{game_date}')
     if not data:
         return []
@@ -265,7 +309,7 @@ def get_todays_games(game_date: date) -> list[dict]:
     games  = []
     for week in data.get('gameWeek', []):
         if week.get('date', '') != target:
-            continue   # only return games on the exact requested date
+            continue
         for g in week.get('games', []):
             games.append({
                 'game_id':    g.get('id'),
@@ -278,843 +322,1176 @@ def get_todays_games(game_date: date) -> list[dict]:
 
 
 def get_team_roster(team_abbr: str) -> dict:
-    """Return {'forwards': [...], 'defensemen': [...], 'goalies': [...]}"""
     data = nhl_get(f'/roster/{team_abbr}/current')
     if not data:
         return {'forwards': [], 'defensemen': [], 'goalies': []}
     return {
-        'forwards':   data.get('forwards', []),
+        'forwards':   data.get('forwards',   []),
         'defensemen': data.get('defensemen', []),
-        'goalies':    data.get('goalies', []),
+        'goalies':    data.get('goalies',    []),
     }
 
 
 def confirm_starting_goalie(game_id: int) -> dict:
     """
-    Check NHL API for confirmed starters via pre-game boxscore.
-    Returns goalie info or empty dict if not yet available.
+    Check NHL pre-game API for confirmed starting goalies.
+    Falls back to 'most starts this season' from DB caller.
+    Returns dict with home/away goalie name and backup flag.
     """
-    data = nhl_get(f'/gamecenter/{game_id}/boxscore')
+    data = nhl_get(f'/gamecenter/{game_id}/landing')
     result = {
-        'home_goalie_id': None, 'home_goalie_name': None, 'home_is_backup': False,
-        'away_goalie_id': None, 'away_goalie_name': None, 'away_is_backup': False,
+        'home_goalie_name': None,
+        'away_goalie_name': None,
+        'home_is_backup':   False,
+        'away_is_backup':   False,
+        'confirmed':        False,
     }
     if not data:
         return result
-    pbgs = data.get('playerByGameStats', {})
-    for side in ('homeTeam', 'awayTeam'):
-        goalies = pbgs.get(side, {}).get('goalies', [])
-        prefix  = 'home' if side == 'homeTeam' else 'away'
-        if goalies:
-            g = goalies[0]
-            result[f'{prefix}_goalie_id']   = g.get('playerId')
-            first = g.get('firstName', {}).get('default', '')
-            last  = g.get('lastName', {}).get('default', '')
-            result[f'{prefix}_goalie_name'] = f'{first} {last}'.strip()
+
+    pg = data.get('matchup', {}).get('skaterSeasonStats', {})
+    # Pre-game endpoint sometimes has 'goalieSeasonStats'
+    # If starters are listed, use them
+    home_starters = data.get('homeTeam', {}).get('skaters', [])
+    away_starters = data.get('awayTeam', {}).get('skaters', [])
+
+    # Simpler approach: check 'teamGameProjection' for projected starter
+    home_g = data.get('homeTeam', {}).get('goalie')
+    away_g = data.get('awayTeam', {}).get('goalie')
+
+    if home_g:
+        result['home_goalie_name'] = home_g.get('name', {}).get('default')
+        result['confirmed'] = True
+    if away_g:
+        result['away_goalie_name'] = away_g.get('name', {}).get('default')
+        result['confirmed'] = True
+
     return result
 
 
-# ── Skater projection functions ────────────────────────────────────────────────
+# ── Odds API helpers ──────────────────────────────────────────────────────────
 
-def project_goals(skater_logs: list[dict], opp_goalie_logs: list[dict],
-                  opp_team_logs: list[dict], home_away: str,
-                  toi_projection: float, backup_goalie: bool,
-                  is_back_to_back: bool = False) -> tuple[float, dict]:
+_odds_cache: dict = {}   # (home, away) → odds dict
+
+def fetch_game_odds(home_team: str, away_team: str) -> dict:
     """
-    Goals projection using EV/PP split (0.65/0.35 weight).
-    SOG rate and opp goalie SV% are the two highest-impact factors.
+    Fetch live NHL puck line, total, and moneyline from The Odds API.
+    Returns:
+      home_ml, away_ml, home_puck_line, puck_line_price,
+      implied_total, posted_total
+    All None if API unavailable.
     """
-    n = len(skater_logs)
-    base = weighted_avg(skater_logs, 'points')   # goals in 'points' col
-    if base == 0.0:
-        base = LEAGUE_AVG['goals_per_game']
-    factors = {'base': round(base, 4)}
+    key = f'{away_team}@{home_team}'
+    if key in _odds_cache:
+        return _odds_cache[key]
 
-    # EV/PP split — compute from real data (three_att = PP goals)
-    pp_goals_avg = rolling_avg(skater_logs, 'three_att', min(20, n))
-    ev_goals_avg = max(0.0, base - pp_goals_avg)
-    factors['ev_goals_base'] = round(ev_goals_avg, 4)
-    factors['pp_goals_base'] = round(pp_goals_avg, 4)
-
-    # ── SOG rate factor (strongest EV driver) ────────────────────────────────
-    sog_avg = weighted_avg(skater_logs, 'fg_made')
-    sog_f   = (sog_avg / LEAGUE_AVG['sog_per_game']) if sog_avg > 0 else 1.0
-    sog_f   = max(0.30, min(2.00, sog_f))   # wide range — Matthews vs 4th liner
-    factors['sog_rate_f'] = round(sog_f, 4)
-
-    # ── Shooting % trend (regression signal) ─────────────────────────────────
-    # Compute sh% from actual goals/SOG stored in DB
-    l10_goals = rolling_avg(skater_logs, 'points', min(10, n))
-    l10_sog   = rolling_avg(skater_logs, 'fg_made', min(10, n))
-    szn_goals = rolling_avg(skater_logs, 'points', n)
-    szn_sog   = rolling_avg(skater_logs, 'fg_made', n)
-    l10_sh_pct = (l10_goals / l10_sog) if l10_sog > 0 else 0.0
-    szn_sh_pct = (szn_goals / szn_sog) if szn_sog > 0 else 0.0
-    if szn_sh_pct > 0 and l10_sog >= 5:   # need enough sample
-        if l10_sh_pct > szn_sh_pct + 0.03:
-            sh_trend_f = 0.92   # hot shooter — regress
-        elif l10_sh_pct < szn_sh_pct - 0.03:
-            sh_trend_f = 1.08   # cold shooter — expect surge
-        else:
-            sh_trend_f = 1.0
-    else:
-        sh_trend_f = 1.0
-    factors['sh_trend_f'] = round(sh_trend_f, 4)
-
-    # ── Opp goalie SV% factor (most impactful matchup signal) ────────────────
-    opp_sv = rolling_avg(opp_goalie_logs, 'fg_pct', min(10, len(opp_goalie_logs)))
-    if opp_sv > 0:
-        goalie_f = (1.0 - LEAGUE_AVG['sv_pct']) / (1.0 - opp_sv)
-        goalie_f = max(0.60, min(1.60, goalie_f))
-    else:
-        goalie_f = 1.0
-    if backup_goalie:
-        goalie_f = max(goalie_f, 1.30)
-        factors['backup_goalie_detected'] = True
-    factors['goalie_sv_f'] = round(goalie_f, 4)
-
-    # ── PP TOI factor (modulation on pp_goals_avg component) ─────────────────
-    # pp_goals_avg already captures PP scoring from real data.
-    # pp_f is a soft adjustment: detects if the player is above/below-average PP
-    # deployment and nudges the PP component accordingly.
-    pp_toi_avg = rolling_avg(skater_logs, 'fg_att', min(20, n))
-    if pp_toi_avg > 0:
-        pp_ratio = pp_toi_avg / LEAGUE_AVG['pp_toi_per_game']
-        pp_f = 1.0 + (pp_ratio - 1.0) * 0.25  # 25% weight: prevents double-counting
-    else:
-        pp_f = 1.0
-    pp_f = max(0.60, min(1.60, pp_f))   # EV-only → ~0.75; elite PP QB → ~1.60 max
-    factors['pp_toi_f'] = round(pp_f, 4)
-
-    # ── Opp PK quality proxy ──────────────────────────────────────────────────
-    # Approximate opp PK% from steals (blocked shots) in team_game_logs
-    # Passive PK (high shots allowed on PP) = weaker PK
-    opp_ga_from_team = rolling_avg(opp_team_logs, 'points_allowed', 10)
-    if opp_ga_from_team > LEAGUE_AVG['team_goals_per_game'] * 1.08:
-        opp_pk_f = 1.12   # soft PK
-    elif opp_ga_from_team > 0 and opp_ga_from_team < LEAGUE_AVG['team_goals_per_game'] * 0.92:
-        opp_pk_f = 0.88   # stout PK
-    else:
-        opp_pk_f = 1.0
-    factors['opp_pk_f'] = round(opp_pk_f, 4)
-
-    # ── Opp goals allowed ─────────────────────────────────────────────────────
-    opp_ga_avg = rolling_avg(opp_team_logs, 'points_allowed', 10)
-    opp_goals_f = (opp_ga_avg / LEAGUE_AVG['team_goals_per_game']) if opp_ga_avg > 0 else 1.0
-    opp_goals_f = max(0.75, min(1.30, opp_goals_f))
-    factors['opp_goals_allowed_f'] = round(opp_goals_f, 4)
-
-    # ── TOI line proxy ────────────────────────────────────────────────────────
-    season_toi = weighted_avg(skater_logs, 'minutes')
-    toi_f = (toi_projection / season_toi) if season_toi > 0 and toi_projection > 0 else 1.0
-    toi_f = max(0.70, min(1.30, toi_f))
-    factors['toi_f'] = round(toi_f, 4)
-
-    # ── Home/away split ───────────────────────────────────────────────────────
-    home_avg = home_away_avg(skater_logs, 'points', 'home')
-    away_avg = home_away_avg(skater_logs, 'points', 'away')
-    if home_avg > 0 and away_avg > 0 and home_away in ('home', 'away'):
-        loc_f = (home_avg / away_avg) if home_away == 'home' else (away_avg / home_avg)
-        loc_f = max(0.85, min(1.15, loc_f))
-    else:
-        loc_f = 1.0
-    factors['home_away_f'] = round(loc_f, 4)
-
-    # ── Back-to-back ──────────────────────────────────────────────────────────
-    b2b_f = 0.93 if is_back_to_back else 1.0
-    factors['b2b_f'] = b2b_f
-
-    # ── EV/PP weighted formula (0.65 EV / 0.35 PP) ───────────────────────────
-    if base > 0:
-        ev_proj = ev_goals_avg * sog_f * goalie_f * sh_trend_f * toi_f * loc_f * b2b_f
-        pp_proj = pp_goals_avg * pp_f  * goalie_f * opp_pk_f   * toi_f
-        projection = (ev_proj * 0.65 + pp_proj * 0.35) * opp_goals_f
-    else:
-        projection = 0.0
-
-    projection = max(0.0, round(projection, 4))
-    factors['projection'] = projection
-    return projection, factors
-
-
-def project_assists(skater_logs: list[dict], opp_team_logs: list[dict],
-                    home_away: str, toi_projection: float,
-                    is_back_to_back: bool = False) -> tuple[float, dict]:
-    """
-    Assists is the most consistent NHL prop — less random than goals.
-    PP TOI drives assist opportunities heavily for elite playmakers.
-    """
-    n = len(skater_logs)
-    base = weighted_avg(skater_logs, 'three_made')   # assists in three_made col
-    if base == 0.0:
-        base = LEAGUE_AVG['assists_per_game']
-    factors = {'base': round(base, 4)}
-
-    # ── TOI factor ────────────────────────────────────────────────────────────
-    season_toi = weighted_avg(skater_logs, 'minutes')
-    toi_f = (toi_projection / season_toi) if season_toi > 0 and toi_projection > 0 else 1.0
-    toi_f = max(0.80, min(1.20, toi_f))
-    factors['toi_f'] = round(toi_f, 4)
-
-    # ── TOI line proxy ────────────────────────────────────────────────────────
-    if season_toi > 18:
-        toi_line_f = 1.10
-    elif season_toi >= 15:
-        toi_line_f = 1.00
-    elif season_toi >= 12:
-        toi_line_f = 0.95
-    else:
-        toi_line_f = 0.85
-    factors['toi_line_f'] = round(toi_line_f, 4)
-
-    # ── PP assist factor (40% weight — PP assists dominate for pure playmakers) ──
-    pp_toi_avg = rolling_avg(skater_logs, 'fg_att', min(20, n))
-    if pp_toi_avg > 0:
-        # Raw ratio then weighted at 40%
-        pp_ratio = pp_toi_avg / LEAGUE_AVG['pp_toi_per_game']
-        pp_f = 1.0 + (pp_ratio - 1.0) * 0.40
-        pp_f = max(0.80, min(1.35, pp_f))
-    else:
-        pp_f = 1.0
-    factors['pp_assist_f'] = round(pp_f, 4)
-
-    # ── Linemate scoring proxy ────────────────────────────────────────────────
-    # Assists require teammates to score. Use opp GA as proxy for open game.
-    opp_ga_avg = rolling_avg(opp_team_logs, 'points_allowed', 10)
-    if opp_ga_avg > LEAGUE_AVG['team_goals_per_game'] + 0.5:
-        linemate_f = 1.06   # soft team = more total goals = more assists available
-    elif opp_ga_avg > 0 and opp_ga_avg < LEAGUE_AVG['team_goals_per_game'] - 0.5:
-        linemate_f = 0.94
-    else:
-        linemate_f = 1.0
-    factors['linemate_proxy_f'] = round(linemate_f, 4)
-
-    # ── Home/away split ───────────────────────────────────────────────────────
-    home_avg = home_away_avg(skater_logs, 'three_made', 'home')
-    away_avg = home_away_avg(skater_logs, 'three_made', 'away')
-    if home_avg > 0 and away_avg > 0 and home_away in ('home', 'away'):
-        loc_f = (home_avg / away_avg) if home_away == 'home' else (away_avg / home_avg)
-        loc_f = max(0.85, min(1.15, loc_f))
-    else:
-        loc_f = 1.0
-    factors['home_away_f'] = round(loc_f, 4)
-
-    # ── Back-to-back ──────────────────────────────────────────────────────────
-    b2b_f = 0.94 if is_back_to_back else 1.0
-    factors['b2b_f'] = b2b_f
-
-    projection = base * toi_f * toi_line_f * pp_f * linemate_f * loc_f * b2b_f
-    projection = max(0.0, round(projection, 4))
-    factors['projection'] = projection
-    return projection, factors
-
-
-def project_points(skater_logs: list[dict], opp_goalie_logs: list[dict],
-                   opp_team_logs: list[dict], home_away: str,
-                   toi_projection: float, backup_goalie: bool,
-                   proj_goals: float, proj_assists: float) -> tuple[float, dict]:
-    """
-    Points = proj_goals + proj_assists with archetype correlation adjustment.
-    Archetype classification separates elite point producers from specialists.
-    """
-    n = len(skater_logs)
-    base_goals  = rolling_avg(skater_logs, 'points',     n)
-    base_assists = rolling_avg(skater_logs, 'three_made', n)
-    archetype, corr_f = classify_player_archetype(base_goals, base_assists)
-
-    base_sum = proj_goals + proj_assists
-    factors = {
-        'goals_component':  round(proj_goals,   4),
-        'assists_component': round(proj_assists, 4),
-        'archetype':        archetype,
-        'corr_f':           corr_f,
+    result = {
+        'home_ml': None, 'away_ml': None,
+        'home_puck_line': None, 'posted_total': LEAGUE['nhl_total'],
+        'implied_total': LEAGUE['nhl_total'],
     }
 
-    # PP points factor — separates elite PP players from EV-only dramatically
-    pp_toi_avg = rolling_avg(skater_logs, 'fg_att', min(20, n))
-    if pp_toi_avg > 0:
-        pp_pts_f = pp_toi_avg / LEAGUE_AVG['pp_toi_per_game']
-        pp_pts_f = 1.0 + (pp_pts_f - 1.0) * 0.35   # 35% weight on PP contribution
-        pp_pts_f = max(0.82, min(1.38, pp_pts_f))
-    else:
-        pp_pts_f = 1.0
-    factors['pp_pts_f'] = round(pp_pts_f, 4)
+    if not ODDS_API_KEY:
+        _odds_cache[key] = result
+        return result
 
-    # Game total factor — higher scoring games = more total points available
-    opp_ga = rolling_avg(opp_team_logs, 'points_allowed', 10)
-    if opp_ga > 0:
-        total_f = 0.5 * (opp_ga / LEAGUE_AVG['team_goals_per_game']) + 0.5
-        total_f = max(0.92, min(1.08, total_f))
-    else:
-        total_f = 1.0
-    if backup_goalie:
-        total_f = min(1.10, total_f * 1.08)
-        factors['backup_goalie_detected'] = True
-    factors['game_total_f'] = round(total_f, 4)
+    try:
+        url = 'https://api.the-odds-api.com/v4/sports/icehockey_nhl/odds/'
+        r = requests.get(url, params={
+            'apiKey':      ODDS_API_KEY,
+            'regions':     'us',
+            'markets':     'h2h,spreads,totals',
+            'oddsFormat':  'american',
+        }, timeout=10)
+        if not r.ok:
+            log.warning(f'[Odds API] HTTP {r.status_code}')
+            _odds_cache[key] = result
+            return result
 
-    # pp_pts_f is already embedded in proj_goals and proj_assists — don't re-apply
-    # Only corr_f (archetype) and total_f (game environment) are truly additive here
-    projection = base_sum * corr_f * total_f
-    projection = max(0.0, round(projection, 4))
-    factors['projection'] = projection
-    return projection, factors
+        for game in r.json():
+            ht = game.get('home_team', '').lower()
+            at = game.get('away_team', '').lower()
+            # Fuzzy match on team abbreviation
+            if home_team.lower()[:3] not in ht and home_team.lower() not in ht:
+                continue
+
+            for bm in game.get('bookmakers', [])[:1]:   # use first bookmaker
+                for mkt in bm.get('markets', []):
+                    key_m = mkt.get('key')
+                    outcomes = mkt.get('outcomes', [])
+                    if key_m == 'h2h':
+                        for o in outcomes:
+                            if o.get('name', '').lower() in ht:
+                                result['home_ml'] = o.get('price')
+                            else:
+                                result['away_ml'] = o.get('price')
+                    elif key_m == 'spreads':
+                        for o in outcomes:
+                            if o.get('name', '').lower() in ht:
+                                result['home_puck_line'] = o.get('point')
+                    elif key_m == 'totals':
+                        for o in outcomes:
+                            if o.get('name', '').lower() == 'over':
+                                result['posted_total']  = safe(o.get('point'), LEAGUE['nhl_total'])
+                                result['implied_total'] = result['posted_total']
+            break
+
+    except Exception as e:
+        log.warning(f'[Odds API] {e}')
+
+    _odds_cache[key] = result
+    return result
 
 
-def project_shots_on_goal(skater_logs: list[dict], opp_team_logs: list[dict],
-                           home_away: str, toi_projection: float,
-                           is_trailing: bool = False) -> tuple[float, dict]:
+def game_script_factor_from_odds(home_ml: Optional[float],
+                                  away_ml: Optional[float],
+                                  is_home: bool) -> float:
     """
-    SOG is the most consistent NHL prop — lowest variance, tightest correlation with TOI.
-    All factors now read from real data (fg_made = SOG, minutes = TOI, fg_att = PP TOI).
+    Derive game script factor from moneyline.
+    Underdog teams trailing → shoot more desperately (SOG/goals up).
+    Heavy fav teams leading → conservative (SOG slightly down).
     """
-    base = weighted_avg(skater_logs, 'fg_made')    # SOG in fg_made col
-    if base == 0.0:
-        base = LEAGUE_AVG['sog_per_game']
-    factors = {'base': round(base, 4)}
+    my_ml  = home_ml if is_home else away_ml
+    opp_ml = away_ml if is_home else home_ml
 
-    # TOI factor — primary driver: more ice time = more shots (strongest signal)
-    season_toi = weighted_avg(skater_logs, 'minutes')
-    if season_toi > 0 and toi_projection > 0:
-        toi_f = toi_projection / season_toi
-        toi_f = max(0.80, min(1.20, toi_f))
-    else:
-        toi_f = 1.0
-    factors['toi_f'] = round(toi_f, 4)
+    if my_ml is None or opp_ml is None:
+        return 1.00
 
-    # Shot attempt rate per minute — differentiates high-volume shooters from passers
-    # sog_per_min for this player vs league average 0.156 (2.8/18)
-    LEAGUE_SOG_PER_MIN = 0.156
-    if season_toi > 0 and base > 0:
-        player_sog_per_min = base / season_toi
-        shot_rate_f = player_sog_per_min / LEAGUE_SOG_PER_MIN
-        shot_rate_f = max(0.65, min(1.55, shot_rate_f))
-    else:
-        shot_rate_f = 1.0
-    factors['shot_rate_f'] = round(shot_rate_f, 4)
+    # If my team is the heavy underdog
+    if my_ml >= 160:
+        return 1.10    # trailing → shoot desperately
 
-    # PP SOG factor — PP creates disproportionate shot volume per minute
-    pp_toi_avg = rolling_avg(skater_logs, 'fg_att', min(20, len(skater_logs)))
-    if pp_toi_avg > 0:
-        # Weight PP contribution at 25% of total shot volume
-        pp_sog_bonus = (pp_toi_avg / LEAGUE_AVG['pp_toi_per_game'] - 1.0) * 0.25
-        pp_sog_f = 1.0 + pp_sog_bonus
-        pp_sog_f = max(0.90, min(1.15, pp_sog_f))
-    else:
-        pp_sog_f = 1.0
-    factors['pp_sog_f'] = round(pp_sog_f, 4)
+    # If my team is the heavy favourite
+    if my_ml <= -200:
+        return 0.94    # leading → conservative
 
-    # Opponent shots allowed (passive defence = more SOG opportunities)
-    # Read from team_game_logs; fall back gracefully if not populated
-    opp_shots_allowed = rolling_avg(opp_team_logs, 'shots_for', 10)
-    if opp_shots_allowed > LEAGUE_AVG['shots_against_per_game'] + 3:
-        opp_passive_f = 1.08
-    elif opp_shots_allowed > 0 and opp_shots_allowed < LEAGUE_AVG['shots_against_per_game'] - 3:
-        opp_passive_f = 0.93
-    else:
-        opp_passive_f = 1.0
-    factors['opp_passive_f'] = round(opp_passive_f, 4)
-
-    # Game script: trailing teams shoot more desperately
-    script_f = 1.10 if is_trailing else 1.0
-    factors['script_f'] = script_f
-
-    # Home/away split
-    home_avg = home_away_avg(skater_logs, 'fg_made', 'home')
-    away_avg = home_away_avg(skater_logs, 'fg_made', 'away')
-    if home_avg > 0 and away_avg > 0 and home_away in ('home', 'away'):
-        loc_f = (home_avg / away_avg) if home_away == 'home' else (away_avg / home_avg)
-        loc_f = max(0.88, min(1.12, loc_f))
-    else:
-        loc_f = 1.0
-    factors['home_away_f'] = round(loc_f, 4)
-
-    # Back-to-back: SOG stable but slightly reduced
-    b2b_f = 0.96 if is_trailing is False and toi_projection < season_toi * 0.95 else 1.0
-    # Simpler: caller passes is_trailing; we apply b2b separately in main
-    factors['b2b_applied'] = False  # main() will override toi_projection for B2B
-
-    projection = base * toi_f * shot_rate_f * pp_sog_f * opp_passive_f * script_f * loc_f
-    projection = max(0.0, round(projection, 4))
-    factors['projection'] = projection
-    return projection, factors
+    # If puck line is close (+/- 0.5)
+    return 1.00
 
 
-def project_plus_minus(skater_logs: list[dict], opp_team_logs: list[dict],
-                       own_team_logs: list[dict], home_away: str,
-                       toi_projection: float) -> tuple[float, dict]:
+# ── TOI helpers ───────────────────────────────────────────────────────────────
+
+def normalise_toi(val) -> float:
     """
-    Plus/minus is the highest-variance NHL prop.
-    Confidence is heavily dampened — see edgeDetector for -8 penalty + blowout risk -25.
+    TOI stored as seconds or minutes depending on collector version.
+    Normalise to minutes.
     """
-    n = len(skater_logs)
-    base = weighted_avg(skater_logs, 'plus_minus')
-    factors = {'base': round(base, 4)}
+    v = safe(val)
+    if v > 90:            # clearly stored as seconds
+        return v / 60.0
+    return v
 
-    # EV goals differential — what actually drives +/-
-    own_ev_goals = rolling_avg(own_team_logs, 'points_scored', 10)
-    opp_ev_goals = rolling_avg(opp_team_logs, 'points_scored', 10)
-    if own_ev_goals > 0 and opp_ev_goals > 0:
-        ev_diff = own_ev_goals - opp_ev_goals
-        # Every 0.5 goal/game differential ≈ ±0.15 PM per player
-        ev_diff_f = 1.0 + (ev_diff / LEAGUE_AVG['team_goals_per_game']) * 0.15
-        ev_diff_f = max(0.85, min(1.15, ev_diff_f))
+
+def get_avg_toi(logs: list, n: int) -> float:
+    vals = [normalise_toi(r.get('minutes')) for r in logs[:n]
+            if r.get('minutes') is not None]
+    return sum(vals) / len(vals) if vals else LEAGUE['toi_pg']
+
+
+def get_avg_pp_toi(logs: list, n: int) -> float:
+    vals = [safe(r.get('fg_att')) for r in logs[:n]
+            if r.get('fg_att') is not None]
+    return sum(vals) / len(vals) if vals else 0.0
+
+
+def line_position_factor(avg_toi_l20: float) -> float:
+    """Derive line position from average TOI."""
+    if avg_toi_l20 > 18:   return 1.08   # top line / top pair D
+    if avg_toi_l20 > 15:   return 1.00   # second line
+    if avg_toi_l20 > 12:   return 0.90   # third line
+    return 0.76                           # fourth line
+
+
+# ── Project TOI (Step 4 — feeds everything) ───────────────────────────────────
+
+def project_toi(logs: list, home_away: str, is_b2b: bool,
+                injury_ctx: dict) -> tuple:
+    """
+    proj_toi = base × coaching_f × b2b_f × injury_f × home_away_f
+    Run FIRST — all other projections use toi_proj as input.
+    """
+    base = weighted_avg(logs, 'minutes')
+    # Normalise if stored as seconds
+    if base > 90:
+        base /= 60.0
+    if base <= 0:
+        base = LEAGUE['toi_pg']
+
+    # PP TOI component — almost perfectly stable
+    pp_toi_l20 = get_avg_pp_toi(logs, 20)
+
+    # Coaching adjustment: L5 vs L20 TOI trend
+    toi_l5  = get_avg_toi(logs, 5)
+    toi_l20 = get_avg_toi(logs, 20)
+    diff    = toi_l5 - toi_l20
+    if diff > 2.0:
+        coaching_f = 1.08   # line promotion
+    elif diff < -2.0:
+        coaching_f = 0.92   # line demotion
     else:
-        ev_diff_f = 1.0
-    factors['ev_diff_f'] = round(ev_diff_f, 4)
+        coaching_f = 1.00
 
-    # Zone start proxy via PP TOI
-    pp_toi_avg = rolling_avg(skater_logs, 'fg_att', min(20, n))
-    if pp_toi_avg > LEAGUE_AVG['pp_toi_per_game'] * 1.5:
-        oz_proxy_f = 1.05   # heavy PP = offensive zone starts
-    elif pp_toi_avg < LEAGUE_AVG['pp_toi_per_game'] * 0.3:
-        oz_proxy_f = 0.95   # minimal PP = defensive zone deployment
+    # B2B: coaches protect stars more
+    if is_b2b:
+        b2b_f = 0.96 if base > 19 else 0.98
     else:
-        oz_proxy_f = 1.0
-    factors['zone_start_proxy_f'] = round(oz_proxy_f, 4)
+        b2b_f = 1.00
 
-    # TOI factor — more ice time = more +/- exposure
-    season_toi = weighted_avg(skater_logs, 'minutes')
-    toi_f = (toi_projection / season_toi) if season_toi > 0 and toi_projection > 0 else 1.0
-    toi_f = max(0.85, min(1.15, toi_f))
-    factors['toi_f'] = round(toi_f, 4)
+    # Injury factor (key linemate out = more TOI)
+    if injury_ctx.get('primary_pg_out'):
+        injury_f = 1.08
+    else:
+        injury_f = 1.00
 
-    projection = base * ev_diff_f * oz_proxy_f * toi_f
-    # Clamp: +/- projection rarely exceeds ±1.5 per game
-    projection = max(-2.0, min(2.0, round(projection, 4)))
-    factors['projection'] = projection
-    factors['high_variance_prop'] = True   # signals edgeDetector to apply confidence penalty
-    return projection, factors
+    # Home/away subtle
+    ha_f = 1.03 if home_away == 'home' else 0.97
+
+    proj = base * coaching_f * b2b_f * injury_f * ha_f
+
+    # Derive EV and PP TOI from projection
+    proj_pp_toi = min(proj * 0.30, pp_toi_l20) if pp_toi_l20 > 0 else 0.0
+    proj_ev_toi = proj - proj_pp_toi
+
+    factors = {
+        'base':       round(base, 2),
+        'toi_l5':     round(toi_l5, 2),
+        'toi_l20':    round(toi_l20, 2),
+        'pp_toi_l20': round(pp_toi_l20, 2),
+        'coaching_f': round(coaching_f, 3),
+        'b2b_f':      round(b2b_f, 3),
+        'injury_f':   round(injury_f, 3),
+        'home_away_f': round(ha_f, 3),
+        'proj_pp_toi': round(proj_pp_toi, 2),
+        'proj_ev_toi': round(proj_ev_toi, 2),
+    }
+    return round(max(4.0, proj), 2), factors
 
 
-def project_toi(skater_logs: list[dict], home_away: str,
-                is_back_to_back: bool) -> tuple[float, dict]:
+# ── Project SOG (Step 5) ──────────────────────────────────────────────────────
+
+def project_shots_on_goal(logs: list, opp_team_logs: list,
+                           home_away: str, toi_proj: float,
+                           pp_toi_proj: float, is_b2b: bool,
+                           game_script_f: float) -> tuple:
     """
-    Project ice time. Run FIRST — all other props use proj_toi as an input.
-    L20 average is the best predictor (TOI is extremely stable).
+    proj_sog = base × toi_f × rate_f × (1 + pp_boost) × opp_shot_f
+                    × game_script_f × home_away_f × b2b_f × line_proxy_f
     """
-    n = len(skater_logs)
-    base = rolling_avg(skater_logs, 'minutes', min(20, n))   # L20 is most stable
-    if base == 0.0:
-        base = LEAGUE_AVG['toi_per_game']
-    factors = {'base': round(base, 4)}
+    base = weighted_avg(logs, 'fg_made')
+    if base <= 0:
+        base = LEAGUE['sog_pg']
 
-    # Coaching adjustment: detect line promotions/demotions
-    # L5 avg vs L20 avg — significant change signals role shift
-    l5_toi  = rolling_avg(skater_logs, 'minutes', min(5, n))
-    l20_toi = rolling_avg(skater_logs, 'minutes', min(20, n))
-    if l5_toi > 0 and l20_toi > 0:
-        toi_trend = l5_toi / l20_toi
-        if toi_trend > 1.10:
-            coaching_f = 1.08   # trending up — promotion or injury call-up
-        elif toi_trend < 0.90:
-            coaching_f = 0.92   # trending down — demotion or healthy scratch risk
+    # 1. TOI factor
+    toi_l10  = get_avg_toi(logs, 10)
+    toi_szn  = get_avg_toi(logs, len(logs))
+    if toi_szn > 0:
+        toi_f = cap(toi_l10 / toi_szn, 0.80, 1.25)
+        if toi_l10 > toi_szn + 1.5:
+            toi_f = min(1.25, toi_f * 1.08)
+        elif toi_l10 < toi_szn - 1.5:
+            toi_f = max(0.80, toi_f * 0.93)
+    else:
+        toi_f = 1.00
+
+    # 2. SOG per minute rate
+    sog_l10_vals  = [safe(r['fg_made']) for r in logs[:10] if r.get('fg_made') is not None]
+    toi_l10_vals  = [normalise_toi(r.get('minutes')) for r in logs[:10] if r.get('minutes') is not None]
+    n = min(len(sog_l10_vals), len(toi_l10_vals))
+    if n > 0 and sum(toi_l10_vals[:n]) > 0:
+        sog_per_min = sum(sog_l10_vals[:n]) / sum(toi_l10_vals[:n])
+    else:
+        sog_per_min = LEAGUE['sog_per_min']
+    rate_f = cap(sog_per_min / LEAGUE['sog_per_min'], 0.50, 1.80)
+
+    # 3. PP TOI factor (boost for PP specialists)
+    pp_toi_l10 = get_avg_pp_toi(logs, 10)
+    pp_toi_f   = pp_toi_l10 / LEAGUE['pp_toi_pg'] if LEAGUE['pp_toi_pg'] > 0 else 1.0
+    sog_pp_boost = (pp_toi_f - 1.0) * 0.25   # 25% weight as per spec
+
+    # 4. Opponent shots allowed factor
+    opp_sa_l10 = rolling_avg(opp_team_logs, 'fg_att', 10) or LEAGUE['shots_against_pg']
+    opp_shot_f = cap(opp_sa_l10 / LEAGUE['shots_against_pg'], 0.88, 1.18)
+
+    # 5. Game script factor (passed in from Odds API)
+    # 6. Home/away
+    home_avg = home_away_avg(logs, 'fg_made', 'home')
+    away_avg = home_away_avg(logs, 'fg_made', 'away')
+    if home_avg > 0 and away_avg > 0:
+        ha_f = cap((home_avg if home_away == 'home' else away_avg) /
+                   ((home_avg + away_avg) / 2), 0.88, 1.12)
+    else:
+        ha_f = 1.00
+
+    # 7. Back-to-back
+    b2b_f = 0.96 if is_b2b else 1.00
+
+    # 8. Line position proxy
+    toi_l20  = get_avg_toi(logs, 20)
+    line_f   = line_position_factor(toi_l20)
+
+    proj = base * toi_f * rate_f * (1.0 + sog_pp_boost) * opp_shot_f * \
+           game_script_f * ha_f * b2b_f * line_f
+
+    factors = {
+        'base':            round(base, 3),
+        'toi_f':           round(toi_f, 3),
+        'sog_per_min':     round(sog_per_min, 4),
+        'rate_f':          round(rate_f, 3),
+        'pp_toi_l10':      round(pp_toi_l10, 2),
+        'pp_toi_f':        round(pp_toi_f, 3),
+        'sog_pp_boost':    round(sog_pp_boost, 3),
+        'opp_shots_a_l10': round(opp_sa_l10, 2),
+        'opp_shot_f':      round(opp_shot_f, 3),
+        'game_script_f':   round(game_script_f, 3),
+        'home_away_f':     round(ha_f, 3),
+        'b2b_f':           round(b2b_f, 3),
+        'line_proxy_f':    round(line_f, 3),
+    }
+    return round(max(0.0, proj), 3), factors
+
+
+# ── Project Goals (Step 6) ────────────────────────────────────────────────────
+
+def project_goals(logs: list, opp_goalie_logs: list, opp_team_logs: list,
+                  home_away: str, toi_proj: float,
+                  opp_is_backup: bool, is_b2b: bool) -> tuple:
+    """
+    PP/EV split model:
+    proj_goals = ev_goal_rate × proj_ev_toi + pp_goal_rate × proj_pp_toi
+      then multiply through: sh_reg_f × opp_goalie_f × opp_ga_f × toi_f × ha_f × b2b_f
+    """
+    # Base from weighted average
+    base_goals   = weighted_avg(logs, 'points')
+    base_pp_goals = weighted_avg(logs, 'three_att')
+    if base_goals < 0:  base_goals = 0.0
+    if base_pp_goals < 0: base_pp_goals = 0.0
+
+    # PP and EV split
+    pp_toi_l10 = get_avg_pp_toi(logs, 10)
+    toi_l10    = get_avg_toi(logs, 10)
+    ev_toi_l10 = max(0.1, toi_l10 - pp_toi_l10)
+
+    ev_goals_l10 = max(0.0, rolling_avg(logs, 'points', 10) - rolling_avg(logs, 'three_att', 10))
+    pp_goals_l10 = rolling_avg(logs, 'three_att', 10)
+
+    ev_goal_rate = ev_goals_l10 / ev_toi_l10 if ev_toi_l10 > 0 else 0.0
+    pp_goal_rate = pp_goals_l10 / pp_toi_l10 if pp_toi_l10 > 0 else 0.0
+
+    # Projected TOI split
+    pp_toi_proj = get_avg_pp_toi(logs, 20)
+    ev_toi_proj = max(0.1, toi_proj - pp_toi_proj)
+
+    # Raw EV + PP goals projection
+    proj_ev  = ev_goal_rate * ev_toi_proj
+    proj_pp  = pp_goal_rate * pp_toi_proj
+
+    # 1. Shooting percentage regression factor
+    sog_l10  = rolling_avg(logs, 'fg_made', 10)
+    sh_pct_l10 = (rolling_avg(logs, 'points', 10) / sog_l10) if sog_l10 > 0 else LEAGUE['sh_pct']
+    if sh_pct_l10 > 0.150:
+        sh_reg_f = 0.90   # hot — expect regression
+    elif sh_pct_l10 < 0.070:
+        sh_reg_f = 1.10   # cold — expect surge
+    else:
+        sh_reg_f = 1.00
+
+    # 2. Opponent goalie factor (CRITICAL)
+    if opp_is_backup:
+        opp_sv = LEAGUE['backup_sv_pct']
+        backup_flag = True
+    else:
+        opp_sv = rolling_avg(opp_goalie_logs, 'fg_pct', 10) if opp_goalie_logs else LEAGUE['sv_pct']
+        if opp_sv <= 0:
+            opp_sv = LEAGUE['sv_pct']
+        backup_flag = False
+
+    opp_goalie_f = ((1 - LEAGUE['sv_pct']) / (1 - opp_sv)) if (1 - opp_sv) > 0 else 1.0
+    opp_goalie_f = cap(opp_goalie_f, 0.60, 1.60)
+
+    # 3. Opponent goals allowed factor
+    opp_ga_l10 = rolling_avg(opp_team_logs, 'points_allowed', 10) or LEAGUE['team_ga_pg']
+    opp_ga_f   = cap(opp_ga_l10 / LEAGUE['team_ga_pg'], 0.80, 1.30)
+
+    # Opponent goals allowed trend (L5 vs L20)
+    opp_ga_l5  = rolling_avg(opp_team_logs, 'points_allowed', 5)
+    opp_ga_l20 = rolling_avg(opp_team_logs, 'points_allowed', 20)
+    if opp_ga_l5 > opp_ga_l20 + 0.3:
+        opp_ga_trend_f = 1.05   # opp letting more in recently
+    elif opp_ga_l5 < opp_ga_l20 - 0.3:
+        opp_ga_trend_f = 0.95
+    else:
+        opp_ga_trend_f = 1.00
+
+    # 4. TOI factor
+    toi_szn = get_avg_toi(logs, len(logs))
+    toi_f   = cap(toi_proj / toi_szn, 0.75, 1.30) if toi_szn > 0 else 1.0
+
+    # 5. Home/away
+    home_g = home_away_avg(logs, 'points', 'home')
+    away_g = home_away_avg(logs, 'points', 'away')
+    if home_g > 0 and away_g > 0:
+        ha_f = cap((home_g if home_away == 'home' else away_g) /
+                   ((home_g + away_g) / 2), 0.88, 1.12)
+    else:
+        ha_f = 1.00
+
+    # 6. B2B: goals drop more than SOG on B2B
+    b2b_f = 0.93 if is_b2b else 1.00
+
+    proj = (proj_ev + proj_pp) * sh_reg_f * opp_goalie_f * opp_ga_f * \
+           opp_ga_trend_f * toi_f * ha_f * b2b_f
+
+    factors = {
+        'base_goals':        round(base_goals, 3),
+        'ev_goal_rate':      round(ev_goal_rate, 4),
+        'pp_goal_rate':      round(pp_goal_rate, 4),
+        'pp_toi_proj':       round(pp_toi_proj, 2),
+        'ev_toi_proj':       round(ev_toi_proj, 2),
+        'proj_ev_goals':     round(proj_ev, 3),
+        'proj_pp_goals':     round(proj_pp, 3),
+        'sh_pct_l10':        round(sh_pct_l10, 4),
+        'sh_reg_f':          round(sh_reg_f, 3),
+        'opp_sv_l10':        round(opp_sv, 4),
+        'opp_goalie_f':      round(opp_goalie_f, 3),
+        'backup_starting':   backup_flag,
+        'opp_ga_l10':        round(opp_ga_l10, 3),
+        'opp_ga_f':          round(opp_ga_f, 3),
+        'opp_ga_trend_f':    round(opp_ga_trend_f, 3),
+        'toi_f':             round(toi_f, 3),
+        'home_away_f':       round(ha_f, 3),
+        'b2b_f':             round(b2b_f, 3),
+    }
+    return round(max(0.0, proj), 3), factors
+
+
+# ── Project Assists (Step 7) ──────────────────────────────────────────────────
+
+def project_assists(logs: list, opp_team_logs: list, own_team_logs: list,
+                    home_away: str, toi_proj: float, is_b2b: bool,
+                    injury_ctx: dict, opp_goalie_logs: list) -> tuple:
+    """
+    proj_assists = base × pp_assist_f × toi_f × linemate_f × opp_ga_f
+                       × injury_f × passing_lane_f × ha_f × b2b_f
+    """
+    base = weighted_avg(logs, 'three_made')
+    if base < 0:
+        base = 0.0
+
+    # 1. PP assist factor
+    pp_toi_l10 = get_avg_pp_toi(logs, 10)
+    pp_ast_f   = 1.0 + ((pp_toi_l10 / LEAGUE['pp_toi_pg']) - 1.0) * 0.40
+    pp_ast_f   = cap(pp_ast_f, 0.70, 1.60)
+
+    # 2. TOI factor
+    toi_szn = get_avg_toi(logs, len(logs))
+    toi_f   = cap(toi_proj / toi_szn, 0.75, 1.30) if toi_szn > 0 else 1.0
+
+    # 3. Linemate scoring proxy (team goals L10)
+    team_goals_l10 = rolling_avg(own_team_logs, 'points_scored', 10) or LEAGUE['team_goals_pg']
+    linemate_f = cap(team_goals_l10 / LEAGUE['team_goals_pg'], 0.88, 1.12)
+
+    # 4. Opponent GA factor
+    opp_ga_l10 = rolling_avg(opp_team_logs, 'points_allowed', 10) or LEAGUE['team_ga_pg']
+    opp_ga_f   = cap(opp_ga_l10 / LEAGUE['team_ga_pg'], 0.80, 1.30)
+
+    # 5. Injury cascading (most important for assists)
+    fwds_out = injury_ctx.get('forwards_out', 0)
+    star_out  = injury_ctx.get('star_scorer_out', False)
+    pg_out    = injury_ctx.get('primary_pg_out', False)
+
+    if fwds_out == 0:
+        injury_f = 1.00   # Scenario D: no injuries
+    elif pg_out and pp_toi_l10 > 2.0:
+        injury_f = 1.22   # Scenario B: PG out, this player takes role
+    elif star_out:
+        injury_f = 0.85   # Scenario A: primary scorer out (fewer assists)
+    elif fwds_out >= 2:
+        injury_f = 0.91   # Scenario C: multiple forwards out
+    else:
+        injury_f = 1.00
+
+    # 6. Passing lane factor (active D = fewer assists)
+    # Proxy: opponent steals/deflections approximate — use shots against rate
+    opp_sa_l10 = rolling_avg(opp_team_logs, 'fg_att', 10) or LEAGUE['shots_against_pg']
+    if opp_sa_l10 > LEAGUE['shots_against_pg'] * 1.08:
+        passing_lane_f = 0.94   # high-shot defence, active puck pursuit
+    else:
+        passing_lane_f = 1.00
+
+    # 7. Home/away
+    home_a = home_away_avg(logs, 'three_made', 'home')
+    away_a = home_away_avg(logs, 'three_made', 'away')
+    if home_a > 0 and away_a > 0:
+        ha_f = cap((home_a if home_away == 'home' else away_a) /
+                   ((home_a + away_a) / 2), 0.88, 1.12)
+    else:
+        ha_f = 1.00
+
+    # 8. B2B
+    b2b_f = 0.94 if is_b2b else 1.00
+
+    proj = base * pp_ast_f * toi_f * linemate_f * opp_ga_f * \
+           injury_f * passing_lane_f * ha_f * b2b_f
+
+    factors = {
+        'base':             round(base, 3),
+        'pp_toi_l10':       round(pp_toi_l10, 2),
+        'pp_assist_f':      round(pp_ast_f, 3),
+        'toi_f':            round(toi_f, 3),
+        'team_goals_l10':   round(team_goals_l10, 3),
+        'linemate_f':       round(linemate_f, 3),
+        'opp_ga_l10':       round(opp_ga_l10, 3),
+        'opp_ga_f':         round(opp_ga_f, 3),
+        'forwards_out':     fwds_out,
+        'injury_f':         round(injury_f, 3),
+        'passing_lane_f':   round(passing_lane_f, 3),
+        'home_away_f':      round(ha_f, 3),
+        'b2b_f':            round(b2b_f, 3),
+    }
+    return round(max(0.0, proj), 3), factors
+
+
+# ── Project Points (Step 8) ───────────────────────────────────────────────────
+
+def project_points(logs: list, g_proj: float, a_proj: float,
+                   toi_proj: float, implied_total: float) -> tuple:
+    """
+    proj_points = (g_proj + a_proj) × archetype_f × pp_pts_adj × game_total_f
+    """
+    base_goals   = weighted_avg(logs, 'points')
+    base_assists = weighted_avg(logs, 'three_made')
+    if base_goals < 0:   base_goals = 0.0
+    if base_assists < 0: base_assists = 0.0
+
+    # Archetype classification
+    if base_goals > 0.40 and base_assists > 0.40:
+        archetype, corr_f = 'TRUE_POINT_PRODUCER', 1.00
+    elif base_goals > 0.40 and base_assists < 0.35:
+        archetype, corr_f = 'GOAL_SCORER', 0.96
+    elif base_assists > 0.45 and base_goals < 0.20:
+        archetype, corr_f = 'PURE_PLAYMAKER', 0.98
+    else:
+        archetype, corr_f = 'ROLE_PLAYER', 0.97
+
+    # PP points adjustment
+    pp_toi_l20 = get_avg_pp_toi(logs, 20)
+    pp_pts_f   = 1.0 + ((pp_toi_l20 / LEAGUE['pp_toi_pg']) - 1.0) * 0.35
+    pp_pts_f   = cap(pp_pts_f, 0.70, 1.50)
+
+    # Game total factor
+    if implied_total > 7.0:
+        total_f = 1.06
+    elif implied_total < 5.5:
+        total_f = 0.94
+    else:
+        total_f = 1.00
+
+    proj = (g_proj + a_proj) * corr_f * pp_pts_f * total_f
+
+    factors = {
+        'g_proj':        round(g_proj, 3),
+        'a_proj':        round(a_proj, 3),
+        'archetype':     archetype,
+        'corr_f':        round(corr_f, 3),
+        'pp_toi_l20':    round(pp_toi_l20, 2),
+        'pp_pts_f':      round(pp_pts_f, 3),
+        'implied_total': round(implied_total, 2),
+        'game_total_f':  round(total_f, 3),
+    }
+    return round(max(0.0, proj), 3), factors
+
+
+# ── Project Plus/Minus (Step 9) ───────────────────────────────────────────────
+
+def project_plus_minus(logs: list, opp_team_logs: list, own_team_logs: list,
+                        home_away: str, toi_proj: float,
+                        puck_line: Optional[float]) -> tuple:
+    """
+    proj_pm = base × ev_diff_f × oz_f × toi_f × opp_quality_f
+    HIGH VARIANCE — apply confidence dampening.
+    """
+    base = weighted_avg(logs, 'plus_minus')
+
+    # 1. EV goal differential (own team vs opponent)
+    own_gf_l10 = rolling_avg(own_team_logs, 'points_scored', 10) or LEAGUE['team_goals_pg']
+    opp_ga_l10 = rolling_avg(opp_team_logs, 'points_allowed', 10) or LEAGUE['team_ga_pg']
+    ev_diff    = own_gf_l10 - opp_ga_l10
+    ev_diff_f  = cap(1.0 + (ev_diff / LEAGUE['team_goals_pg']) * 0.15, 0.85, 1.20)
+
+    # 2. Zone start proxy (high PP TOI = more offensive zone starts)
+    pp_toi_l10 = get_avg_pp_toi(logs, 10)
+    if pp_toi_l10 > 3.0:
+        oz_f = 1.06
+    elif pp_toi_l10 < 0.5:
+        oz_f = 0.94
+    else:
+        oz_f = 1.00
+
+    # 3. TOI factor
+    toi_szn = get_avg_toi(logs, len(logs))
+    toi_f   = cap(toi_proj / toi_szn, 0.75, 1.30) if toi_szn > 0 else 1.0
+
+    # 4. Opponent quality
+    opp_gf_l10 = rolling_avg(opp_team_logs, 'points_scored', 10) or LEAGUE['team_goals_pg']
+    opp_quality_f = cap(LEAGUE['team_goals_pg'] / opp_gf_l10, 0.80, 1.20) if opp_gf_l10 > 0 else 1.0
+
+    proj = base * ev_diff_f * oz_f * toi_f * opp_quality_f
+
+    # Blowout risk: abs(puck_line) > 1.5 distorts PM dramatically
+    blowout_risk = puck_line is not None and abs(puck_line) > 1.5
+
+    factors = {
+        'base':           round(base, 3),
+        'own_gf_l10':     round(own_gf_l10, 3),
+        'opp_ga_l10':     round(opp_ga_l10, 3),
+        'ev_diff_f':      round(ev_diff_f, 3),
+        'pp_toi_l10':     round(pp_toi_l10, 2),
+        'oz_f':           round(oz_f, 3),
+        'toi_f':          round(toi_f, 3),
+        'opp_quality_f':  round(opp_quality_f, 3),
+        'blowout_risk':   blowout_risk,
+    }
+    return round(proj, 3), factors
+
+
+# ── Goalie: Project Saves (Step 10) ──────────────────────────────────────────
+
+def project_saves(goalie_logs: list, opp_team_logs: list,
+                  home_away: str, is_b2b: bool, rest_days: int,
+                  is_backup: bool) -> tuple:
+    """
+    proj_saves = base × sv_trend_f × gsaa_f × opp_shot_f
+                     × opp_sh_pct_f × game_total_f × ha_f × rest_f × team_def_f
+    """
+    if is_backup and len(goalie_logs) < 5:
+        base = 22.4
+        sv_pct_l10 = LEAGUE['backup_sv_pct']
+        base_sv = LEAGUE['backup_sv_pct']
+    else:
+        base     = weighted_avg(goalie_logs, 'steals') if goalie_logs else LEAGUE['saves_pg']
+        base_sv  = rolling_avg(goalie_logs, 'fg_pct', len(goalie_logs)) if goalie_logs else LEAGUE['sv_pct']
+        sv_pct_l10 = rolling_avg(goalie_logs, 'fg_pct', 10) if goalie_logs else base_sv
+
+    if base <= 0:
+        base = LEAGUE['saves_pg']
+    if base_sv <= 0:
+        base_sv = LEAGUE['sv_pct']
+
+    # 1. SV% sustainability check
+    sv_szn = rolling_avg(goalie_logs, 'fg_pct', len(goalie_logs)) if goalie_logs else LEAGUE['sv_pct']
+    if sv_szn > 0:
+        if sv_pct_l10 > sv_szn + 0.010:
+            sv_trend_f = 0.93   # hot goalie — expect regression
+        elif sv_pct_l10 < sv_szn - 0.010:
+            sv_trend_f = 1.07   # cold goalie — expect surge
         else:
-            coaching_f = 1.0
+            sv_trend_f = 1.00
     else:
-        coaching_f = 1.0
-    factors['coaching_f'] = round(coaching_f, 4)
+        sv_trend_f = 1.00
 
-    # PP TOI stability — players with heavy PP deployment have very stable TOI
-    pp_toi_l20 = rolling_avg(skater_logs, 'fg_att', min(20, n))
-    if pp_toi_l20 > LEAGUE_AVG['pp_toi_per_game'] * 1.5:
-        pp_stability_f = 1.02   # high PP deployment = reliable minutes
-    elif pp_toi_l20 < LEAGUE_AVG['pp_toi_per_game'] * 0.3:
-        pp_stability_f = 0.98   # EV-only grinder = volatile TOI
+    # 2. GSAA factor
+    gsaa_l10 = rolling_avg(goalie_logs, 'off_reb', 10) if goalie_logs else 0.0
+    if gsaa_l10 > 0.5:
+        gsaa_f = 1.04
+    elif gsaa_l10 < -0.5:
+        gsaa_f = 0.96
     else:
-        pp_stability_f = 1.0
-    factors['pp_stability_f'] = round(pp_stability_f, 4)
+        gsaa_f = 1.00
 
-    # Back-to-back: star players (>19 avg min) may see reduced deployment
-    if is_back_to_back:
-        b2b_f = 0.96 if base > 19.0 else 0.98
+    # 3. Opponent shots factor (most important for save VOLUME)
+    opp_sf_l10 = rolling_avg(opp_team_logs, 'fg_made', 10) or LEAGUE['shots_for_pg']
+    opp_shot_f = cap(opp_sf_l10 / LEAGUE['shots_for_pg'], 0.80, 1.30)
+
+    # 4. Opponent shooting percentage regression
+    opp_goals_l10 = rolling_avg(opp_team_logs, 'points_scored', 10) or LEAGUE['team_goals_pg']
+    opp_sh_pct_l10 = (opp_goals_l10 / opp_sf_l10) if opp_sf_l10 > 0 else LEAGUE['sh_pct']
+    if opp_sh_pct_l10 > LEAGUE['sh_pct'] + 0.015:
+        opp_sh_f = 1.05   # hot shooting team — regression coming = more saves
+    elif opp_sh_pct_l10 < LEAGUE['sh_pct'] - 0.015:
+        opp_sh_f = 0.96
     else:
-        b2b_f = 1.0
-    factors['b2b_f'] = b2b_f
+        opp_sh_f = 1.00
 
-    # Home/away split
-    home_avg = home_away_avg(skater_logs, 'minutes', 'home')
-    away_avg = home_away_avg(skater_logs, 'minutes', 'away')
-    if home_avg > 0 and away_avg > 0 and home_away in ('home', 'away'):
-        loc_f = (home_avg / away_avg) if home_away == 'home' else (away_avg / home_avg)
-        loc_f = max(0.93, min(1.07, loc_f))
+    # 5. Game total factor (from Odds API — passed as param via caller)
+    # Handled at call site by passing implied_total
+    game_total_f = 1.00   # overridden by caller if total available
+
+    # 6. Home/away
+    home_sv = home_away_avg(goalie_logs, 'steals', 'home') if goalie_logs else 0.0
+    away_sv = home_away_avg(goalie_logs, 'steals', 'away') if goalie_logs else 0.0
+    if home_sv > 0 and away_sv > 0:
+        ha_f = cap((home_sv if home_away == 'home' else away_sv) /
+                   ((home_sv + away_sv) / 2), 0.90, 1.10)
     else:
-        loc_f = 1.0
-    factors['home_away_f'] = round(loc_f, 4)
+        ha_f = 1.00
 
-    projection = base * coaching_f * pp_stability_f * b2b_f * loc_f
-    projection = max(0.0, round(projection, 4))
-    factors['projection'] = projection
-    return projection, factors
-
-
-# ── Goalie projection functions ────────────────────────────────────────────────
-
-BACKUP_GOALIE_AVG_SAVES   = 22.4
-BACKUP_GOALIE_AVG_SV_PCT  = 0.889
-BACKUP_GOALIE_AVG_GA      = 3.8
-
-
-def project_saves(goalie_logs: list[dict], opp_team_logs: list[dict],
-                  home_away: str, is_back_to_back: bool,
-                  rest_days: int, is_backup: bool = False) -> tuple[float, dict]:
-    """
-    Saves projection. Now uses real saves (steals col), SV% (fg_pct), GSAA (off_reb).
-    Backup goalie detection uses league-average backup stats.
-    """
-    n = len(goalie_logs)
-
-    # Backup goalie: use league-average backup stats if <5 starts this season
-    if is_backup and n < 5:
-        base = BACKUP_GOALIE_AVG_SAVES
-        factors = {
-            'base': base, 'is_backup_low_sample': True,
-            'backup_avg_saves': BACKUP_GOALIE_AVG_SAVES,
-        }
-        factors['projection'] = round(base, 4)
-        return round(base, 4), factors
-
-    base = weighted_avg(goalie_logs, 'steals')   # saves in steals col
-    if base == 0.0:
-        base = BACKUP_GOALIE_AVG_SAVES if is_backup else LEAGUE_AVG['saves_per_game']
-    factors = {'base': round(base, 4), 'is_backup': is_backup}
-
-    # SV% trend: L10 vs season — hot goalies regress, cold surge
-    sv_l10 = rolling_avg(goalie_logs, 'fg_pct', min(10, n))
-    sv_szn = rolling_avg(goalie_logs, 'fg_pct', n)
-    if sv_szn > 0 and n >= 5:
-        sv_ratio = sv_l10 / sv_szn
-        if sv_ratio > 1.010 / sv_szn * sv_szn:   # simplified: absolute threshold
-            pass
-        # Use absolute SV% thresholds per spec
-        if sv_l10 > sv_szn + 0.010:
-            sv_trend_f = 0.93   # hot — regress
-        elif sv_l10 < sv_szn - 0.010:
-            sv_trend_f = 1.07   # cold — expect surge
-        else:
-            sv_trend_f = 1.0
-    else:
-        sv_trend_f = 1.0
-    factors['sv_trend_f'] = round(sv_trend_f, 4)
-
-    # GSAA factor — now real data from off_reb column
-    gsaa_avg = weighted_avg(goalie_logs, 'off_reb')
-    if gsaa_avg > 0.5:
-        gsaa_f = 1.04   # legitimately above average
-    elif gsaa_avg < -0.5:
-        gsaa_f = 0.96   # below average
-    else:
-        gsaa_f = 1.0
-    factors['gsaa_f'] = round(gsaa_f, 4)
-
-    # Opponent shots per game — most important volume driver
-    opp_shots = rolling_avg(opp_team_logs, 'shots_for', 10)
-    if opp_shots > 0:
-        opp_shots_f = opp_shots / LEAGUE_AVG['shots_against_per_game']
-        opp_shots_f = max(0.80, min(1.25, opp_shots_f))
-    else:
-        opp_shots_f = 1.0
-    factors['opp_shots_f'] = round(opp_shots_f, 4)
-
-    # Opponent SH% regression — high SH% unsustainable = more saves coming
-    opp_sh_pct = rolling_avg(opp_team_logs, 'fg_pct', 10)
-    if opp_sh_pct > LEAGUE_AVG['shooting_pct'] + 0.02:
-        sh_reg_f = 1.05   # over-performing offence — expect regression = more saves
-    elif opp_sh_pct > 0 and opp_sh_pct < LEAGUE_AVG['shooting_pct'] - 0.02:
-        sh_reg_f = 0.97
-    else:
-        sh_reg_f = 1.0
-    factors['opp_sh_regression_f'] = round(sh_reg_f, 4)
-
-    # Home/away SV% split
-    home_sv = home_away_avg(goalie_logs, 'fg_pct', 'home')
-    away_sv = home_away_avg(goalie_logs, 'fg_pct', 'away')
-    if home_sv > 0 and away_sv > 0 and home_away in ('home', 'away') and sv_szn > 0:
-        loc_sv = home_sv if home_away == 'home' else away_sv
-        loc_f  = max(0.95, min(1.05, loc_sv / sv_szn))
-    else:
-        loc_f = 1.0
-    factors['home_away_f'] = round(loc_f, 4)
-
-    # Rest factor
-    if is_back_to_back or rest_days <= 1:
+    # 7. Rest factor
+    if rest_days <= 1:
         rest_f = 0.93
     elif rest_days >= 5:
         rest_f = 0.97
     else:
-        rest_f = 1.0
-    factors['rest_f'] = rest_f
+        rest_f = 1.00
 
-    projection = base * sv_trend_f * gsaa_f * opp_shots_f * sh_reg_f * loc_f * rest_f
-    projection = max(0.0, round(projection, 4))
-    factors['projection'] = projection
-    return projection, factors
+    # 8. Team defence factor (subtle)
+    own_sa_l10 = rolling_avg(opp_team_logs, 'fg_att', 10) or LEAGUE['shots_against_pg']
+    # Higher opp SA = goalie faces more = slightly more saves but also more GA
+    team_def_f = cap(1.0 + (own_sa_l10 / LEAGUE['shots_against_pg'] - 1.0) * 0.03,
+                     0.97, 1.03)
+
+    proj = base * sv_trend_f * gsaa_f * opp_shot_f * opp_sh_f * \
+           game_total_f * ha_f * rest_f * team_def_f
+
+    factors = {
+        'base':            round(base, 3),
+        'backup_starting': is_backup,
+        'sv_pct_l10':      round(sv_pct_l10, 4),
+        'sv_pct_szn':      round(sv_szn, 4),
+        'sv_trend_f':      round(sv_trend_f, 3),
+        'gsaa_l10':        round(gsaa_l10, 3),
+        'gsaa_f':          round(gsaa_f, 3),
+        'opp_sf_l10':      round(opp_sf_l10, 2),
+        'opp_shot_f':      round(opp_shot_f, 3),
+        'opp_sh_pct_l10':  round(opp_sh_pct_l10, 4),
+        'opp_sh_f':        round(opp_sh_f, 3),
+        'game_total_f':    round(game_total_f, 3),
+        'home_away_f':     round(ha_f, 3),
+        'rest_days':       rest_days,
+        'rest_f':          round(rest_f, 3),
+        'team_def_f':      round(team_def_f, 3),
+    }
+    return round(max(12.0, proj), 2), factors
 
 
-def project_goals_against(goalie_logs: list[dict], opp_team_logs: list[dict],
-                           home_away: str, is_backup: bool = False) -> tuple[float, dict]:
+# ── Goalie: Project Goals Against (Step 11) ───────────────────────────────────
+
+def project_goals_against(goalie_logs: list, opp_team_logs: list,
+                           home_away: str, is_backup: bool) -> tuple:
     """
-    Goals Against projection. Now uses real GA (blocks col), shots (fg_att), SV% (fg_pct), GSAA (off_reb).
-    Includes empty-net and OT adjustments as per spec.
+    proj_ga = base × xga_reg_f × opp_goals_f × pp_quality_f × script_f
+              + en_adj + ot_adj
     """
-    n = len(goalie_logs)
-
-    if is_backup and n < 5:
-        base = BACKUP_GOALIE_AVG_GA
-        factors = {
-            'base': base, 'is_backup_low_sample': True,
-            'backup_avg_ga': BACKUP_GOALIE_AVG_GA,
-        }
-        factors['projection'] = round(base + 0.15 + 0.10, 4)
-        return round(base + 0.15 + 0.10, 4), factors
-
-    base = weighted_avg(goalie_logs, 'blocks')   # GA in blocks col
-    if base == 0.0:
-        base = LEAGUE_AVG['goals_against_per_game']
-    factors = {'base': round(base, 4), 'is_backup': is_backup}
-
-    # xGA regression: actual GA vs expected GA from shots × league SH%
-    shots_avg = weighted_avg(goalie_logs, 'fg_att')   # shotsAgainst in fg_att
-    if shots_avg > 0:
-        xga = shots_avg * (1.0 - LEAGUE_AVG['sv_pct'])
-        if base > xga + 0.3:
-            xga_reg_f = 0.93   # actual GA above expected — regression toward mean
-        elif base < xga - 0.3:
-            xga_reg_f = 1.07
-        else:
-            xga_reg_f = 1.0
+    if is_backup and len(goalie_logs) < 5:
+        base = 3.40
+        shots_against_l10 = LEAGUE['shots_against_pg']
     else:
-        xga_reg_f = 1.0
-    factors['xga_regression_f'] = round(xga_reg_f, 4)
+        base = weighted_avg(goalie_logs, 'blocks') if goalie_logs else LEAGUE['ga_pg']
+        shots_l = [safe(r.get('fg_att')) for r in goalie_logs[:10] if r.get('fg_att')]
+        shots_against_l10 = sum(shots_l) / len(shots_l) if shots_l else LEAGUE['shots_against_pg']
 
-    # GSAA factor — real data from off_reb
-    gsaa_avg = weighted_avg(goalie_logs, 'off_reb')
-    if gsaa_avg > 0.3:
-        gsaa_f = 0.94   # elite goalie — suppresses GA
-    elif gsaa_avg < -0.3:
-        gsaa_f = 1.08   # below average — allows more GA
+    if base <= 0:
+        base = LEAGUE['ga_pg']
+
+    # 1. xGA regression
+    xga = shots_against_l10 * (1 - LEAGUE['sv_pct'])   # = shots × 0.094
+    actual_ga_l10 = rolling_avg(goalie_logs, 'blocks', 10) if goalie_logs else base
+    if actual_ga_l10 > xga + 0.3:
+        xga_reg_f = 0.92   # lucky bad — will improve
+    elif actual_ga_l10 < xga - 0.3:
+        xga_reg_f = 1.08   # unlucky good — will get worse
     else:
-        gsaa_f = 1.0
-    factors['gsaa_f'] = round(gsaa_f, 4)
+        xga_reg_f = 1.00
 
-    # Opponent goals per game (offensive quality)
-    opp_goals_avg = rolling_avg(opp_team_logs, 'points_scored', 10)
-    opp_off_f = (opp_goals_avg / LEAGUE_AVG['team_goals_per_game']) if opp_goals_avg > 0 else 1.0
-    opp_off_f = max(0.80, min(1.25, opp_off_f))
-    factors['opp_offense_f'] = round(opp_off_f, 4)
+    # 2. Opponent goals factor
+    opp_gf_l10 = rolling_avg(opp_team_logs, 'points_scored', 10) or LEAGUE['team_goals_pg']
+    opp_goals_f = cap(opp_gf_l10 / LEAGUE['team_goals_pg'], 0.75, 1.35)
 
-    # Home/away GA split
-    home_ga = home_away_avg(goalie_logs, 'blocks', 'home')
-    away_ga = home_away_avg(goalie_logs, 'blocks', 'away')
-    if home_ga > 0 and away_ga > 0 and home_away in ('home', 'away'):
-        loc_f = (home_ga / away_ga) if home_away == 'home' else (away_ga / home_ga)
-        loc_f = max(0.90, min(1.10, loc_f))
+    # 3. Opponent PP quality proxy
+    opp_sf_l10  = rolling_avg(opp_team_logs, 'fg_made', 10) or LEAGUE['shots_for_pg']
+    opp_sh_pct  = (opp_gf_l10 / opp_sf_l10) if opp_sf_l10 > 0 else LEAGUE['sh_pct']
+    if opp_sh_pct > LEAGUE['sh_pct'] * 1.15:
+        pp_quality_f = 1.12
+    elif opp_sh_pct < LEAGUE['sh_pct'] * 0.85:
+        pp_quality_f = 0.90
     else:
-        loc_f = 1.0
-    factors['home_away_f'] = round(loc_f, 4)
+        pp_quality_f = 1.00
 
-    projection = base * xga_reg_f * gsaa_f * opp_off_f * loc_f
+    # 4. Game script (away teams score more on average — subtle)
+    script_f = 1.02 if home_away == 'away' else 1.00
 
-    # Empty-net adjustment: EN goals count in GA totals but not SV%
-    # Avg 0.15 EN goals per game (games where team is losing late)
-    en_adjustment = 0.15
-    factors['en_adjustment'] = en_adjustment
+    # 5. EN + OT adjustments (always additive)
+    en_adj = LEAGUE['en_goals_pg']   # 0.15
+    ot_adj = 0.10                     # ~0.24 × 0.4 goals in OT
 
-    # OT factor: ~24% of games go to OT, adding ~0.5 shots per team in OT
-    ot_adjustment = LEAGUE_AVG['ot_probability'] * 0.5 * (1.0 - LEAGUE_AVG['sv_pct'])
-    ot_adjustment = round(ot_adjustment, 4)
-    factors['ot_adjustment'] = ot_adjustment
+    proj_mult = base * xga_reg_f * opp_goals_f * pp_quality_f * script_f
+    proj      = proj_mult + en_adj + ot_adj
 
-    projection = projection + en_adjustment + ot_adjustment
-    projection = max(0.0, round(projection, 4))
-    factors['projection'] = projection
-    return projection, factors
-
-
-# ── Team projection functions ──────────────────────────────────────────────────
-
-def project_moneyline(home_team_logs: list[dict], away_team_logs: list[dict],
-                      home_goalie_logs: list[dict], away_goalie_logs: list[dict],
-                      home_is_backup: bool, away_is_backup: bool,
-                      home_rest_days: int = 3, away_rest_days: int = 3) -> tuple[float, dict]:
-    """
-    Moneyline win probability. Goalie GSAA differential is the single biggest driver.
-    Every 0.5 GSAA differential = 3% win probability shift.
-    """
-    factors = {}
-
-    # Offense scores (from team_game_logs — fall back to 1.0 if not populated)
-    home_goals_avg = rolling_avg(home_team_logs, 'points_scored', 10)
-    away_goals_avg = rolling_avg(away_team_logs, 'points_scored', 10)
-    home_off = (home_goals_avg / LEAGUE_AVG['team_goals_per_game']) if home_goals_avg > 0 else 1.0
-    away_off = (away_goals_avg / LEAGUE_AVG['team_goals_per_game']) if away_goals_avg > 0 else 1.0
-    factors['home_offense_score'] = round(home_off, 4)
-    factors['away_offense_score'] = round(away_off, 4)
-
-    # Defense scores
-    home_ga_avg = rolling_avg(home_team_logs, 'points_allowed', 10)
-    away_ga_avg = rolling_avg(away_team_logs, 'points_allowed', 10)
-    home_def = (LEAGUE_AVG['team_goals_per_game'] / home_ga_avg) if home_ga_avg > 0 else 1.0
-    away_def = (LEAGUE_AVG['team_goals_per_game'] / away_ga_avg) if away_ga_avg > 0 else 1.0
-    home_def = max(0.75, min(1.30, home_def))
-    away_def = max(0.75, min(1.30, away_def))
-    factors['home_defense_score'] = round(home_def, 4)
-    factors['away_defense_score'] = round(away_def, 4)
-
-    # Goalie SV% — most critical for moneyline
-    home_sv   = rolling_avg(home_goalie_logs, 'fg_pct',  min(10, len(home_goalie_logs))) if home_goalie_logs else LEAGUE_AVG['sv_pct']
-    away_sv   = rolling_avg(away_goalie_logs, 'fg_pct',  min(10, len(away_goalie_logs))) if away_goalie_logs else LEAGUE_AVG['sv_pct']
-    home_gsaa = rolling_avg(home_goalie_logs, 'off_reb', min(10, len(home_goalie_logs))) if home_goalie_logs else 0.0
-    away_gsaa = rolling_avg(away_goalie_logs, 'off_reb', min(10, len(away_goalie_logs))) if away_goalie_logs else 0.0
-    gsaa_diff = home_gsaa - away_gsaa   # positive = home goalie advantage
-    factors['home_sv_pct'] = round(home_sv, 4)
-    factors['away_sv_pct'] = round(away_sv, 4)
-    factors['gsaa_diff']   = round(gsaa_diff, 4)
-
-    if home_is_backup:
-        home_sv = min(home_sv, LEAGUE_AVG['sv_pct'] - 0.015)
-        home_gsaa -= 0.8
-        factors['home_backup_goalie'] = True
-    if away_is_backup:
-        away_sv = min(away_sv, LEAGUE_AVG['sv_pct'] - 0.015)
-        away_gsaa -= 0.8
-        factors['away_backup_goalie'] = True
-
-    # Projected goals
-    proj_home = home_off * away_def * (1.0 - away_sv) / (1.0 - LEAGUE_AVG['sv_pct']) * LEAGUE_AVG['team_goals_per_game']
-    proj_away = away_off * home_def * (1.0 - home_sv) / (1.0 - LEAGUE_AVG['sv_pct']) * LEAGUE_AVG['team_goals_per_game']
-    factors['proj_home_score'] = round(proj_home, 3)
-    factors['proj_away_score'] = round(proj_away, 3)
-
-    # Win probability base: 54% home ice
-    score_diff = proj_home - proj_away
-    raw_win_prob = LEAGUE_AVG['home_win_pct'] + (score_diff / (2 * LEAGUE_AVG['team_goals_per_game'])) * 0.30
-
-    # GSAA adjustment: every 0.5 GSAA diff = 3% shift
-    gsaa_win_adj = (gsaa_diff / 0.5) * 0.03
-    raw_win_prob += gsaa_win_adj
-    factors['gsaa_win_adj'] = round(gsaa_win_adj, 4)
-
-    # Rest advantage: +2% per extra rest day (capped at ±4%)
-    rest_diff = home_rest_days - away_rest_days
-    rest_adj  = max(-0.04, min(0.04, rest_diff * 0.02))
-    raw_win_prob += rest_adj
-    factors['rest_adj'] = round(rest_adj, 4)
-
-    raw_win_prob = max(0.15, min(0.85, raw_win_prob))
-    if home_is_backup:
-        raw_win_prob = min(raw_win_prob, 0.38)
-    factors['home_win_prob'] = round(raw_win_prob, 4)
-
-    return raw_win_prob, factors
+    factors = {
+        'base':            round(base, 3),
+        'backup_starting': is_backup,
+        'shots_against_l10': round(shots_against_l10, 2),
+        'xga':             round(xga, 3),
+        'actual_ga_l10':   round(actual_ga_l10, 3),
+        'xga_reg_f':       round(xga_reg_f, 3),
+        'opp_gf_l10':      round(opp_gf_l10, 3),
+        'opp_goals_f':     round(opp_goals_f, 3),
+        'opp_sh_pct':      round(opp_sh_pct, 4),
+        'pp_quality_f':    round(pp_quality_f, 3),
+        'script_f':        round(script_f, 3),
+        'en_adj':          round(en_adj, 3),
+        'ot_adj':          round(ot_adj, 3),
+    }
+    return round(max(0.5, proj), 3), factors
 
 
-def project_puck_line(home_team_logs: list[dict], away_team_logs: list[dict],
-                      home_goalie_logs: list[dict], away_goalie_logs: list[dict],
-                      home_is_backup: bool, away_is_backup: bool,
-                      proj_home_score: float, proj_away_score: float) -> tuple[float, dict, float, dict]:
-    """Returns (home_cover_prob, home_factors, away_cover_prob, away_factors)."""
-    proj_diff = proj_home_score - proj_away_score
-    factors_home = {'proj_differential': round(proj_diff, 3)}
-    factors_away = {'proj_differential': round(proj_diff, 3)}
+# ── Team: Project Total (Step 12) ─────────────────────────────────────────────
 
-    # CRITICAL: 24% of NHL games go to OT
-    # For +1.5 underdog: tie after regulation (OT game) = underdog covers
-    # ot_probability varies by projected goal differential — tighter game = more OT
-    abs_diff = abs(proj_home_score - proj_away_score)
-    if abs_diff < 0.3:
-        ot_prob = 0.32   # very tight matchup
-    elif abs_diff > 1.0:
-        ot_prob = 0.15   # likely blowout
-    else:
-        ot_prob = 0.24   # default league average
-    factors_home['ot_probability'] = ot_prob
-    factors_away['ot_probability'] = ot_prob
-
-    # Puck line is -1.5 for favourite, +1.5 for underdog
-    # Home cover (-1.5): need proj_diff > 1.5
-    home_cover = normal_cdf(proj_diff, mu=1.5, sigma=PUCK_LINE_STD_DEV)
-    # Away cover (+1.5): covers if lose by < 1.5 OR game goes to OT (tie after regulation)
-    away_cover = 1.0 - normal_cdf(proj_diff, mu=1.5, sigma=PUCK_LINE_STD_DEV)
-    # Add OT probability to away cover (OT means 1-goal game → away covers +1.5)
-    away_cover = min(0.90, away_cover + ot_prob * 0.6)
-
-    if home_is_backup:
-        home_cover = max(home_cover * 0.70, 0.20)
-        away_cover = min(away_cover * 1.25, 0.80)
-        factors_home['backup_goalie_cover_penalty'] = True
-        factors_away['backup_goalie_cover_boost'] = True
-
-    factors_home['cover_probability'] = round(home_cover, 4)
-    factors_away['cover_probability'] = round(away_cover, 4)
-    return home_cover, factors_home, away_cover, factors_away
-
-
-def project_total(home_team_logs: list[dict], away_team_logs: list[dict],
-                  home_goalie_logs: list[dict], away_goalie_logs: list[dict],
+def project_total(home_tl: list, away_tl: list,
+                  home_goalie_logs: list, away_goalie_logs: list,
                   home_is_backup: bool, away_is_backup: bool,
-                  home_is_b2b: bool = False, away_is_b2b: bool = False) -> tuple[float, dict]:
+                  home_b2b: bool, away_b2b: bool,
+                  home_injury_ctx: dict, away_injury_ctx: dict,
+                  posted_total: float = LEAGUE['nhl_total'],
+                  conn=None, home_team: str = '', away_team: str = '') -> tuple:
     """
-    Game total. Goalie SV% matchup is the single biggest driver.
-    Backup goalie = × 1.18 — most reliable NHL over signal.
+    proj_total = (proj_home_goals + proj_away_goals)
+    with goalie, backup, combined offense/defense, PP, B2B, OT, H2H, injury factors.
     """
-    home_goals = rolling_avg(home_team_logs, 'points_scored', 10) if home_team_logs else LEAGUE_AVG['team_goals_per_game']
-    away_goals = rolling_avg(away_team_logs, 'points_scored', 10) if away_team_logs else LEAGUE_AVG['team_goals_per_game']
-    if home_goals == 0: home_goals = LEAGUE_AVG['team_goals_per_game']
-    if away_goals == 0: away_goals = LEAGUE_AVG['team_goals_per_game']
-    proj_total = home_goals + away_goals
-    factors    = {'proj_home_goals': round(home_goals, 3), 'proj_away_goals': round(away_goals, 3)}
+    def team_goals_base(tl):
+        return rolling_avg(tl, 'points_scored', 10) or LEAGUE['team_goals_pg']
 
-    # Goalie SV% matchup — each 0.010 SV% from avg shifts total by 0.3 goals
-    home_sv = rolling_avg(home_goalie_logs, 'fg_pct', min(10, len(home_goalie_logs))) if home_goalie_logs else LEAGUE_AVG['sv_pct']
-    away_sv = rolling_avg(away_goalie_logs, 'fg_pct', min(10, len(away_goalie_logs))) if away_goalie_logs else LEAGUE_AVG['sv_pct']
-    if home_is_backup: home_sv = min(home_sv, LEAGUE_AVG['sv_pct'] - 0.015)
-    if away_is_backup: away_sv = min(away_sv, LEAGUE_AVG['sv_pct'] - 0.015)
-    avg_sv = (home_sv + away_sv) / 2
-    factors['home_sv_pct'] = round(home_sv, 4)
-    factors['away_sv_pct'] = round(away_sv, 4)
+    home_base = team_goals_base(home_tl)
+    away_base = team_goals_base(away_tl)
 
-    # Goalie impact on total: both .915+ = -0.6 total; either backup = +0.8 total
-    sv_total_adj = ((LEAGUE_AVG['sv_pct'] - home_sv) + (LEAGUE_AVG['sv_pct'] - away_sv)) * 30
-    sv_total_adj = max(-0.80, min(0.80, sv_total_adj))
-    proj_total  += sv_total_adj
-    factors['sv_total_adj'] = round(sv_total_adj, 4)
+    # Opposing goalie factors (DOMINANT)
+    def goalie_factor(goalie_logs, is_backup):
+        if is_backup:
+            return 1.45, LEAGUE['backup_sv_pct']  # massive backup boost
+        sv = rolling_avg(goalie_logs, 'fg_pct', 10) if goalie_logs else LEAGUE['sv_pct']
+        if sv <= 0:
+            sv = LEAGUE['sv_pct']
+        f = (1 - LEAGUE['sv_pct']) / (1 - sv) if (1 - sv) > 0 else 1.0
+        return cap(f, 0.60, 1.60), sv
 
-    # Backup goalie — most reliable NHL over signal
-    if home_is_backup or away_is_backup:
-        proj_total *= 1.18
-        factors['backup_goalie_over_signal'] = True
+    away_goalie_f, away_sv = goalie_factor(away_goalie_logs, away_is_backup)  # home team faces away goalie
+    home_goalie_f, home_sv = goalie_factor(home_goalie_logs, home_is_backup)  # away team faces home goalie
 
-    # B2B both teams: under lean (tired goalies and skaters)
-    if home_is_b2b and away_is_b2b:
-        proj_total *= 0.94
-        factors['b2b_both_teams'] = True
-    elif home_is_b2b or away_is_b2b:
-        proj_total *= 0.97
-        factors['b2b_one_team'] = True
+    proj_home = home_base * away_goalie_f
+    proj_away = away_base * home_goalie_f
 
-    # OT adds expected goals (24% probability × ~0.3 goals in OT period)
-    ot_adjustment = LEAGUE_AVG['ot_probability'] * 0.30
-    proj_total   += ot_adjustment
-    factors['ot_adjustment'] = round(ot_adjustment, 3)
+    # Combined defence factor
+    home_ga_l10 = rolling_avg(home_tl, 'points_allowed', 10) or LEAGUE['team_ga_pg']
+    away_ga_l10 = rolling_avg(away_tl, 'points_allowed', 10) or LEAGUE['team_ga_pg']
+    combined_def_f = cap(((home_ga_l10 + away_ga_l10) / 2) / LEAGUE['team_ga_pg'], 0.80, 1.25)
+    proj_home *= combined_def_f
+    proj_away *= combined_def_f
 
-    proj_total = max(3.0, round(proj_total, 3))
-    factors['proj_total'] = proj_total
+    # B2B factors
+    if home_b2b:
+        proj_home *= 0.94
+    if away_b2b:
+        proj_away *= 0.94
 
-    posted_total = 5.5
-    over_prob  = normal_cdf(proj_total, mu=posted_total, sigma=TOTAL_STD_DEV)
+    # Injury factors
+    if home_injury_ctx.get('multi_out'):
+        proj_home *= 0.93
+    elif home_injury_ctx.get('star_scorer_out'):
+        proj_home *= 0.96
+    if away_injury_ctx.get('multi_out'):
+        proj_away *= 0.93
+    elif away_injury_ctx.get('star_scorer_out'):
+        proj_away *= 0.96
+
+    # OT adjustment (+0.07 expected goals from OT games)
+    proj_total_raw = proj_home + proj_away + 0.07
+
+    # H2H factor (last 5 meetings)
+    h2h_f = 1.00
+    if conn and home_team and away_team:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT AVG(t1.points_scored + t2.points_scored)
+                    FROM team_game_logs t1
+                    JOIN team_game_logs t2
+                      ON t1.game_date = t2.game_date
+                      AND t1.sport = t2.sport
+                      AND t1.season = t2.season
+                      AND t1.team_name != t2.team_name
+                    WHERE t1.sport = 'NHL'
+                      AND t1.team_name ILIKE %s
+                      AND t2.team_name ILIKE %s
+                      AND t1.points_scored IS NOT NULL
+                    ORDER BY t1.game_date DESC
+                    LIMIT 5
+                """, (f'%{home_team[:4]}%', f'%{away_team[:4]}%'))
+                row = cur.fetchone()
+                if row and row[0]:
+                    h2h_avg = float(row[0])
+                    if h2h_avg > LEAGUE['nhl_total'] + 1.0:
+                        h2h_f = 1.0 + 0.06 * 0.10   # 0.10 weight
+                    elif h2h_avg < LEAGUE['nhl_total'] - 1.0:
+                        h2h_f = 1.0 - 0.06 * 0.10
+        except Exception:
+            pass
+
+    proj_total = proj_total_raw * h2h_f
+
+    over_prob  = normal_cdf(proj_total, mu=posted_total, sigma=LEAGUE['total_std_dev'])
     over_prob  = max(0.10, min(0.90, over_prob))
-    factors['over_probability']  = round(over_prob, 4)
-    factors['under_probability'] = round(1.0 - over_prob, 4)
-    return proj_total, factors
+
+    factors = {
+        'proj_home_goals':    round(proj_home, 3),
+        'proj_away_goals':    round(proj_away, 3),
+        'proj_total':         round(proj_total, 3),
+        'home_base_goals':    round(home_base, 3),
+        'away_base_goals':    round(away_base, 3),
+        'away_goalie_f':      round(away_goalie_f, 3),
+        'home_goalie_f':      round(home_goalie_f, 3),
+        'home_sv_l10':        round(home_sv, 4),
+        'away_sv_l10':        round(away_sv, 4),
+        'home_is_backup':     home_is_backup,
+        'away_is_backup':     away_is_backup,
+        'combined_def_f':     round(combined_def_f, 3),
+        'home_b2b':           home_b2b,
+        'away_b2b':           away_b2b,
+        'h2h_f':              round(h2h_f, 4),
+        'ot_adj':             0.07,
+        'posted_total':       round(posted_total, 2),
+        'over_probability':   round(over_prob, 4),
+        'under_probability':  round(1.0 - over_prob, 4),
+    }
+    return round(proj_total, 3), factors
 
 
-# ── DB write functions ─────────────────────────────────────────────────────────
+# ── Team: Project Puck Line (Step 13a) ────────────────────────────────────────
+
+def project_puck_line(proj_home: float, proj_away: float,
+                       home_goalie_logs: list, away_goalie_logs: list,
+                       home_tl: list, away_tl: list,
+                       home_is_backup: bool, away_is_backup: bool,
+                       home_rest: int, away_rest: int,
+                       home_ml: Optional[float]) -> tuple:
+    """
+    cover_prob = normalCDF((proj_diff - posted_line) / std_dev)
+    OT boost: underdog +1.5 always covers in OT (+0.24 to cover prob).
+    Large favourite regression if implied > -200.
+    """
+    proj_diff = proj_home - proj_away
+
+    # Large favourite regression per spec
+    regression_applied = False
+    if home_ml is not None and home_ml <= -200:
+        proj_diff *= 0.91
+        regression_applied = True
+
+    # Home -1.5 cover probability
+    home_cover_raw = normal_cdf(proj_diff, mu=1.5, sigma=LEAGUE['rl_std_dev'])
+
+    # OT boost: underdog +1.5 always covers in OT (24% OT probability)
+    # Away team is the underdog +1.5 if home_cover_raw > 0.50
+    away_cover_raw = 1.0 - home_cover_raw
+    away_cover_with_ot = min(0.92, away_cover_raw + LEAGUE['ot_probability'])
+
+    # Goalie GSAA differential
+    home_gsaa = rolling_avg(home_goalie_logs, 'off_reb', 10) if home_goalie_logs else 0.0
+    away_gsaa = rolling_avg(away_goalie_logs, 'off_reb', 10) if away_goalie_logs else 0.0
+    gsaa_diff  = home_gsaa - away_gsaa
+    gsaa_adj   = gsaa_diff * 0.06   # 0.5 GSAA = 3% cover prob shift
+
+    # Rest advantage
+    rest_diff = home_rest - away_rest
+    rest_adj  = rest_diff * 0.02
+
+    # Backup goalie adjustment
+    backup_adj = 0.0
+    if home_is_backup:  backup_adj -= 0.08
+    if away_is_backup:  backup_adj += 0.10
+
+    home_cover = max(0.10, min(0.90, home_cover_raw + gsaa_adj + rest_adj + backup_adj))
+    away_cover = max(0.10, min(0.92, away_cover_with_ot - gsaa_adj - rest_adj - backup_adj))
+
+    home_factors = {
+        'proj_home_goals': round(proj_home, 3),
+        'proj_away_goals': round(proj_away, 3),
+        'proj_diff':       round(proj_diff, 3),
+        'home_cover_raw':  round(home_cover_raw, 4),
+        'gsaa_adj':        round(gsaa_adj, 4),
+        'rest_adj':        round(rest_adj, 4),
+        'backup_adj':      round(backup_adj, 4),
+        'ot_probability':  LEAGUE['ot_probability'],
+        'fav_regression':  regression_applied,
+        'cover_prob':      round(home_cover, 4),
+        'side':            'home',
+    }
+    away_factors = {**home_factors,
+                    'ot_underdog_boost': round(LEAGUE['ot_probability'], 3),
+                    'cover_prob': round(away_cover, 4),
+                    'side': 'away'}
+    return home_cover, home_factors, away_cover, away_factors
+
+
+# ── Team: Project Moneyline (Step 13b) ────────────────────────────────────────
+
+def project_moneyline(home_tl: list, away_tl: list,
+                       home_goalie_logs: list, away_goalie_logs: list,
+                       home_is_backup: bool, away_is_backup: bool,
+                       home_rest: int, away_rest: int) -> tuple:
+    """
+    home_win_prob base = 0.540 (home teams win 54% in NHL)
+    Adjusted by: goalie quality, team offense/defense, PP, rest, home record, H2H.
+    BACKUP GOALIE: × 0.76 win probability (non-negotiable per spec).
+    """
+    home_win = 0.540   # HFA baseline
+
+    # 1. Goalie quality (biggest factor)
+    home_sv_l10 = rolling_avg(home_goalie_logs, 'fg_pct', 10) if home_goalie_logs else LEAGUE['sv_pct']
+    away_sv_l10 = rolling_avg(away_goalie_logs, 'fg_pct', 10) if away_goalie_logs else LEAGUE['sv_pct']
+    if home_sv_l10 <= 0: home_sv_l10 = LEAGUE['sv_pct']
+    if away_sv_l10 <= 0: away_sv_l10 = LEAGUE['sv_pct']
+
+    sv_diff = home_sv_l10 - away_sv_l10   # positive = home goalie better
+    goalie_adj = sv_diff * 6.0             # every 0.010 SV% = 6% win prob shift
+    goalie_adj = cap(goalie_adj, -0.15, 0.15)
+
+    # Backup penalty (non-negotiable)
+    if home_is_backup:
+        home_win *= 0.76
+    if away_is_backup:
+        home_win = min(0.80, home_win * 1.25)   # effectively: away × 0.76
+
+    # 2. Team offense vs defense
+    home_gf_l10 = rolling_avg(home_tl, 'points_scored', 10) or LEAGUE['team_goals_pg']
+    home_ga_l10 = rolling_avg(home_tl, 'points_allowed', 10) or LEAGUE['team_ga_pg']
+    away_gf_l10 = rolling_avg(away_tl, 'points_scored', 10) or LEAGUE['team_goals_pg']
+    away_ga_l10 = rolling_avg(away_tl, 'points_allowed', 10) or LEAGUE['team_ga_pg']
+
+    home_gs = home_gf_l10 / (home_gf_l10 + away_ga_l10) if (home_gf_l10 + away_ga_l10) > 0 else 0.5
+    off_def_adj = (home_gs - 0.50) * 0.20
+
+    # 3. Rest differential
+    rest_adj = (home_rest - away_rest) * 0.02
+
+    # 4. Home record
+    home_wins_l20 = sum(1 for r in home_tl[:20]
+                        if r.get('home_away') == 'home' and
+                        safe(r.get('result', r.get('points_scored', 0))) > safe(r.get('points_allowed', 0)))
+    home_games_l20 = sum(1 for r in home_tl[:20] if r.get('home_away') == 'home')
+    if home_games_l20 >= 5:
+        home_win_pct = home_wins_l20 / home_games_l20
+        if home_win_pct > 0.60:
+            home_record_adj = 0.05
+        elif home_win_pct < 0.45:
+            home_record_adj = -0.05
+        else:
+            home_record_adj = 0.0
+    else:
+        home_record_adj = 0.0
+
+    # Combine adjustments
+    home_win += goalie_adj + off_def_adj + rest_adj + home_record_adj
+    home_win  = cap(home_win, 0.25, 0.80)
+    away_win  = 1.0 - home_win
+
+    def to_ml(p: float) -> float:
+        if p <= 0 or p >= 1:
+            return 0.0
+        if p >= 0.5:
+            return round(-(p / (1 - p)) * 100, 0)
+        return round(((1 - p) / p) * 100, 0)
+
+    factors = {
+        'home_sv_l10':       round(home_sv_l10, 4),
+        'away_sv_l10':       round(away_sv_l10, 4),
+        'sv_diff':           round(sv_diff, 4),
+        'goalie_adj':        round(goalie_adj, 4),
+        'home_is_backup':    home_is_backup,
+        'away_is_backup':    away_is_backup,
+        'home_gf_l10':       round(home_gf_l10, 3),
+        'away_gf_l10':       round(away_gf_l10, 3),
+        'home_ga_l10':       round(home_ga_l10, 3),
+        'away_ga_l10':       round(away_ga_l10, 3),
+        'off_def_adj':       round(off_def_adj, 4),
+        'rest_adj':          round(rest_adj, 4),
+        'home_record_adj':   round(home_record_adj, 4),
+        'home_win_prob':     round(home_win, 4),
+        'away_win_prob':     round(away_win, 4),
+        'home_ml':           to_ml(home_win),
+        'away_ml':           to_ml(away_win),
+        'proj_home_score':   rolling_avg(home_tl, 'points_scored', 10),
+        'proj_away_score':   rolling_avg(away_tl, 'points_scored', 10),
+    }
+    return home_win, factors
+
+
+# ── Confidence scoring ────────────────────────────────────────────────────────
+
+def compute_confidence(prop_type: str,
+                       edge_pct: float,
+                       backup_starting: bool = False,
+                       opp_goalie_cold: bool = False,
+                       player_games: int = 20,
+                       pp_toi: float = 0.0,
+                       pp_matchup_fav: bool = False,
+                       sog_rate_extreme: bool = False,
+                       opp_b2b: bool = False,
+                       h2h_strong: bool = False,
+                       rest_advantage: int = 0,
+                       goalie_confirmed: bool = True,
+                       opp_goalie_tbd: bool = False,
+                       blowout_risk: bool = False) -> int:
+    """
+    base 60 + edge bonuses + prop-type penalties.
+    Soft cap >85: 85 + (x-85)×0.40. Hard cap 92.
+    """
+    c = 60
+
+    # Edge bonuses
+    abs_edge = abs(edge_pct)
+    if abs_edge > 0.20:   c += 12
+    elif abs_edge > 0.15: c += 10
+    elif abs_edge > 0.10: c += 8
+    elif abs_edge > 0.07: c += 6
+
+    # Signal bonuses
+    if backup_starting:           c += 15   # strongest signal in hockey
+    if opp_goalie_cold:           c += 8
+    if pp_toi > 3.5 and pp_matchup_fav: c += 6
+    if sog_rate_extreme:          c += 5
+    if opp_b2b:                   c += 4
+    if h2h_strong:                c += 4
+    if rest_advantage > 1:        c += 3
+
+    # Data quality penalties
+    if not goalie_confirmed:      c -= 8
+    if player_games < 10:         c -= 6
+    if opp_goalie_tbd:            c -= 5
+
+    # Prop-type variance penalties
+    if prop_type == 'plus_minus':  c -= 10
+    if prop_type == 'goals':       c -= 4
+    if blowout_risk:               c -= 25
+
+    # Soft cap
+    if c > 85:
+        c = int(85 + (c - 85) * 0.40)
+
+    return max(45, min(92, c))
+
+
+# ── Minimum edge thresholds ───────────────────────────────────────────────────
+
+MIN_EDGE = {
+    'shots_on_goal': 0.8,
+    'goals':         0.08,
+    'assists':       0.25,
+    'points':        0.30,
+    'plus_minus':    0.8,
+    'toi':           1.5,
+    'saves':         1.5,
+    'goals_against': 0.4,
+    'puck_line':     0.04,
+    'total':         0.4,
+    'moneyline':     0.05,
+}
+
+
+# ── DB write functions ────────────────────────────────────────────────────────
 
 def upsert_player_projection(conn, player_id: int, player_name: str,
                               team: str, opponent: str, game_date: date,
                               prop_type: str, proj_value: float,
-                              factors: dict) -> None:
-    # Map prop_type → projection column
+                              confidence: int, factors: dict) -> None:
     col_map = {
         'goals':         'proj_points',
         'assists':       'proj_assists',
@@ -1123,6 +1500,7 @@ def upsert_player_projection(conn, player_id: int, player_name: str,
         'saves':         'proj_steals',
         'goals_against': 'proj_blocks',
         'toi':           'proj_minutes',
+        'plus_minus':    'proj_points',
     }
     proj_col = col_map.get(prop_type, 'proj_points')
 
@@ -1130,18 +1508,20 @@ def upsert_player_projection(conn, player_id: int, player_name: str,
         cur.execute(
             f"""INSERT INTO chalk_projections
                    (player_id, player_name, team, opponent, sport, game_date,
-                    prop_type, proj_value, {proj_col}, factors_json, model_version)
-                VALUES (%s,%s,%s,%s,'NHL',%s,%s,%s,%s,%s,%s)
+                    prop_type, proj_value, {proj_col},
+                    confidence_score, factors_json, model_version)
+                VALUES (%s,%s,%s,%s,'NHL',%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (player_id, game_date, prop_type)
                 DO UPDATE SET
-                   proj_value     = EXCLUDED.proj_value,
-                   {proj_col}     = EXCLUDED.{proj_col},
-                   factors_json   = EXCLUDED.factors_json,
-                   model_version  = EXCLUDED.model_version,
-                   updated_at     = NOW()""",
+                   proj_value      = EXCLUDED.proj_value,
+                   {proj_col}      = EXCLUDED.{proj_col},
+                   confidence_score = EXCLUDED.confidence_score,
+                   factors_json    = EXCLUDED.factors_json,
+                   model_version   = EXCLUDED.model_version,
+                   updated_at      = NOW()""",
             (player_id, player_name, team, opponent, game_date,
              prop_type, proj_value, proj_value,
-             json.dumps(factors), MODEL_VERSION)
+             confidence, json.dumps(factors), MODEL_VERSION)
         )
     conn.commit()
 
@@ -1149,19 +1529,12 @@ def upsert_player_projection(conn, player_id: int, player_name: str,
 def upsert_team_projection(conn, team_name: str, opponent: str, game_date: date,
                             prop_type: str, proj_value: float,
                             factors: dict, confidence: int = 65) -> None:
-    """
-    Upsert a single team projection row.
-    Extra columns are extracted from `factors` based on prop_type:
-      - 'total'           → stores proj_total, over_probability, under_probability
-      - 'moneyline'       → stores win_probability, proj_points (proj_home/away score)
-      - 'puck_line_cover' → stores spread_cover_probability
-    """
-    proj_total     = factors.get('proj_total')         if prop_type == 'total'           else None
-    over_prob      = factors.get('over_probability')   if prop_type == 'total'           else None
-    under_prob     = factors.get('under_probability')  if prop_type == 'total'           else None
-    win_prob       = float(proj_value)                 if prop_type == 'moneyline'       else None
-    cover_prob     = float(proj_value)                 if prop_type in ('puck_line_cover', 'spread') else None
-    proj_pts       = factors.get('proj_home_score')    if prop_type == 'moneyline'       else None
+    proj_total = factors.get('proj_total')         if prop_type == 'total'           else None
+    over_prob  = factors.get('over_probability')   if prop_type == 'total'           else None
+    under_prob = factors.get('under_probability')  if prop_type == 'total'           else None
+    win_prob   = float(proj_value)                 if prop_type == 'moneyline'       else None
+    cover_prob = float(proj_value)                 if prop_type in ('puck_line_cover', 'spread') else None
+    proj_pts   = factors.get('proj_home_score')    if prop_type == 'moneyline'       else None
 
     with conn.cursor() as cur:
         cur.execute(
@@ -1169,8 +1542,7 @@ def upsert_team_projection(conn, team_name: str, opponent: str, game_date: date,
                   (team_name, opponent, sport, game_date, prop_type,
                    proj_value, proj_total, over_probability, under_probability,
                    win_probability, spread_cover_probability,
-                   proj_points, confidence_score,
-                   factors_json, model_version)
+                   proj_points, confidence_score, factors_json, model_version)
                VALUES (%s,%s,'NHL',%s,%s,%s, %s,%s,%s,%s,%s,%s,%s, %s,%s)
                ON CONFLICT (team_name, game_date, prop_type)
                DO UPDATE SET
@@ -1195,27 +1567,29 @@ def upsert_team_projection(conn, team_name: str, opponent: str, game_date: date,
     conn.commit()
 
 
-# ── Main ───────────────────────────────────────────────────────────────────────
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description='Chalk NHL Projection Model')
+    parser = argparse.ArgumentParser(description='Chalk NHL Projection Model v2.0')
     parser.add_argument('--date', default=str(date.today()),
                         help='Game date YYYY-MM-DD (default: today)')
     args = parser.parse_args()
     game_date = date.fromisoformat(args.date)
 
-    log.info(f'NHL Projection Model — {game_date}')
+    log.info('═══════════════════════════════════════════════════')
+    log.info(f'Chalk NHL Projection Model v2.0 — {game_date}')
+    log.info('═══════════════════════════════════════════════════')
 
     conn = get_db()
 
-    # Step 1: Fetch tonight's NHL schedule
+    # ── Step 1: Schedule ──────────────────────────────────────────────────────
+    log.info('\n▶ STEP 1: Fetching NHL schedule')
     games = get_todays_games(game_date)
     if not games:
-        log.info('No NHL games found for today.')
+        log.info('  No NHL games today. Exiting.')
         conn.close()
         return
-
-    log.info(f'Found {len(games)} games')
+    log.info(f'  Found {len(games)} games')
 
     player_count = 0
     team_count   = 0
@@ -1223,56 +1597,85 @@ def main():
     for game in games:
         home = game['home_team']
         away = game['away_team']
-        log.info(f'  {away} @ {home}')
+        log.info(f'\n--- {away} @ {home} ---')
 
-        # Step 2: Confirm starting goalies
-        goalie_info = confirm_starting_goalie(game['game_id']) if game.get('game_id') else {}
+        # ── Step 2: Confirm starting goalies ─────────────────────────────────
+        log.info('  ▶ STEP 2: Goalie confirmation')
+        goalie_info    = confirm_starting_goalie(game['game_id']) if game.get('game_id') else {}
         home_is_backup = goalie_info.get('home_is_backup', False)
         away_is_backup = goalie_info.get('away_is_backup', False)
-        if home_is_backup:
-            log.warning(f'  ⚠️  BACKUP GOALIE: {home} — {goalie_info.get("home_goalie_name")}')
-        if away_is_backup:
-            log.warning(f'  ⚠️  BACKUP GOALIE: {away} — {goalie_info.get("away_goalie_name")}')
+        goalie_confirmed = goalie_info.get('confirmed', False)
 
-        # Step 3: Get team logs
-        home_team_logs = get_team_logs(conn, home)
-        away_team_logs = get_team_logs(conn, away)
-
-        # Step 4: Get starting goalies and their logs
         home_goalie_info = get_team_goalie(conn, home)
         away_goalie_info = get_team_goalie(conn, away)
         home_goalie_logs = get_goalie_logs(conn, home_goalie_info['player_id']) if home_goalie_info else []
         away_goalie_logs = get_goalie_logs(conn, away_goalie_info['player_id']) if away_goalie_info else []
 
-        # Step 5: Get rosters (top skaters by TOI)
-        home_roster = get_team_roster(home)
-        away_roster = get_team_roster(away)
+        if home_is_backup:
+            log.warning(f'  ⚠️  BACKUP STARTING: {home}')
+        if away_is_backup:
+            log.warning(f'  ⚠️  BACKUP STARTING: {away}')
 
-        # Compute team-level rest days (last game from team logs)
-        home_last_game = home_team_logs[0].get('game_date') if home_team_logs else None
-        away_last_game = away_team_logs[0].get('game_date') if away_team_logs else None
-        home_team_rest = (game_date - home_last_game).days if home_last_game else 3
-        away_team_rest = (game_date - away_last_game).days if away_last_game else 3
-        home_team_b2b  = home_team_rest <= 1
-        away_team_b2b  = away_team_rest <= 1
+        # ── Step 3: Odds API ──────────────────────────────────────────────────
+        log.info('  ▶ STEP 3: Fetching live odds')
+        odds = fetch_game_odds(home, away)
+        home_ml      = odds.get('home_ml')
+        away_ml      = odds.get('away_ml')
+        puck_line    = odds.get('home_puck_line')
+        implied_total = odds.get('implied_total', LEAGUE['nhl_total'])
+        posted_total  = odds.get('posted_total',  LEAGUE['nhl_total'])
+        if odds.get('home_ml'):
+            log.info(f'  Odds: home_ml={home_ml} away_ml={away_ml} total={posted_total}')
 
-        # Step 6: Project skaters
-        # Execution order: TOI → SOG → Goals → Assists → Points → Plus/Minus
-        for side, roster, team_abbr, opp_abbr, own_tl in [
-            ('home', home_roster, home, away, home_team_logs),
-            ('away', away_roster, away, home, away_team_logs),
+        # ── Step 3a: Team logs + B2B check ───────────────────────────────────
+        home_tl = get_team_logs(conn, home)
+        away_tl = get_team_logs(conn, away)
+        home_last  = home_tl[0].get('game_date') if home_tl else None
+        away_last  = away_tl[0].get('game_date') if away_tl else None
+        home_rest  = (game_date - home_last).days if home_last else 3
+        away_rest  = (game_date - away_last).days if away_last else 3
+        home_b2b   = home_rest <= 1
+        away_b2b   = away_rest <= 1
+
+        # ── Step 4: Injuries from nightly_roster ─────────────────────────────
+        home_roster_rows = get_nightly_roster(conn, home, game_date)
+        away_roster_rows = get_nightly_roster(conn, away, game_date)
+        home_injury_ctx  = get_injury_context(home_roster_rows)
+        away_injury_ctx  = get_injury_context(away_roster_rows)
+        if home_injury_ctx['forwards_out']:
+            log.info(f'  Injuries {home}: {home_injury_ctx["forwards_out"]} fwds out')
+        if away_injury_ctx['forwards_out']:
+            log.info(f'  Injuries {away}: {away_injury_ctx["forwards_out"]} fwds out')
+
+        # ── Step 5–10: Skater projections ─────────────────────────────────────
+        log.info('  ▶ STEPS 5-10: Skater projections')
+        for side, team_abbr, opp_abbr, own_tl, opp_tl, \
+            opp_goalie_logs, opp_is_backup, team_b2b, injury_ctx, \
+            team_ml, opp_ml in [
+            (
+                'home', home, away, home_tl, away_tl,
+                away_goalie_logs, away_is_backup, home_b2b, home_injury_ctx,
+                home_ml, away_ml,
+            ),
+            (
+                'away', away, home, away_tl, home_tl,
+                home_goalie_logs, home_is_backup, away_b2b, away_injury_ctx,
+                away_ml, home_ml,
+            ),
         ]:
-            opp_goalie_logs = away_goalie_logs if side == 'home' else home_goalie_logs
-            opp_team_logs   = away_team_logs   if side == 'home' else home_team_logs
-            opp_is_backup   = away_is_backup   if side == 'home' else home_is_backup
-            location        = side
-            is_team_b2b     = home_team_b2b if side == 'home' else away_team_b2b
+            roster = get_team_roster(team_abbr)
+            all_skaters = roster.get('forwards', [])[:12] + \
+                          roster.get('defensemen', [])[:6]
 
-            all_skaters = roster.get('forwards', [])[:12] + roster.get('defensemen', [])[:6]
+            gs_f = game_script_factor_from_odds(home_ml, away_ml, side == 'home')
 
             for player in all_skaters:
                 pid   = player.get('id')
-                pname = f"{player.get('firstName', {}).get('default', '')} {player.get('lastName', {}).get('default', '')}".strip()
+                pname = (
+                    player.get('firstName', {}).get('default', '') + ' ' +
+                    player.get('lastName',  {}).get('default', '')
+                ).strip()
+                pos = player.get('positionCode', '')
                 if not pid:
                     continue
 
@@ -1280,99 +1683,244 @@ def main():
                 if len(logs) < 3:
                     continue
 
-                rest   = get_rest_days(conn, pid, game_date)
-                is_b2b = rest <= 1
-                ctx    = {'rest_days': rest, 'is_b2b': is_b2b}
+                rest_days = get_rest_days(conn, pid, game_date)
+                is_b2b    = rest_days <= 1
 
-                # 1. TOI (feeds all other props)
-                toi_proj, toi_factors = project_toi(logs, location, is_b2b)
-                upsert_player_projection(conn, pid, pname, team_abbr, opp_abbr, game_date, 'toi', toi_proj, toi_factors)
+                # Step 5: TOI (FIRST — feeds everything)
+                toi_proj, toi_f = project_toi(logs, side, is_b2b, injury_ctx)
+                pp_toi_proj = toi_f.get('proj_pp_toi', 0.0)
 
-                # 2. SOG
-                sog_proj, sog_factors = project_shots_on_goal(logs, opp_team_logs, location, toi_proj)
-                upsert_player_projection(conn, pid, pname, team_abbr, opp_abbr, game_date, 'shots_on_goal', sog_proj, sog_factors)
+                upsert_player_projection(
+                    conn, pid, pname, team_abbr, opp_abbr, game_date,
+                    'toi', toi_proj,
+                    compute_confidence('toi', 0, player_games=len(logs)),
+                    toi_f
+                )
 
-                # 3. Goals
-                g_proj, g_factors = project_goals(logs, opp_goalie_logs, opp_team_logs, location, toi_proj, opp_is_backup, is_b2b)
-                upsert_player_projection(conn, pid, pname, team_abbr, opp_abbr, game_date, 'goals', g_proj, {**g_factors, 'context': ctx})
+                # Step 6: SOG
+                sog_proj, sog_f = project_shots_on_goal(
+                    logs, opp_tl, side, toi_proj, pp_toi_proj, is_b2b, gs_f
+                )
+                pp_toi_l10 = get_avg_pp_toi(logs, 10)
+                conf_sog = compute_confidence(
+                    'shots_on_goal',
+                    edge_pct=(sog_proj - LEAGUE['sog_pg']) / LEAGUE['sog_pg'],
+                    backup_starting=opp_is_backup,
+                    player_games=len(logs),
+                    pp_toi=pp_toi_l10,
+                    sog_rate_extreme=sog_f.get('rate_f', 1.0) > 1.30,
+                    opp_b2b=(opp_tl[0].get('game_date') is not None and
+                             (game_date - opp_tl[0]['game_date']).days <= 1
+                             if opp_tl else False),
+                    goalie_confirmed=goalie_confirmed,
+                )
+                upsert_player_projection(
+                    conn, pid, pname, team_abbr, opp_abbr, game_date,
+                    'shots_on_goal', sog_proj, conf_sog + 5, sog_f  # SOG +5 confidence bonus
+                )
 
-                # 4. Assists
-                a_proj, a_factors = project_assists(logs, opp_team_logs, location, toi_proj, is_b2b)
-                upsert_player_projection(conn, pid, pname, team_abbr, opp_abbr, game_date, 'assists', a_proj, {**a_factors, 'context': ctx})
+                # Step 7: Goals
+                g_proj, g_f = project_goals(
+                    logs, opp_goalie_logs, opp_tl, side,
+                    toi_proj, opp_is_backup, is_b2b
+                )
+                conf_g = compute_confidence(
+                    'goals',
+                    edge_pct=(g_proj - LEAGUE['goals_pg']) / LEAGUE['goals_pg'],
+                    backup_starting=opp_is_backup,
+                    opp_goalie_cold=g_f.get('opp_sv_l10', LEAGUE['sv_pct']) < 0.895,
+                    player_games=len(logs),
+                    pp_toi=pp_toi_l10,
+                    pp_matchup_fav=opp_is_backup,
+                    goalie_confirmed=goalie_confirmed,
+                    opp_goalie_tbd=not goalie_confirmed,
+                )
+                upsert_player_projection(
+                    conn, pid, pname, team_abbr, opp_abbr, game_date,
+                    'goals', g_proj, conf_g, g_f
+                )
 
-                # 5. Points (Goals + Assists)
-                p_proj, p_factors = project_points(logs, opp_goalie_logs, opp_team_logs, location, toi_proj, opp_is_backup, g_proj, a_proj)
-                upsert_player_projection(conn, pid, pname, team_abbr, opp_abbr, game_date, 'points', p_proj, p_factors)
+                # Step 8: Assists
+                a_proj, a_f = project_assists(
+                    logs, opp_tl, own_tl, side, toi_proj, is_b2b,
+                    injury_ctx, opp_goalie_logs
+                )
+                conf_a = compute_confidence(
+                    'assists',
+                    edge_pct=(a_proj - LEAGUE['assists_pg']) / LEAGUE['assists_pg'],
+                    backup_starting=opp_is_backup,
+                    player_games=len(logs),
+                    pp_toi=pp_toi_l10,
+                    pp_matchup_fav=pp_toi_l10 > 3.5 and opp_is_backup,
+                    goalie_confirmed=goalie_confirmed,
+                )
+                upsert_player_projection(
+                    conn, pid, pname, team_abbr, opp_abbr, game_date,
+                    'assists', a_proj, conf_a, a_f
+                )
 
-                # 6. Plus/Minus
-                pm_proj, pm_factors = project_plus_minus(logs, opp_team_logs, own_tl, location, toi_proj)
-                upsert_player_projection(conn, pid, pname, team_abbr, opp_abbr, game_date, 'plus_minus', pm_proj, pm_factors)
+                # Step 9: Points
+                p_proj, p_f = project_points(
+                    logs, g_proj, a_proj, toi_proj, implied_total
+                )
+                conf_p = compute_confidence(
+                    'points',
+                    edge_pct=(p_proj - LEAGUE['points_pg']) / LEAGUE['points_pg'],
+                    backup_starting=opp_is_backup,
+                    player_games=len(logs),
+                    pp_toi=pp_toi_l10,
+                    goalie_confirmed=goalie_confirmed,
+                )
+                upsert_player_projection(
+                    conn, pid, pname, team_abbr, opp_abbr, game_date,
+                    'points', p_proj, conf_p, p_f
+                )
 
-                log.info(f'    {pname}: G={g_proj:.2f} A={a_proj:.2f} P={p_proj:.2f} SOG={sog_proj:.2f} TOI={toi_proj:.1f} PM={pm_proj:+.2f}')
+                # Step 10: Plus/Minus
+                pm_proj, pm_f = project_plus_minus(
+                    logs, opp_tl, own_tl, side, toi_proj, puck_line
+                )
+                blowout = pm_f.get('blowout_risk', False)
+                conf_pm = compute_confidence(
+                    'plus_minus',
+                    edge_pct=pm_proj / max(1.0, abs(pm_proj) + 1.0),
+                    player_games=len(logs),
+                    goalie_confirmed=goalie_confirmed,
+                    blowout_risk=blowout,
+                )
+                upsert_player_projection(
+                    conn, pid, pname, team_abbr, opp_abbr, game_date,
+                    'plus_minus', pm_proj, conf_pm, pm_f
+                )
+
+                log.info(
+                    f'    [{side}] {pname} ({pos}) '
+                    f'G={g_proj:.2f} A={a_proj:.2f} P={p_proj:.2f} '
+                    f'SOG={sog_proj:.2f} TOI={toi_proj:.1f} PM={pm_proj:+.2f}'
+                )
                 player_count += 1
 
-        # Step 7: Project starting goalies
-        for goalie_info_dict, goalie_logs, team_abbr, opp_abbr, opp_team_logs, is_backup in [
-            (home_goalie_info, home_goalie_logs, home, away, away_team_logs, home_is_backup),
-            (away_goalie_info, away_goalie_logs, away, home, home_team_logs, away_is_backup),
+        # ── Steps 11–12: Goalie projections ───────────────────────────────────
+        log.info('  ▶ STEPS 11-12: Goalie projections')
+        for g_info, g_logs, team_abbr, opp_abbr, opp_tl, is_backup, g_loc in [
+            (home_goalie_info, home_goalie_logs, home, away, away_tl, home_is_backup, 'home'),
+            (away_goalie_info, away_goalie_logs, away, home, home_tl, away_is_backup, 'away'),
         ]:
-            if not goalie_info_dict:
+            if not g_info:
                 continue
-            gid    = goalie_info_dict['player_id']
-            gname  = goalie_info_dict['player_name']
-            rest   = get_rest_days(conn, gid, game_date)
-            is_b2b = rest <= 1
-            g_loc  = 'home' if team_abbr == home else 'away'
+            gid    = g_info['player_id']
+            gname  = g_info['player_name']
+            g_rest = get_rest_days(conn, gid, game_date)
+            g_b2b  = g_rest <= 1
 
-            sv_proj, sv_factors = project_saves(goalie_logs, opp_team_logs, g_loc, is_b2b, rest, is_backup)
-            upsert_player_projection(conn, gid, gname, team_abbr, opp_abbr, game_date, 'saves', sv_proj,
-                                     {**sv_factors, 'context': {'rest_days': rest, 'is_b2b': is_b2b}})
+            # Saves
+            sv_proj, sv_f = project_saves(
+                g_logs, opp_tl, g_loc, g_b2b, g_rest, is_backup
+            )
+            # Apply game total factor to saves
+            if implied_total < 5.5:
+                sv_f['game_total_f'] = 1.08
+                sv_proj = round(sv_proj * 1.08, 2)
+            elif implied_total > 7.0:
+                sv_f['game_total_f'] = 0.94
+                sv_proj = round(sv_proj * 0.94, 2)
 
-            ga_proj, ga_factors = project_goals_against(goalie_logs, opp_team_logs, g_loc, is_backup)
-            upsert_player_projection(conn, gid, gname, team_abbr, opp_abbr, game_date, 'goals_against', ga_proj, ga_factors)
+            conf_sv = compute_confidence(
+                'saves',
+                edge_pct=(sv_proj - LEAGUE['saves_pg']) / LEAGUE['saves_pg'],
+                backup_starting=is_backup,
+                player_games=len(g_logs),
+                goalie_confirmed=goalie_confirmed,
+                opp_b2b=(opp_tl[0].get('game_date') is not None and
+                         (game_date - opp_tl[0]['game_date']).days <= 1
+                         if opp_tl else False),
+            )
+            upsert_player_projection(
+                conn, gid, gname, team_abbr, opp_abbr, game_date,
+                'saves', sv_proj, conf_sv, {**sv_f, 'goalie_confirmed': goalie_confirmed}
+            )
 
-            log.info(f'    {gname} (G{"*" if is_backup else ""}): SV={sv_proj:.1f} GA={ga_proj:.2f}')
+            # Goals against
+            ga_proj, ga_f = project_goals_against(g_logs, opp_tl, g_loc, is_backup)
+            conf_ga = compute_confidence(
+                'goals_against',
+                edge_pct=(ga_proj - LEAGUE['ga_pg']) / LEAGUE['ga_pg'],
+                backup_starting=is_backup,
+                player_games=len(g_logs),
+                goalie_confirmed=goalie_confirmed,
+            )
+            upsert_player_projection(
+                conn, gid, gname, team_abbr, opp_abbr, game_date,
+                'goals_against', ga_proj, conf_ga, ga_f
+            )
+
+            # SV% (derived)
+            proj_shots_against = sv_proj + ga_proj
+            sv_pct_proj = (sv_proj / proj_shots_against) if proj_shots_against > 0 else LEAGUE['sv_pct']
+            upsert_player_projection(
+                conn, gid, gname, team_abbr, opp_abbr, game_date,
+                'sv_pct', round(sv_pct_proj, 4), conf_sv,
+                {'proj_saves': sv_proj, 'proj_ga': ga_proj,
+                 'proj_shots_against': round(proj_shots_against, 2),
+                 'backup_starting': is_backup}
+            )
+
+            star = '⭐BACKUP' if is_backup else ''
+            log.info(f'    [{g_loc} G{star}] {gname}: SV={sv_proj:.1f} GA={ga_proj:.2f} SV%={sv_pct_proj:.3f}')
             player_count += 1
 
-        # Step 8: Team projections
-        home_win_prob, ml_factors = project_moneyline(
-            home_team_logs, away_team_logs, home_goalie_logs, away_goalie_logs,
-            home_is_backup, away_is_backup, home_team_rest, away_team_rest
+        # ── Step 13: Team projections ──────────────────────────────────────────
+        log.info('  ▶ STEP 13: Team projections')
+
+        # Total
+        proj_total, total_f = project_total(
+            home_tl, away_tl, home_goalie_logs, away_goalie_logs,
+            home_is_backup, away_is_backup, home_b2b, away_b2b,
+            home_injury_ctx, away_injury_ctx,
+            posted_total, conn, home, away,
         )
 
-        proj_home_score = ml_factors.get('proj_home_score', 3.0)
-        proj_away_score = ml_factors.get('proj_away_score', 3.0)
-
-        home_cover, hf, away_cover, af = project_puck_line(
-            home_team_logs, away_team_logs, home_goalie_logs, away_goalie_logs,
-            home_is_backup, away_is_backup, proj_home_score, proj_away_score
+        # Moneyline
+        home_win, ml_f = project_moneyline(
+            home_tl, away_tl, home_goalie_logs, away_goalie_logs,
+            home_is_backup, away_is_backup, home_rest, away_rest,
         )
 
-        proj_total, total_factors = project_total(
-            home_team_logs, away_team_logs, home_goalie_logs, away_goalie_logs,
-            home_is_backup, away_is_backup, home_team_b2b, away_team_b2b
+        proj_home_r = total_f.get('proj_home_goals', 3.0)
+        proj_away_r = total_f.get('proj_away_goals', 3.0)
+
+        # Puck line
+        home_cover, hl_f, away_cover, al_f = project_puck_line(
+            proj_home_r, proj_away_r,
+            home_goalie_logs, away_goalie_logs,
+            home_tl, away_tl,
+            home_is_backup, away_is_backup,
+            home_rest, away_rest, home_ml,
         )
 
-        # Compute team bet confidence based on data quality
-        games_home = len(home_team_logs)
-        games_away = len(away_team_logs)
-        has_goalie_data = bool(home_goalie_logs) and bool(away_goalie_logs)
+        # Team confidence
         team_conf = 60
-        if games_home >= 15 and games_away >= 15: team_conf = 68
-        elif games_home >= 8 and games_away >= 8:  team_conf = 65
-        if has_goalie_data: team_conf = min(75, team_conf + 5)
-        if home_is_backup or away_is_backup: team_conf = min(78, team_conf + 8)
+        if len(home_tl) >= 15 and len(away_tl) >= 15: team_conf = 68
+        elif len(home_tl) >= 8 and len(away_tl) >= 8:  team_conf = 65
+        if home_goalie_logs and away_goalie_logs:       team_conf = min(75, team_conf + 5)
+        if home_is_backup or away_is_backup:            team_conf = min(82, team_conf + 15)
 
-        upsert_team_projection(conn, home, away, game_date, 'moneyline', home_win_prob, ml_factors, team_conf)
-        upsert_team_projection(conn, home, away, game_date, 'puck_line_cover', home_cover, hf, team_conf)
-        upsert_team_projection(conn, away, home, game_date, 'puck_line_cover', away_cover, af, team_conf)
-        upsert_team_projection(conn, home, away, game_date, 'total', proj_total, total_factors, team_conf)
+        upsert_team_projection(conn, home, away, game_date, 'total',           proj_total, total_f, team_conf)
+        upsert_team_projection(conn, home, away, game_date, 'moneyline',        home_win,   ml_f,   team_conf)
+        upsert_team_projection(conn, home, away, game_date, 'puck_line_cover',  home_cover, hl_f,   team_conf)
+        upsert_team_projection(conn, away, home, game_date, 'puck_line_cover',  away_cover, al_f,   team_conf)
 
-        log.info(f'    Team: home_win={home_win_prob:.1%}, total={proj_total:.2f}')
+        log.info(
+            f'    Total={proj_total:.2f} (over={total_f["over_probability"]:.1%}) '
+            f'home_win={home_win:.1%} home_cover={home_cover:.1%} '
+            f'away_cover(+1.5+OT)={away_cover:.1%}'
+        )
         team_count += 2
 
     conn.close()
-    log.info(f'\nNHL projection model complete — {player_count} player projections, {team_count} team projections')
+    log.info('\n═══════════════════════════════════════════════════')
+    log.info(f'NHL v2.0 complete — {player_count} player projections, {team_count} team projections')
+    log.info('═══════════════════════════════════════════════════')
 
 
 if __name__ == '__main__':
