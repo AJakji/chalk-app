@@ -182,7 +182,25 @@ const TOOLS = [
 
 // ── System prompt ─────────────────────────────────────────────────────────────
 
-const SYSTEM_PROMPT = `You are Chalky — Chalk app's sports data analyst. Answer exactly what was asked, nothing more.
+const SYSTEM_PROMPT = `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ANTI-HALLUCINATION RULES — READ FIRST. These override everything else.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Your training knowledge about sports is OUTDATED and UNRELIABLE for: tonight's schedule and opponents, current rosters and teams, injury and availability status, current betting lines, recent statistics, and starting pitchers/goalies.
+
+RULE A — TOOLS OVER TRAINING: If a tool result says X, X is true. If your training says Y, Y is wrong. Tool results always override training data.
+
+RULE B — ⛔ MEANS HARD STOP: When you see ⛔ in a tool result, follow that instruction exactly. No exceptions. No workarounds. No "but I know from context that..."
+
+RULE C — NO GUESSING LIVE FACTS: Never guess or infer — who a player plays tonight, whether a player is injured, what a player's prop line is, what team a player is on, who is starting in goal or on the mound. If a tool did not explicitly confirm it, say you cannot confirm it.
+
+RULE D — GAME LOG ≠ TONIGHT: The "LAST 10 GAMES" section shows historical past games only. Past opponents are NOT tonight's opponent. Never use a past opponent from the game log to answer a question about tonight.
+
+RULE E — WHEN UNCERTAIN: Say "I can't confirm that from the live data — check the Scores tab for the latest." Uncertainty is always better than a wrong fact.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+You are Chalky — Chalk app's sports data analyst. Answer exactly what was asked, nothing more.
 
 RESPONSE LENGTH — match your answer to the question type:
 1. Single stat / injury status / line lookup: 1-2 sentences maximum. No padding.
@@ -326,10 +344,65 @@ Set visualData to null.
 
 hasPick must ALWAYS be false. Return ONLY valid JSON. No markdown. No code blocks. No text outside the JSON object.`;
 
+// ── Hallucination validator ───────────────────────────────────────────────────
+
+// Scans collected tool result strings for schedule/availability flags
+function buildToolContext(toolResultContents) {
+  return {
+    notPlayingTonight: toolResultContents.some(c =>
+      c.includes('⛔ SCHEDULE CHECK') ||
+      c.includes('NOT PLAYING TONIGHT') ||
+      c.includes('NOT SCHEDULED TONIGHT')
+    ),
+    playerOut: toolResultContents.some(c => c.includes('⛔ AVAILABILITY')),
+    noLinesPosted: toolResultContents.some(c => c.includes('⛔ LINES')),
+  };
+}
+
+// Detects and corrects responses that contradict tool data
+function validateResponse(responseText, toolCtx) {
+  if (!responseText) return responseText;
+  const lower = responseText.toLowerCase();
+
+  // Schedule hallucination: tool says no game, response mentions playing tonight
+  if (toolCtx.notPlayingTonight) {
+    const saysPlaying = (
+      (lower.includes('tonight') || lower.includes('tip-off') || lower.includes('puck drop') || lower.includes('first pitch')) &&
+      (lower.includes(' vs ') || lower.includes(' @ ') || lower.includes('plays') || lower.includes('facing') || lower.includes('matchup'))
+    );
+    if (saysPlaying) {
+      console.error('[Research] ⚠️ SCHEDULE HALLUCINATION INTERCEPTED — correcting response');
+      return "That player is **not on the schedule tonight** per the live schedule data. They have no game today. Check the Scores tab for the current slate.";
+    }
+  }
+
+  // Injury hallucination: tool says player is OUT, response says they're playing
+  if (toolCtx.playerOut) {
+    const saysAvailable = lower.includes('will play') || lower.includes('is playing') || lower.includes('expected to play') || lower.includes('is available');
+    if (saysAvailable) {
+      console.error('[Research] ⚠️ AVAILABILITY HALLUCINATION INTERCEPTED');
+      return "That player is listed as **OUT** per the live injury report. They will not play tonight.";
+    }
+  }
+
+  // Lines hallucination: tool says no lines posted, response quotes a specific line number
+  if (toolCtx.noLinesPosted) {
+    const quotesLine = /\b(o|u|over|under)\s*\d+\.?\d*\b/i.test(responseText) ||
+      /prop line.*\d+\.?\d*/i.test(responseText);
+    if (quotesLine) {
+      console.error('[Research] ⚠️ LINES HALLUCINATION INTERCEPTED');
+      return "Prop lines for that player **haven't been posted yet**. Lines typically go up 2-3 hours before tip-off. Check back closer to game time.";
+    }
+  }
+
+  return responseText;
+}
+
 // ── Tool use loop ─────────────────────────────────────────────────────────────
 
 async function runWithTools(messages) {
   const MAX_ITERATIONS = 5;
+  const collectedToolResults = []; // accumulate all tool result strings for validation
 
   for (let i = 0; i < MAX_ITERATIONS; i++) {
     const response = await client.messages.create({
@@ -343,12 +416,13 @@ async function runWithTools(messages) {
     console.log(`[Research] Iteration ${i + 1} stop_reason: ${response.stop_reason}`);
 
     if (response.stop_reason === 'end_turn') {
-      // Extract text blocks and return final answer
+      // Extract text blocks, run hallucination validator, return final answer
       const text = response.content
         .filter(b => b.type === 'text')
         .map(b => b.text)
         .join('');
-      return text;
+      const toolCtx = buildToolContext(collectedToolResults);
+      return validateResponse(text, toolCtx);
     }
 
     if (response.stop_reason === 'tool_use') {
@@ -361,10 +435,12 @@ async function runWithTools(messages) {
           try {
             const result = await executeTool(block.name, block.input);
             console.log(`[Research] Tool ${block.name} returned ${result?.length || 0} chars`);
+            const content = result || 'No data returned.';
+            collectedToolResults.push(content); // collect for validation
             return {
               type:        'tool_result',
               tool_use_id: block.id,
-              content:     result || 'No data returned.',
+              content,
             };
           } catch (err) {
             console.error(`[Research] Tool ${block.name} error:`, err.message);

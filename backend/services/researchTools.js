@@ -23,6 +23,36 @@ function toMLBDate(iso) {
   return `${m}/${d}/${y}`;
 }
 
+// Always use Eastern Time for schedule lookups — avoids midnight UTC/ET date flip
+function getTodayET() {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+}
+
+// Build a schedule-confirmation banner from a tool result string
+// Prepended before sending to Claude so it cannot hallucinate tonight's opponent
+function scheduleConfirmedBanner(playerLabel, result) {
+  // Extract tonight's game line from the result
+  const line = result.split('\n').find(l =>
+    l.startsWith("TONIGHT'S GAME:") || l.startsWith("TONIGHT:") ||
+    /^TONIGHT.*:/.test(l)
+  );
+  if (!line) return '';
+  const detail = line.replace(/^TONIGHT'S GAME:|^TONIGHT:/, '').trim();
+  return `✅ SCHEDULE CONFIRMED (live API): ${playerLabel} plays tonight — ${detail}\nThis is the ONLY valid game for tonight. Do NOT reference any other matchup.\n`;
+}
+
+function noGameBanner(playerLabel, sport) {
+  return `⛔ SCHEDULE CHECK: ${playerLabel} has NO GAME tonight per live ${sport} schedule API. Do NOT mention any opponent or game time. Do NOT use training data to fill in a game.\n`;
+}
+
+function currentTeamBanner(playerLabel, teamName, apiSource) {
+  return `✅ CURRENT TEAM (live ${apiSource}): ${playerLabel} currently plays for the ${teamName}. Do NOT reference any previous team — training data about this player's team may be outdated.\n`;
+}
+
+function statsSourceBanner() {
+  return `✅ STATS SOURCE: All statistics below are from live database and API queries for the current season. Do NOT cite any statistic from training knowledge — only use numbers explicitly listed below.\n`;
+}
+
 // ── Player alias map ──────────────────────────────────────────────────────────
 // Format: alias → [bdl_search_term, display_name]
 // BDL search requires short fragments — full names return 0 results
@@ -280,16 +310,24 @@ const MLB_TEAM_ABBR = {
 
 async function get_nba_player_stats({ player_name }) {
   const { getNBAPlayerComplete } = require('./masterDataFetch');
-  const resolved     = resolveAlias(player_name);
-  const searchName   = resolved?.searchTerm || player_name;
-  const displayHint  = resolved?.displayName || player_name;
+  const resolved    = resolveAlias(player_name);
+  const searchName  = resolved?.searchTerm || player_name;
+  const displayHint = resolved?.displayName || player_name;
+
+  // Fetch current team from live BDL API for CURRENT TEAM banner
+  const found    = await bdl.searchPlayers(searchName).catch(() => null);
+  const teamName = found?.[0]?.team?.full_name || '';
+  const teamBnr  = teamName ? currentTeamBanner(displayHint, teamName, 'BallDontLie') : '';
+  const statsBnr = statsSourceBanner();
+
   const result = await getNBAPlayerComplete(searchName, displayHint);
   if (!result) return `No NBA player found matching "${player_name}". Try their full last name.`;
-  // Prepend explicit schedule banner so Claude cannot hallucinate tonight's opponent
+
   if (result.includes('NOT PLAYING TONIGHT')) {
-    return `⛔ SCHEDULE CHECK: ${displayHint || player_name} has NO GAME tonight. Their team is not on the live schedule. Do NOT mention any opponent or game time for tonight.\n\n${result}`;
+    return `⛔ SCHEDULE CHECK: ${displayHint} has NO GAME tonight. Their team is not on the live schedule. Do NOT mention any opponent or game time for tonight.\n${teamBnr}${statsBnr}\n${result}`;
   }
-  return result;
+  const schedBnr = scheduleConfirmedBanner(displayHint, result);
+  return `${schedBnr}${teamBnr}${statsBnr}\n${result}`;
 }
 
 // ── Tool 2: Prop lines ─────────────────────────────────────────────────────────
@@ -317,7 +355,7 @@ async function get_prop_lines({ player_name, sport }) {
     );
 
     if (!event) {
-      return `${pName} (${teamAbbr}) — ${teamName} is not on tonight's NBA schedule. No prop lines available.`;
+      return `⛔ LINES: ${pName} (${teamAbbr}) — Team is NOT on tonight's NBA schedule. Do NOT mention any prop line or game. No lines available.\n${pName} (${teamAbbr}) — ${teamName} is not on tonight's NBA schedule. No prop lines available.`;
     }
 
     const isHome    = event.home_team?.toLowerCase().includes(teamWord);
@@ -378,10 +416,10 @@ async function get_prop_lines({ player_name, sport }) {
     }
 
     if (lines.length === 0) {
-      return `${pName} — Tonight (${isHome ? 'home' : 'away'}) vs ${opp} at ${gameTimeET}.\nNo prop lines found yet for this player. Lines may not be posted until closer to tip-off.`;
+      return `⚠️ LINES: ${pName} is on the schedule tonight but prop lines are NOT yet posted. Do NOT quote any specific line number.\n${pName} — Tonight (${isHome ? 'home' : 'away'}) vs ${opp} at ${gameTimeET}.\nNo prop lines found yet for this player. Lines may not be posted until closer to tip-off.`;
     }
 
-    return [`${pName} PROP LINES — Tonight vs ${opp} at ${gameTimeET}:`, ...lines].join('\n');
+    return [`✅ LINES CONFIRMED (live Odds API): ${pName} vs ${opp} — ${lines.length} markets found. Only cite lines from the list below.\n`, `${pName} PROP LINES — Tonight vs ${opp} at ${gameTimeET}:`, ...lines].join('\n');
   }
 
   return `Prop lines for ${sport} are not yet available. Ask about NBA props for now.`;
@@ -390,7 +428,7 @@ async function get_prop_lines({ player_name, sport }) {
 // ── Tool 3: Injury / availability status ──────────────────────────────────────
 
 async function get_injury_status({ player_name, sport }) {
-  const today = new Date().toISOString().split('T')[0];
+  const today = getTodayET();
 
   if (sport === 'NBA') {
     const resolved = resolveAlias(player_name);
@@ -418,7 +456,22 @@ async function get_injury_status({ player_name, sport }) {
       g.home_team?.abbreviation === abbr || g.visitor_team?.abbreviation === abbr
     );
 
-    const out = [`${pName} (${abbr}):`];
+    const isOut = (injury?.status || '').toLowerCase().includes('out');
+    const isGTD = injury && !isOut;
+
+    // Availability banner — prepended so Claude cannot ignore it
+    let availBanner;
+    if (!game) {
+      availBanner = `⛔ SCHEDULE CHECK: ${pName}'s team (${abbr}) is NOT on tonight's NBA schedule. Do NOT say they are playing tonight.\n`;
+    } else if (isOut) {
+      availBanner = `⛔ AVAILABILITY: ${pName} is listed OUT. Do NOT say they are playing or expected to play tonight.\n`;
+    } else if (isGTD) {
+      availBanner = `⚠️ AVAILABILITY: ${pName} is a game-time decision (${(injury.status || '').toUpperCase()}). Do NOT say they are definitely playing.\n`;
+    } else {
+      availBanner = `✅ AVAILABILITY: ${pName} shows no injury designation — expected active per live BDL data.\n`;
+    }
+
+    const out = [availBanner, `${pName} (${abbr}):`];
     out.push(injury
       ? `Injury report: ${(injury.status || '').toUpperCase()} — ${injury.description || ''}`
       : `Injury report: No designation — assumed active`
@@ -435,8 +488,8 @@ async function get_injury_status({ player_name, sport }) {
         : rawSt;
       out.push(`Tonight: ${teamName} (${isHome ? 'home' : 'away'}) vs ${opp} — ${timeET}`);
       out.push(
-        (injury?.status || '').toLowerCase().includes('out') ? 'Verdict: Will NOT play tonight.' :
-        injury ? 'Verdict: Game-time decision — check ~1 hour before tip.' :
+        isOut ? 'Verdict: Will NOT play tonight.' :
+        isGTD ? 'Verdict: Game-time decision — check ~1 hour before tip.' :
         'Verdict: Expected to play.'
       );
     } else {
@@ -463,9 +516,9 @@ async function get_injury_status({ player_name, sport }) {
       const timeET = game.startTimeUTC
         ? new Date(game.startTimeUTC).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' }) + ' ET'
         : '';
-      return `${pName} (${teamAbbr}) — Tonight (${isHome ? 'home' : 'away'}) vs ${opp} at ${timeET}.\nNo real-time injury API for NHL. Check official team injury report ~2 hours before puck drop.`;
+      return `✅ SCHEDULE CONFIRMED: ${pName} (${teamAbbr}) plays tonight vs ${opp}.\n${pName} (${teamAbbr}) — Tonight (${isHome ? 'home' : 'away'}) vs ${opp} at ${timeET}.\nNo real-time injury API for NHL. Check official team injury report ~2 hours before puck drop.`;
     } else if (teamAbbr) {
-      return `${pName} (${teamAbbr}) — Team is not on tonight's NHL schedule.`;
+      return `⛔ SCHEDULE CHECK: ${pName} (${teamAbbr}) — Team is NOT on tonight's NHL schedule. Do NOT say they are playing tonight.\n${pName} (${teamAbbr}) — Team is not on tonight's NHL schedule.`;
     }
     return `Could not determine NHL team for "${player_name}". Try the player's last name.`;
   }
@@ -490,9 +543,9 @@ async function get_injury_status({ player_name, sport }) {
       const timeET = game.gameDate
         ? new Date(game.gameDate).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' }) + ' ET'
         : '';
-      return `${pName} (${teamAbbr}) — Today (${isHome ? 'home' : 'away'}) vs ${opp} at ${timeET}.\nOn the active roster. Check lineup cards ~1 hour before first pitch for batting order.`;
+      return `✅ SCHEDULE CONFIRMED: ${pName} (${teamAbbr}) plays today vs ${opp}.\n${pName} (${teamAbbr}) — Today (${isHome ? 'home' : 'away'}) vs ${opp} at ${timeET}.\nOn the active roster. Check lineup cards ~1 hour before first pitch for batting order.`;
     } else if (teamAbbr) {
-      return `${pName} (${teamAbbr}) — Not on today's MLB schedule.`;
+      return `⛔ SCHEDULE CHECK: ${pName} (${teamAbbr}) — Team is NOT on today's MLB schedule. Do NOT say they are playing today.\n${pName} (${teamAbbr}) — Not on today's MLB schedule.`;
     }
     return `Could not determine MLB team for "${player_name}". Try the player's full last name.`;
   }
@@ -503,7 +556,7 @@ async function get_injury_status({ player_name, sport }) {
 // ── Tool 4: Tonight's schedule ────────────────────────────────────────────────
 
 async function get_tonight_schedule({ sport }) {
-  const today   = new Date().toISOString().split('T')[0];
+  const today   = getTodayET();
   const mlbDate = toMLBDate(today);
   const parts   = [];
   const sports  = sport === 'ALL' ? ['NBA', 'NHL', 'MLB'] : [sport];
@@ -710,24 +763,41 @@ async function get_weather({ venue_name, team_name }) {
 
 async function get_nhl_player_stats({ player_name }) {
   const { getNHLPlayerComplete } = require('./masterDataFetch');
+  const lower    = player_name.toLowerCase();
+  const resolved = resolveAlias(lower);
+  const dName    = resolved?.displayName || player_name;
+  const teamAbbr = NHL_PLAYER_TEAMS[lower] || null;
+
+  const statsBnr = statsSourceBanner();
+
   const result = await getNHLPlayerComplete(player_name);
   if (!result) return `No NHL player found matching "${player_name}". Try their full last name.`;
+
   if (result.includes('NOT PLAYING TONIGHT')) {
-    return `⛔ SCHEDULE CHECK: ${player_name} has NO GAME tonight. Their team is not on the live schedule. Do NOT mention any opponent or game time for tonight.\n\n${result}`;
+    return `⛔ SCHEDULE CHECK: ${dName} has NO GAME tonight. Their team is not on the live schedule. Do NOT mention any opponent or game time for tonight.\n${statsBnr}\n${result}`;
   }
-  return result;
+  const schedBnr = scheduleConfirmedBanner(dName, result);
+  return `${schedBnr}${statsBnr}\n${result}`;
 }
 
 // ── Tool 8: MLB player stats (delegates to masterDataFetch) ───────────────────
 
 async function get_mlb_player_stats({ player_name }) {
   const { getMLBPlayerComplete } = require('./masterDataFetch');
+  const lower    = player_name.toLowerCase();
+  const resolved = resolveAlias(lower);
+  const dName    = resolved?.displayName || player_name;
+
+  const statsBnr = statsSourceBanner();
+
   const result = await getMLBPlayerComplete(player_name);
   if (!result) return `No active MLB player found matching "${player_name}". Try their full name.`;
+
   if (result.includes('NOT SCHEDULED TONIGHT')) {
-    return `⛔ SCHEDULE CHECK: ${player_name} has NO GAME tonight. Their team is not on the live schedule. Do NOT mention any opponent or game time for tonight.\n\n${result}`;
+    return `⛔ SCHEDULE CHECK: ${dName} has NO GAME today. Their team is not on the live schedule. Do NOT mention any opponent or game time for today.\n${statsBnr}\n${result}`;
   }
-  return result;
+  const schedBnr = scheduleConfirmedBanner(dName, result);
+  return `${schedBnr}${statsBnr}\n${result}`;
 }
 
 // ── Tool 9: Comparative stats across tonight's slate ─────────────────────────
