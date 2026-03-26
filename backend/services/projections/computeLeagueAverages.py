@@ -59,14 +59,16 @@ def safe_float(val, default=None):
 def compute_nba(conn, cur, since: date, today: date):
     print('\n  ── NBA ──')
 
+    # Key names match LEAGUE_AVG dict in nbaProjectionModel.py:
+    # pts_pg, reb_pg, ast_pg, fg3m_pg, pace, game_total
     rows = run_query(conn, """
         SELECT
-          AVG(points)    AS pts,
-          AVG(rebounds)  AS reb,
-          AVG(assists)   AS ast,
+          AVG(points)    AS pts_pg,
+          AVG(rebounds)  AS reb_pg,
+          AVG(assists)   AS ast_pg,
           AVG(steals)    AS stl,
           AVG(blocks)    AS blk,
-          AVG(three_made) AS threes,
+          AVG(three_made) AS fg3m_pg,
           AVG(turnovers)  AS tov,
           AVG(minutes)    AS min_pg
         FROM player_game_logs
@@ -75,16 +77,16 @@ def compute_nba(conn, cur, since: date, today: date):
           AND minutes > 10
     """, (since,))
 
-    if rows and rows[0]['pts']:
+    if rows and rows[0]['pts_pg']:
         r = rows[0]
-        upsert_avg(cur, 'NBA', 'pts',     r['pts'],    today)
-        upsert_avg(cur, 'NBA', 'reb',     r['reb'],    today)
-        upsert_avg(cur, 'NBA', 'ast',     r['ast'],    today)
-        upsert_avg(cur, 'NBA', 'stl',     r['stl'],    today)
-        upsert_avg(cur, 'NBA', 'blk',     r['blk'],    today)
-        upsert_avg(cur, 'NBA', 'threes',  r['threes'], today)
-        upsert_avg(cur, 'NBA', 'tov',     r['tov'],    today)
-        print(f'    pts={r["pts"]:.1f}  reb={r["reb"]:.1f}  ast={r["ast"]:.1f}  3pm={r["threes"]:.1f}')
+        upsert_avg(cur, 'NBA', 'pts_pg',   r['pts_pg'],   today)
+        upsert_avg(cur, 'NBA', 'reb_pg',   r['reb_pg'],   today)
+        upsert_avg(cur, 'NBA', 'ast_pg',   r['ast_pg'],   today)
+        upsert_avg(cur, 'NBA', 'stl',      r['stl'],      today)
+        upsert_avg(cur, 'NBA', 'blk',      r['blk'],      today)
+        upsert_avg(cur, 'NBA', 'fg3m_pg',  r['fg3m_pg'],  today)
+        upsert_avg(cur, 'NBA', 'tov',      r['tov'],      today)
+        print(f'    pts_pg={r["pts_pg"]:.1f}  reb_pg={r["reb_pg"]:.1f}  ast_pg={r["ast_pg"]:.1f}  fg3m_pg={r["fg3m_pg"]:.1f}')
 
     # Pace from team_game_logs
     pace_rows = run_query(conn, """
@@ -94,6 +96,17 @@ def compute_nba(conn, cur, since: date, today: date):
     if pace_rows and pace_rows[0]['pace']:
         upsert_avg(cur, 'NBA', 'pace', pace_rows[0]['pace'], today)
         print(f'    pace={pace_rows[0]["pace"]:.1f}')
+
+    # Game total: average combined score per game (both teams)
+    total_rows = run_query(conn, """
+        SELECT AVG(points_scored + points_allowed) AS game_total
+        FROM team_game_logs
+        WHERE sport = 'NBA' AND game_date >= %s
+          AND points_scored IS NOT NULL AND points_allowed IS NOT NULL
+    """, (since,))
+    if total_rows and total_rows[0]['game_total']:
+        upsert_avg(cur, 'NBA', 'game_total', total_rows[0]['game_total'], today)
+        print(f'    game_total={total_rows[0]["game_total"]:.1f}')
 
     # True shooting %: pts / (2*(fga+0.44*fta))
     ts_rows = run_query(conn, """

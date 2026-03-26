@@ -1109,6 +1109,7 @@ def get_players_for_team(conn, team_abbr: str, game_date: str) -> list[dict]:
     """
     Returns players confirmed playing from nightly_roster.
     Falls back to players with recent game logs if roster not populated.
+    Position is always populated from player_game_logs (backfilled by nbaDataCollector).
     """
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -1121,15 +1122,29 @@ def get_players_for_team(conn, team_abbr: str, game_date: str) -> list[dict]:
             )
             rows = cur.fetchall()
             if rows:
-                return [dict(r) for r in rows]
+                players = [dict(r) for r in rows]
+                # Enrich with position from player_game_logs (nightly_roster has no position column)
+                ids = [p['player_id'] for p in players if p.get('player_id')]
+                if ids:
+                    pos_cutoff = (date.fromisoformat(game_date) - timedelta(days=30)).isoformat()
+                    cur.execute(
+                        """SELECT DISTINCT ON (player_id) player_id, position
+                           FROM player_game_logs
+                           WHERE player_id = ANY(%s) AND sport = 'NBA'
+                             AND game_date >= %s AND position IS NOT NULL
+                           ORDER BY player_id, game_date DESC""",
+                        (ids, pos_cutoff)
+                    )
+                    pos_map = {r['player_id']: r['position'] for r in cur.fetchall()}
+                    for p in players:
+                        p['position'] = pos_map.get(p['player_id'])
+                return players
 
-            # Fallback: players with game logs in last 14 days.
-            # Exclude position from SELECT — column may not exist on all DB instances.
-            # Position is added as NULL and populated later from nightly_roster.
+            # Fallback: read actual position column — backfilled by nbaDataCollector.py
             cutoff = (date.fromisoformat(game_date) - timedelta(days=14)).isoformat()
             cur.execute(
                 """SELECT DISTINCT ON (player_id) player_id, player_name,
-                          NULL::text AS position, team
+                          position, team
                    FROM player_game_logs
                    WHERE team ILIKE %s AND sport = 'NBA' AND game_date >= %s
                    ORDER BY player_id, game_date DESC""",
@@ -1158,20 +1173,42 @@ EDGE_COL: dict[str, str] = {
 }
 
 
+# Maps model's internal prop_type short codes to the names stored in player_props_history.
+# oddsService.js strips the 'player_' prefix, so combo markets become full underscore names.
+PROP_TYPE_TO_DB: dict[str, str] = {
+    'pra':      'points_rebounds_assists',
+    'pr':       'points_rebounds',
+    'pa':       'points_assists',
+    'ar':       'rebounds_assists',
+    # Individual props already stored with matching names:
+    'points':   'points',
+    'rebounds': 'rebounds',
+    'assists':  'assists',
+    'threes':   'threes',
+    'blocks':   'blocks',
+    'steals':   'steals',
+}
+
+
 def get_market_line(conn, player_name: str, prop_type: str, game_date: str) -> float | None:
     """
     Read the market prop line from player_props_history.
     Populated by oddsService.js before the model runs.
     Returns None if no line posted yet — prop is skipped.
-    """
-    # Use prop_type directly — oddsService.js strips the player_/batter_/pitcher_ prefix
-    # so stored values are bare: 'points', 'rebounds', 'assists', 'threes', etc.
 
-    # Match on last name since name formats can differ
-    last_name = player_name.split()[-1] if player_name else ''
+    Matching strategy:
+    1. Exact full name (case-insensitive) — avoids surname collisions (Davis, Williams, etc.)
+    2. Last-name fallback only for surnames longer than 5 chars with no ambiguous matches
+    """
+    if not player_name:
+        return None
+
+    # Translate model short code → DB prop_type name
+    db_prop_type = PROP_TYPE_TO_DB.get(prop_type, prop_type)
 
     try:
         with conn.cursor() as cur:
+            # Primary: exact full-name match (case-insensitive)
             cur.execute(
                 """SELECT prop_line
                    FROM player_props_history
@@ -1179,11 +1216,27 @@ def get_market_line(conn, player_name: str, prop_type: str, game_date: str) -> f
                      AND prop_type = %s
                      AND game_date = %s
                    ORDER BY created_at DESC LIMIT 1""",
-                (f'%{last_name}%', prop_type, game_date)
+                (player_name, db_prop_type, game_date)
             )
             row = cur.fetchone()
             if row and row[0] is not None:
                 return float(row[0])
+
+            # Fallback: last name only, but only if it uniquely identifies one player
+            last_name = player_name.split()[-1]
+            if len(last_name) > 5:
+                cur.execute(
+                    """SELECT prop_line, COUNT(*) OVER () AS name_count
+                       FROM player_props_history
+                       WHERE player_name ILIKE %s
+                         AND prop_type = %s
+                         AND game_date = %s
+                       ORDER BY created_at DESC LIMIT 1""",
+                    (f'%{last_name}%', db_prop_type, game_date)
+                )
+                row = cur.fetchone()
+                if row and row[0] is not None and row[1] == 1:
+                    return float(row[0])
     except Exception:
         pass
     return None
@@ -1201,7 +1254,7 @@ def upsert_player_projections(conn, proj: PlayerProjection) -> int:
             if raw_proj <= 0:
                 continue
 
-            # Read market line from player_props_history (Bug 7)
+            # Read market line from player_props_history
             line = get_market_line(conn, proj.player_name, prop_type, proj.game_date)
             if line is None:
                 # No market line posted yet — skip this prop
@@ -1212,6 +1265,8 @@ def upsert_player_projections(conn, proj: PlayerProjection) -> int:
             if abs(edge_val) < threshold:
                 continue  # edge too small — not a pick
 
+            # Normalize prop_type to full DB name (e.g. 'pra' → 'points_rebounds_assists')
+            db_prop_type = PROP_TYPE_TO_DB.get(prop_type, prop_type)
             edge_col  = EDGE_COL.get(prop_type, 'edge_pts')
             home_away = 'home' if proj.is_home else 'away'
 
@@ -1237,7 +1292,7 @@ def upsert_player_projections(conn, proj: PlayerProjection) -> int:
             cur.execute(sql, (
                 proj.player_id, proj.player_name, proj.team, proj.opponent,
                 home_away, proj.position,
-                proj.game_date, prop_type,
+                proj.game_date, db_prop_type,
                 round(raw_proj, 2), round(edge_val, 2),
                 round(raw_conf, 1), json.dumps({**factors, 'meets_threshold': abs(edge_val) >= threshold}),
             ))
