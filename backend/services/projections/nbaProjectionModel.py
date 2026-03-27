@@ -1087,10 +1087,11 @@ def project_team_props(
         # upsert_team_props reads: proj, over_prob, under_prob, confidence
         # spread: proj = market spread value, over_prob = probability home covers
         'spread': {
-            'proj':        round(spread, 1),
-            'over_prob':   round(cover_prob, 3),       # home cover probability
-            'under_prob':  round(1 - cover_prob, 3),   # away cover probability
-            'confidence':  round(conf_team, 1),
+            'proj':            round(spread, 1),
+            'expected_margin': round(expected_margin, 2),  # model's projected home margin
+            'over_prob':       round(cover_prob, 3),       # home cover probability
+            'under_prob':      round(1 - cover_prob, 3),   # away cover probability
+            'confidence':      round(conf_team, 1),
             'factors': {
                 'spread':        round(spread, 1),
                 'cover_prob':    round(cover_prob, 3),
@@ -1325,6 +1326,14 @@ def upsert_player_projections(conn, proj: PlayerProjection) -> int:
 
 def upsert_team_props(conn, home_team: str, away_team: str, game_date: str, team_props: dict) -> None:
     """Writes total, spread, moneyline to team_projections table."""
+
+    def win_prob_to_american(prob: float) -> int:
+        """Convert win probability (0-1) to American moneyline odds."""
+        prob = max(0.01, min(0.99, prob))
+        if prob >= 0.5:
+            return round(-(prob / (1 - prob)) * 100)
+        return round(((1 - prob) / prob) * 100)
+
     with conn.cursor() as cur:
         for prop_type, data in team_props.items():
             for team, opponent, is_home in [(home_team, away_team, True), (away_team, home_team, False)]:
@@ -1361,6 +1370,54 @@ def upsert_team_props(conn, home_team: str, away_team: str, game_date: str, team
                         json.dumps(factors),
                     )
                 )
+
+        # Write combined 'game' row — used by edgeDetector to find spread/ML picks
+        spread_data = team_props.get('spread', {})
+        total_data  = team_props.get('total', {})
+        ml_data     = team_props.get('moneyline', {})
+        expected_margin = spread_data.get('expected_margin', 0.0)
+        proj_total      = total_data.get('proj', 0.0)
+        conf            = spread_data.get('confidence', 60)
+
+        for team, opponent, is_home in [(home_team, away_team, True), (away_team, home_team, False)]:
+            spread_proj = expected_margin if is_home else -expected_margin
+            cover_prob  = spread_data.get('over_prob', 0.5) if is_home else spread_data.get('under_prob', 0.5)
+            win_prob    = ml_data.get('home_prob', 0.5) if is_home else ml_data.get('away_prob', 0.5)
+            ml_american = win_prob_to_american(win_prob)
+
+            cur.execute(
+                """INSERT INTO team_projections
+                     (team_name, opponent, sport, game_date, prop_type,
+                      proj_total, spread_projection, spread_cover_probability,
+                      moneyline_projection, win_probability,
+                      confidence_score, factors_json, created_at, updated_at)
+                   VALUES
+                     (%s, %s, 'NBA', %s, 'game',
+                      %s, %s, %s, %s, %s,
+                      %s, %s, NOW(), NOW())
+                   ON CONFLICT (team_name, game_date, prop_type)
+                   DO UPDATE SET
+                     proj_total               = EXCLUDED.proj_total,
+                     spread_projection        = EXCLUDED.spread_projection,
+                     spread_cover_probability = EXCLUDED.spread_cover_probability,
+                     moneyline_projection     = EXCLUDED.moneyline_projection,
+                     win_probability          = EXCLUDED.win_probability,
+                     confidence_score         = EXCLUDED.confidence_score,
+                     factors_json             = EXCLUDED.factors_json,
+                     updated_at               = NOW()""",
+                (
+                    team, opponent, game_date,
+                    round(float(proj_total), 1),
+                    round(float(spread_proj), 2),
+                    round(float(cover_prob), 3),
+                    ml_american,
+                    round(float(win_prob), 3),
+                    round(conf, 1),
+                    json.dumps({'expected_margin': round(expected_margin, 2),
+                                'home_team': home_team, 'away_team': away_team}),
+                )
+            )
+
     conn.commit()
 
 

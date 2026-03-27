@@ -1606,12 +1606,19 @@ def upsert_player_projection(conn, player_id: int, player_name: str,
 def upsert_team_projection(conn, team_name: str, opponent: str, game_date: date,
                             prop_type: str, proj_value: float,
                             factors: dict, confidence: int = 65) -> None:
-    proj_total = factors.get('proj_total')         if prop_type == 'total'           else None
-    over_prob  = factors.get('over_probability')   if prop_type == 'total'           else None
-    under_prob = factors.get('under_probability')  if prop_type == 'total'           else None
-    win_prob   = float(proj_value)                 if prop_type == 'moneyline'       else None
-    cover_prob = float(proj_value)                 if prop_type in ('puck_line_cover', 'spread') else None
-    proj_pts   = factors.get('proj_home_score')    if prop_type == 'moneyline'       else None
+    proj_total      = factors.get('proj_total')         if prop_type == 'total'                        else None
+    over_prob       = factors.get('over_probability')   if prop_type == 'total'                        else None
+    under_prob      = factors.get('under_probability')  if prop_type == 'total'                        else None
+    win_prob        = float(proj_value)                 if prop_type == 'moneyline'                    else None
+    cover_prob      = float(proj_value)                 if prop_type in ('puck_line_cover', 'spread')  else None
+    proj_pts        = factors.get('proj_home_score')    if prop_type == 'moneyline'                    else None
+    # spread_projection = projected goal differential (home - away) stored in factors
+    spread_proj = None
+    if prop_type == 'puck_line_cover':
+        proj_diff = factors.get('proj_diff')
+        side      = factors.get('side', 'home')
+        if proj_diff is not None:
+            spread_proj = float(proj_diff) if side == 'home' else -float(proj_diff)
 
     try:
         with conn.cursor() as cur:
@@ -1620,8 +1627,9 @@ def upsert_team_projection(conn, team_name: str, opponent: str, game_date: date,
                       (team_name, opponent, sport, game_date, prop_type,
                        proj_value, proj_total, over_probability, under_probability,
                        win_probability, spread_cover_probability,
+                       spread_projection,
                        proj_points, confidence_score, factors_json, model_version)
-                   VALUES (%s,%s,'NHL',%s,%s,%s, %s,%s,%s,%s,%s,%s,%s, %s,%s)
+                   VALUES (%s,%s,'NHL',%s,%s,%s, %s,%s,%s,%s,%s,%s,%s,%s, %s,%s)
                    ON CONFLICT (team_name, game_date, prop_type)
                    DO UPDATE SET
                       proj_value               = EXCLUDED.proj_value,
@@ -1630,6 +1638,7 @@ def upsert_team_projection(conn, team_name: str, opponent: str, game_date: date,
                       under_probability        = EXCLUDED.under_probability,
                       win_probability          = EXCLUDED.win_probability,
                       spread_cover_probability = EXCLUDED.spread_cover_probability,
+                      spread_projection        = EXCLUDED.spread_projection,
                       proj_points              = EXCLUDED.proj_points,
                       confidence_score         = EXCLUDED.confidence_score,
                       factors_json             = EXCLUDED.factors_json,
@@ -1639,6 +1648,7 @@ def upsert_team_projection(conn, team_name: str, opponent: str, game_date: date,
                  prop_type, proj_value,
                  proj_total, over_prob, under_prob,
                  win_prob, cover_prob,
+                 spread_proj,
                  proj_pts, confidence,
                  json.dumps(factors), MODEL_VERSION)
             )
