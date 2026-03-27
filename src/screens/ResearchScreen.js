@@ -301,7 +301,7 @@ export default function ResearchScreen() {
       setLoading(false);
       addMessage({
         role: 'assistant',
-        content: "I'm studying the lines. Try again in a moment.",
+        content: "I ran into a connection issue. Check your network and try again.",
         components: [],
         hasPick: false,
       });

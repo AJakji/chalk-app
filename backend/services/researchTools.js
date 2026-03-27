@@ -583,15 +583,44 @@ async function get_tonight_schedule({ sport }) {
 
   await Promise.all(sports.map(async s => {
     if (s === 'NBA') {
-      const games = await bdl.getGames(today).catch(() => []);
+      const [games, gameOddsArr] = await Promise.all([
+        bdl.getGames(today).catch(() => []),
+        oddsService.fetchGameOdds('NBA').catch(() => []),
+      ]);
       if (games?.length) {
+        // Build a spread/total lookup keyed by last word of team name (e.g. "celtics" → spread)
+        const oddsMap = {};
+        for (const go of gameOddsArr || []) {
+          const bm = (go.bookmakers || []).find(b => b.key === 'draftkings') || go.bookmakers?.[0];
+          if (!bm) continue;
+          const spreads = (bm.markets || []).find(m => m.key === 'spreads');
+          const totals  = (bm.markets || []).find(m => m.key === 'totals');
+          const total   = totals?.outcomes?.find(o => o.name === 'Over')?.point;
+          for (const o of (spreads?.outcomes || [])) {
+            const word = (o.name || '').toLowerCase().split(' ').pop();
+            oddsMap[word] = { spread: o.point, total };
+          }
+        }
+
         const lines = [`NBA TONIGHT (${today}) — ${games.length} games:`];
         for (const g of games) {
-          const st     = g.status || '';
-          const timeET = st.includes('T')
+          const homeTeam = g.home_team?.full_name || g.home_team?.abbreviation || '';
+          const awayTeam = g.visitor_team?.full_name || g.visitor_team?.abbreviation || '';
+          const st       = g.status || '';
+          const timeET   = st.includes('T')
             ? new Date(st).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' }) + ' ET'
             : (st || 'TBD');
-          lines.push(`  ${g.visitor_team?.full_name || g.visitor_team?.abbreviation} @ ${g.home_team?.full_name || g.home_team?.abbreviation} — ${timeET}`);
+
+          const homeWord   = homeTeam.toLowerCase().split(' ').pop();
+          const awayWord   = awayTeam.toLowerCase().split(' ').pop();
+          const homeOdds   = oddsMap[homeWord];
+          const awayOdds   = oddsMap[awayWord];
+          const homeSpread = homeOdds?.spread != null ? ` (${homeOdds.spread > 0 ? '+' : ''}${homeOdds.spread})` : '';
+          const awaySpread = awayOdds?.spread != null ? ` (${awayOdds.spread > 0 ? '+' : ''}${awayOdds.spread})` : '';
+          const total      = homeOdds?.total ?? awayOdds?.total;
+          const totalStr   = total != null ? ` | O/U ${total}` : '';
+
+          lines.push(`  ${awayTeam}${awaySpread} @ ${homeTeam}${homeSpread} — ${timeET}${totalStr}`);
         }
         parts.push(lines.join('\n'));
       } else {

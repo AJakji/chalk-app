@@ -522,12 +522,17 @@ async function runWithTools(messages, maxTokens = 300) {
       continue;
     }
 
+    if (response.stop_reason === 'max_tokens') {
+      // Response was cut off — return whatever text was generated, or a clear fallback
+      console.warn('[Research] max_tokens reached — returning partial text if available');
+      const text = response.content.filter(b => b.type === 'text').map(b => b.text).join('');
+      const toolCtx = buildToolContext(collectedToolResults);
+      return validateResponse(text, toolCtx) || '{"response":"I have the data but ran into a length limit summarising it. Try asking about a specific team or game — for example: \'What are the odds for Celtics vs Heat tonight?\'","hasPick":false,"components":[],"visualData":null}';
+    }
+
     // Unexpected stop reason — bail out
     console.warn(`[Research] Unexpected stop_reason: ${response.stop_reason}`);
-    const text = response.content
-      .filter(b => b.type === 'text')
-      .map(b => b.text)
-      .join('');
+    const text = response.content.filter(b => b.type === 'text').map(b => b.text).join('');
     return text || null;
   }
 
@@ -579,13 +584,22 @@ router.post('/chat', async (req, res) => {
   ];
 
   const isDeepAnalysis = /break.?down|full analysis|walk me through|everything about|deep dive|tell me everything/i.test(msg);
-  const maxTokens = isDeepAnalysis ? 600 : 300;
+  // Slate questions ask about multiple games and need more room to list results
+  const isSlateQuestion = /cover|spread|ats|against the spread|best.*team.*tonight|which.*team.*tonight|all.*games|tonight.*games|slate|every game|each game/i.test(msg);
+  const maxTokens = isDeepAnalysis ? 600 : (isSlateQuestion ? 500 : 300);
 
   try {
     const raw = await runWithTools(messages, maxTokens);
 
     if (!raw) {
-      return res.status(500).json({ error: "Chalky is studying the numbers. Try again in a moment." });
+      // runWithTools returned null — likely max iterations. Return a 200 with a clean error message so the UI doesn't crash.
+      return res.json({
+        response:   "I couldn't pull tonight's data right now. Check the Scores tab for tonight's games and try asking about a specific matchup.",
+        hasPick:    false,
+        components: [],
+        visualData: null,
+        history:    [...trimmedHistory, { role: 'user', content: msg }, { role: 'assistant', content: "I couldn't pull tonight's data right now." }],
+      });
     }
 
     let parsed;
@@ -634,7 +648,13 @@ router.post('/chat', async (req, res) => {
 
   } catch (err) {
     console.error('[Research] Error:', err.message);
-    res.status(500).json({ error: "Chalky is studying the numbers. Try again in a moment." });
+    res.json({
+      response:   "I ran into an issue pulling that data. Try asking about a specific player, team, or matchup.",
+      hasPick:    false,
+      components: [],
+      visualData: null,
+      history:    [...trimmedHistory, { role: 'user', content: msg }],
+    });
   }
 });
 
