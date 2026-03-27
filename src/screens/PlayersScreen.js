@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View, Text, Image, StyleSheet, SafeAreaView,
   StatusBar, TouchableOpacity, TextInput, Animated,
-  RefreshControl, ScrollView,
+  RefreshControl, ScrollView, TouchableWithoutFeedback, Keyboard,
 } from 'react-native';
 
 const CHALKY_PNG = require('../../assets/chalky.png');
@@ -167,6 +167,13 @@ export default function PlayersScreen({ navigation }) {
     return () => clearTimeout(timeout);
   }, [searchQ, league]);
 
+  const dismissSearch = () => {
+    setSearchQ('');
+    setSearchResults([]);
+    Keyboard.dismiss();
+    Animated.timing(searchFadeAnim, { toValue: 0, duration: 150, useNativeDriver: true }).start();
+  };
+
   const openProfile = (item) => {
     setProfilePlayer({
       id:     item.playerId != null ? String(item.playerId) : (item.id || item.name?.toLowerCase().replace(/\s+/g, '-')),
@@ -201,34 +208,43 @@ export default function PlayersScreen({ navigation }) {
             value={searchQ}
             onChangeText={setSearchQ}
             returnKeyType="search"
-            clearButtonMode="while-editing"
           />
+          {searchQ.length > 0 && (
+            <TouchableOpacity onPress={dismissSearch} style={styles.clearBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+              <Text style={styles.clearBtnText}>✕</Text>
+            </TouchableOpacity>
+          )}
         </View>
       </View>
 
-      {/* Search results dropdown */}
+      {/* Tap-outside overlay + search results dropdown */}
       {searchResults.length > 0 && (
-        <Animated.View style={[styles.searchDropdown, { opacity: searchFadeAnim }]}>
-          {searchResults.map((p, i) => (
-            <TouchableOpacity
-              key={i}
-              style={styles.searchResultRow}
-              onPress={() => { setSearchQ(''); openProfile(p); }}
-              activeOpacity={0.75}
-            >
-              <PlayerAvatar name={p.name} headshot={p.headshot} size={28} />
-              <View style={{ marginLeft: spacing.sm }}>
-                <Text style={styles.searchResultName}>{p.name}</Text>
-                <Text style={styles.searchResultMeta}>{p.team} · {p.position} · {p.league}</Text>
-              </View>
-              {(p.injuryStatus === 'Out' || p.injuryStatus === 'Day-To-Day' || p.injuryStatus === 'Questionable') && (
-                <View style={[styles.injuryBadge, { marginLeft: 'auto' }]}>
-                  <Text style={styles.injuryBadgeText}>{p.injuryStatus === 'Out' ? 'OUT' : 'GTD'}</Text>
+        <>
+          <TouchableWithoutFeedback onPress={dismissSearch}>
+            <View style={styles.searchOverlay} />
+          </TouchableWithoutFeedback>
+          <Animated.View style={[styles.searchDropdown, { opacity: searchFadeAnim }]}>
+            {searchResults.map((p, i) => (
+              <TouchableOpacity
+                key={i}
+                style={styles.searchResultRow}
+                onPress={() => { dismissSearch(); openProfile(p); }}
+                activeOpacity={0.75}
+              >
+                <PlayerAvatar name={p.name} headshot={p.headshot} size={28} />
+                <View style={{ marginLeft: spacing.sm }}>
+                  <Text style={styles.searchResultName}>{p.name}</Text>
+                  <Text style={styles.searchResultMeta}>{p.team} · {p.position} · {p.league}</Text>
                 </View>
-              )}
-            </TouchableOpacity>
-          ))}
-        </Animated.View>
+                {(p.injuryStatus === 'Out' || p.injuryStatus === 'Day-To-Day' || p.injuryStatus === 'Questionable') && (
+                  <View style={[styles.injuryBadge, { marginLeft: 'auto' }]}>
+                    <Text style={styles.injuryBadgeText}>{p.injuryStatus === 'Out' ? 'OUT' : 'GTD'}</Text>
+                  </View>
+                )}
+              </TouchableOpacity>
+            ))}
+          </Animated.View>
+        </>
       )}
 
       <ScrollView
@@ -330,11 +346,17 @@ const styles = StyleSheet.create({
   },
   searchIcon:  { fontSize: 14 },
   searchInput: { flex: 1, color: colors.offWhite, fontSize: 13 },
+  searchOverlay: {
+    position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+    zIndex: 50, backgroundColor: 'transparent',
+  },
   searchDropdown: {
     position: 'absolute', top: 96, left: spacing.md, right: spacing.md,
     backgroundColor: colors.surface, borderRadius: radius.md, zIndex: 100,
     borderWidth: 1, borderColor: colors.border, overflow: 'hidden',
   },
+  clearBtn:     { paddingHorizontal: 4 },
+  clearBtnText: { color: colors.grey, fontSize: 14, fontWeight: '600' },
   searchResultRow: {
     flexDirection: 'row', alignItems: 'center',
     padding: spacing.sm, borderBottomWidth: 1, borderBottomColor: colors.border + '66',
