@@ -404,6 +404,7 @@ def collect_season(conn, year: int):
                  f'  last_stored={cutoff}')
 
         # Decide whether to fetch hitting or pitching (or both — some SP hit)
+        # TWP = Two-Way Player (e.g. Ohtani); treat as position player for hitting logs
         is_pitcher = position in ('P', 'SP', 'RP', 'CP')
 
         # Always try hitting for position players; pitchers also bat in NL

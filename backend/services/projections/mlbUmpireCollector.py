@@ -66,18 +66,32 @@ def compute_umpire_tendencies(umpire_id, conn):
     game_count = 0
 
     for game_pk, game_date, home_id, away_id in games:
+        # Runs: from team_game_logs (points_scored = runs scored per team)
         cur.execute("""
-            SELECT SUM(points) as runs, SUM(assists) as k, SUM(turnovers) as bb
+            SELECT SUM(points_scored) as runs
             FROM team_game_logs
             WHERE sport = 'MLB'
             AND game_date = %s
             AND (team_id = %s OR team_id = %s)
         """, (game_date, home_id, away_id))
-        row = cur.fetchone()
-        if row and row[0] is not None:
-            total_runs += float(row[0] or 0)
-            total_k += float(row[1] or 0)
-            total_bb += float(row[2] or 0)
+        run_row = cur.fetchone()
+
+        # K and BB: from pitcher game logs (assists=K, turnovers=BB)
+        # offensive_rating IS NOT NULL identifies pitcher rows (ERA field populated)
+        cur.execute("""
+            SELECT SUM(assists) as k, SUM(turnovers) as bb
+            FROM player_game_logs
+            WHERE sport = 'MLB'
+            AND game_date = %s
+            AND game_id = %s::text
+            AND offensive_rating IS NOT NULL
+        """, (game_date, game_pk))
+        pitch_row = cur.fetchone()
+
+        if run_row and run_row[0] is not None:
+            total_runs += float(run_row[0] or 0)
+            total_k += float(pitch_row[0] or 0) if pitch_row else 0
+            total_bb += float(pitch_row[1] or 0) if pitch_row else 0
             game_count += 1
 
     if game_count < 5:

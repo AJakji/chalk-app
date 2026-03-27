@@ -62,9 +62,9 @@ def fetch_arsenal(pitcher_id, season):
                     splits.append({
                         'pitch_type': pitch_type,
                         'pitch_name': PITCH_NAMES.get(pitch_type, pitch_type),
-                        'avg_velocity': float(s.get('avgSpeed') or s.get('avgVelocity') or 0) or None,
+                        'avg_velocity': float(s.get('averageSpeed') or s.get('avgSpeed') or s.get('avgVelocity') or 0) or None,
                         'usage_pct': float(s.get('percentage') or s.get('usage') or 0) or None,
-                        'whiff_rate': float(s.get('whiffPercentage') or s.get('whiffRate') or 0) or None,
+                        'whiff_rate': float(s.get('whiffPercentage') or s.get('whiffRate') or s.get('whiff_pct') or 0) or None,
                         'ba_against': float(s.get('avg') or s.get('battingAvg') or 0) or None,
                         'slg_against': float(s.get('slg') or 0) or None,
                         'avg_spin_rate': int(s.get('avgSpinRate') or 0) or None,
