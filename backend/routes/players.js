@@ -171,6 +171,32 @@ async function getNBAInjuries() {
   } catch { return {}; }
 }
 
+// ── NBA All-Players index (cached 24h) — gives real NBA IDs for headshots/profiles ──
+
+let _nbaPlayerIndex     = null;
+let _nbaPlayerIndexExp  = 0;
+
+async function getNBAPlayerIndex() {
+  if (_nbaPlayerIndex && Date.now() < _nbaPlayerIndexExp) return _nbaPlayerIndex;
+  const season = currentNBASeason();
+  const url = `https://stats.nba.com/stats/commonallplayers?IsOnlyCurrentSeason=1&LeagueID=00&Season=${season}`;
+  const res = await fetch(url, { headers: NBA_STATS_HEADERS, signal: AbortSignal.timeout(15000) });
+  if (!res.ok) return null;
+  const data = await res.json();
+  const rs = data?.resultSets?.[0];
+  if (!rs) return null;
+  const idx = {};
+  (rs.headers || []).forEach((h, i) => { idx[h] = i; });
+  _nbaPlayerIndex = (rs.rowSet || []).map(r => ({
+    id:       r[idx['PERSON_ID']],
+    name:     r[idx['DISPLAY_FIRST_LAST']] || '',
+    nameKey:  (r[idx['DISPLAY_FIRST_LAST']] || '').toLowerCase(),
+    team:     r[idx['TEAM_ABBREVIATION']] || '',
+  }));
+  _nbaPlayerIndexExp = Date.now() + 24 * 3600 * 1000;
+  return _nbaPlayerIndex;
+}
+
 // ── NBA Leaders — stats.nba.com leagueleaders (sorted, real-time) ─────────────
 
 async function getNBALeaders(stat) {
@@ -920,16 +946,40 @@ router.get('/search', async (req, res) => {
 
   try {
     if (league === 'NBA' || league === 'All') {
+      // Use stats.nba.com player index so IDs match headshot CDN + profile endpoint
+      const allPlayers = await getNBAPlayerIndex().catch(() => null);
+      if (allPlayers?.length) {
+        const qLower = q.toLowerCase().trim();
+        const matches = allPlayers.filter(p => p.nameKey.includes(qLower)).slice(0, 10);
+        if (matches.length) {
+          // Fetch injuries once for badge display
+          const injMap = await getNBAInjuries().catch(() => ({}));
+          const players = matches.map(p => ({
+            id:           String(p.id),
+            playerId:     p.id,
+            name:         p.name,
+            team:         p.team,
+            position:     '',
+            league:       'NBA',
+            headshot:     `https://cdn.nba.com/headshots/nba/latest/1040x760/${p.id}.png`,
+            injuryStatus: injMap[p.name] || null,
+          }));
+          cacheSet(ckey, players, TTL.SEARCH);
+          return res.json({ players, live: true });
+        }
+      }
+      // Fallback to BDL (active players only)
       const results = await bdl.searchPlayers(q);
-      if (results?.length) {
-        const players = results.slice(0, 10).map(p => ({
+      const active  = (results || []).filter(p => p.is_active !== false);
+      if (active.length) {
+        const players = active.slice(0, 10).map(p => ({
           id:       String(p.id),
           playerId: p.id,
           name:     `${p.first_name || ''} ${p.last_name || ''}`.trim(),
           team:     p.team?.abbreviation || '',
           position: p.position || '',
           league:   'NBA',
-          status:   p.is_active ? 'Active' : 'Inactive',
+          headshot: null,
         }));
         cacheSet(ckey, players, TTL.SEARCH);
         return res.json({ players, live: true });
@@ -976,7 +1026,7 @@ router.get('/search', async (req, res) => {
       const r2  = await fetch(url, { signal: AbortSignal.timeout(8000) });
       if (r2.ok) {
         const data   = await r2.json();
-        const people = data?.people || [];
+        const people = (data?.people || []).filter(p => p.active !== false);
         if (people.length) {
           const players = people.slice(0, 10).map(p => ({
             id:       String(p.id),
@@ -985,7 +1035,7 @@ router.get('/search', async (req, res) => {
             team:     mlbTeamAbbr(p.currentTeam?.name || ''),
             position: p.primaryPosition?.abbreviation || '',
             league:   'MLB',
-            status:   p.active ? 'Active' : 'Inactive',
+            headshot: `https://img.mlbstatic.com/mlb-photos/image/upload/w_213,q_100/v1/people/${p.id}/headshot/silo/current`,
           }));
           cacheSet(ckey, players, TTL.SEARCH);
           return res.json({ players, live: true });

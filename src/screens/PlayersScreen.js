@@ -13,13 +13,12 @@ import PlayerAvatar from '../components/players/PlayerAvatar';
 
 // ── Data config ────────────────────────────────────────────────────────────────
 
-const LEAGUE_TABS = ['All', 'NBA', 'MLB', 'NHL', 'Soccer', 'WNBA'];
+const LEAGUE_TABS = ['NBA', 'MLB', 'NHL', 'Soccer', 'WNBA'];
 
 // Display-only label for Soccer tab
 const LEAGUE_TAB_LABELS = { Soccer: 'World Cup' };
 
 const STAT_PILLS = {
-  All:    ['PTS', 'REB', 'AST'],
   NBA:    ['PTS', 'REB', 'AST', '3PM', 'STL', 'BLK'],
   MLB:    ['AVG', 'HR', 'RBI', 'ERA', 'K'],
   NHL:    ['G', 'A', 'PTS', '+/-', 'SOG'],
@@ -139,12 +138,12 @@ export default function PlayersScreen({ navigation }) {
 
   useEffect(() => {
     if (league === 'WNBA') return;
-    fetchLeaders(league === 'All' ? 'NBA' : league, stat);
+    fetchLeaders(league, stat);
   }, [league, stat]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
-    await fetchLeaders(league === 'All' ? 'NBA' : league, stat);
+    await fetchLeaders(league, stat);
     setRefreshing(false);
   }, [league, stat]);
 
@@ -217,14 +216,14 @@ export default function PlayersScreen({ navigation }) {
               onPress={() => { setSearchQ(''); openProfile(p); }}
               activeOpacity={0.75}
             >
-              <PlayerAvatar name={p.name} size={28} />
+              <PlayerAvatar name={p.name} headshot={p.headshot} size={28} />
               <View style={{ marginLeft: spacing.sm }}>
                 <Text style={styles.searchResultName}>{p.name}</Text>
                 <Text style={styles.searchResultMeta}>{p.team} · {p.position} · {p.league}</Text>
               </View>
-              {p.status && p.status !== 'Active' && (
+              {(p.injuryStatus === 'Out' || p.injuryStatus === 'Day-To-Day' || p.injuryStatus === 'Questionable') && (
                 <View style={[styles.injuryBadge, { marginLeft: 'auto' }]}>
-                  <Text style={styles.injuryBadgeText}>{p.status === 'Out' ? 'OUT' : 'GTD'}</Text>
+                  <Text style={styles.injuryBadgeText}>{p.injuryStatus === 'Out' ? 'OUT' : 'GTD'}</Text>
                 </View>
               )}
             </TouchableOpacity>
