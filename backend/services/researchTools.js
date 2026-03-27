@@ -148,6 +148,33 @@ const PLAYER_ALIASES = {
   'rudy':               ['gobert',        'Rudy Gobert'],
   'gobert':             ['gobert',        'Rudy Gobert'],
   'mike conley':        ['conley',        'Mike Conley'],
+  'ad':                 ['anthony davis', 'Anthony Davis'],
+  'anthony davis':      ['anthony davis', 'Anthony Davis'],
+  'trae':               ['trae young',    'Trae Young'],
+  'trae young':         ['trae young',    'Trae Young'],
+  'kawhi':              ['kawhi',         'Kawhi Leonard'],
+  'leonard':            ['kawhi',         'Kawhi Leonard'],
+  'kyrie':              ['kyrie',         'Kyrie Irving'],
+  'irving':             ['kyrie',         'Kyrie Irving'],
+  'chet':               ['holmgren',      'Chet Holmgren'],
+  'holmgren':           ['holmgren',      'Chet Holmgren'],
+  'klay':               ['thompson',      'Klay Thompson'],
+  'dray':               ['draymond',      'Draymond Green'],
+  'draymond':           ['draymond',      'Draymond Green'],
+  'jjj':                ['jaren jackson', 'Jaren Jackson Jr.'],
+  'jaren':              ['jaren jackson', 'Jaren Jackson Jr.'],
+  'vuc':                ['vucevic',       'Nikola Vucevic'],
+  'vucevic':            ['vucevic',       'Nikola Vucevic'],
+  'jrue':               ['jrue',          'Jrue Holiday'],
+  'holiday':            ['jrue',          'Jrue Holiday'],
+  'beal':               ['beal',          'Bradley Beal'],
+  'bradley':            ['beal',          'Bradley Beal'],
+  'russ':               ['westbrook',     'Russell Westbrook'],
+  'westbrook':          ['westbrook',     'Russell Westbrook'],
+  'cp3':                ['paul',          'Chris Paul'],
+  'chris paul':         ['paul',          'Chris Paul'],
+  'pg':                 ['george',        'Paul George'],
+  'paul george':        ['george',        'Paul George'],
   // ── NHL — stats fetched from NHL API not BDL ────────────────────────────────
   'mcdavid':            ['mcdavid',       'Connor McDavid'],
   'draisaitl':          ['draisaitl',     'Leon Draisaitl'],
@@ -201,6 +228,26 @@ const PLAYER_ALIASES = {
   'mark':               ['scheifele',     'Mark Scheifele'],
   'kyle connor':        ['kyle connor',   'Kyle Connor'],
   'hellebuyck':         ['hellebuyck',    'Connor Hellebuyck'],
+  'fleury':             ['fleury',        'Marc-Andre Fleury'],
+  'marc-andre':         ['fleury',        'Marc-Andre Fleury'],
+  'daccord':            ['daccord',       'Joey Daccord'],
+  'joey daccord':       ['daccord',       'Joey Daccord'],
+  'oettinger':          ['oettinger',     'Jake Oettinger'],
+  'jake oettinger':     ['oettinger',     'Jake Oettinger'],
+  'shesterkin':         ['shesterkin',    'Igor Shesterkin'],
+  'igor':               ['shesterkin',    'Igor Shesterkin'],
+  'stolarz':            ['stolarz',       'Joseph Stolarz'],
+  'ullmark':            ['ullmark',       'Linus Ullmark'],
+  'linus':              ['ullmark',       'Linus Ullmark'],
+  'dobes':              ['dobes',         'Jakob Dobes'],
+  'jake dobes':         ['dobes',         'Jakob Dobes'],
+  'jakob dobes':        ['dobes',         'Jakob Dobes'],
+  'sorokin':            ['sorokin',       'Ilya Sorokin'],
+  'gibson':             ['gibson',        'John Gibson'],
+  'montembeault':       ['montembeault',  'Samuel Montembeault'],
+  'luukkonen':          ['luukkonen',     'Ukko-Pekka Luukkonen'],
+  'markstrom':          ['markstrom',     'Jacob Markstrom'],
+  'binnington':         ['binnington',    'Jordan Binnington'],
   // ── MLB — stats fetched from MLB Stats API not BDL ──────────────────────────
   'judge':              ['judge',         'Aaron Judge'],
   'aaron judge':        ['judge',         'Aaron Judge'],
@@ -943,11 +990,11 @@ async function get_nhl_player_stats({ player_name }) {
   const lower    = player_name.toLowerCase();
   const resolved = resolveAlias(lower);
   const dName    = resolved?.displayName || player_name;
-  const teamAbbr = NHL_PLAYER_TEAMS[lower] || null;
 
   const statsBnr = statsSourceBanner();
 
-  const result = await getNHLPlayerComplete(player_name);
+  // Pass resolved name so "Jake Dobes" → "Jakob Dobes", "Pasta" → "David Pastrnak", etc.
+  const result = await getNHLPlayerComplete(dName);
   if (!result) return `No NHL player found matching "${player_name}". Try their full last name.`;
 
   if (result.includes('NOT PLAYING TONIGHT')) {
@@ -967,7 +1014,8 @@ async function get_mlb_player_stats({ player_name }) {
 
   const statsBnr = statsSourceBanner();
 
-  const result = await getMLBPlayerComplete(player_name);
+  // Pass resolved name so "Pasta" → "David Pastrnak", "Judge" → "Aaron Judge", etc.
+  const result = await getMLBPlayerComplete(dName);
   if (!result) return `No active MLB player found matching "${player_name}". Try their full name.`;
 
   if (result.includes('NOT SCHEDULED TONIGHT')) {
