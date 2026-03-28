@@ -1,16 +1,21 @@
-import React, { useRef, useEffect } from 'react';
+import React, { useRef, useEffect, useState } from 'react';
 import { NavigationContainer, DefaultTheme, useIsFocused } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import { View, Animated, StyleSheet } from 'react-native';
-import { ClerkProvider } from '@clerk/clerk-expo';
+import { View, Animated, StyleSheet, ActivityIndicator } from 'react-native';
+import { ClerkProvider, useAuth } from '@clerk/clerk-expo';
 import { TeamLogosProvider } from './src/context/TeamLogosContext';
+import { PaywallProvider, usePaywall } from './src/context/PaywallContext';
+import { useProStatus } from './src/hooks/useProStatus';
 import * as SecureStore from 'expo-secure-store';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import PicksScreen from './src/screens/PicksScreen';
 import ScoresScreen from './src/screens/ScoresScreen';
 import ResearchScreen from './src/screens/ResearchScreen';
 import PlayersScreen from './src/screens/PlayersScreen';
-import ChalkyOnboarding from './src/components/ChalkyOnboarding';
+import OnboardingScreen, { ONBOARDING_SEEN_KEY } from './src/screens/OnboardingScreen';
+import SignInScreen from './src/screens/SignInScreen';
+import PaywallModal from './src/components/PaywallModal';
 import { colors } from './src/theme';
 import { navigationRef } from './src/navigationRef';
 
@@ -28,6 +33,8 @@ const tokenCache = {
 };
 
 const Tab = createBottomTabNavigator();
+
+const GOLD = '#FFD700';
 
 const ChalkNavTheme = {
   ...DefaultTheme,
@@ -152,9 +159,11 @@ function PlayersIcon({ color, size }) {
   );
 }
 
-function TabIcon({ IconComponent, focused }) {
+// activeColor prop lets each tab use its own highlight colour
+function TabIcon({ IconComponent, focused, activeColor }) {
   const scale = useRef(new Animated.Value(1)).current;
   const prevFocused = useRef(focused);
+  const color = focused ? activeColor : colors.grey;
 
   useEffect(() => {
     if (focused !== prevFocused.current) {
@@ -171,9 +180,10 @@ function TabIcon({ IconComponent, focused }) {
     }
   }, [focused]);
 
-  const color = focused ? colors.green : colors.grey;
+  const bgColor = focused ? activeColor + '18' : 'transparent';
+
   return (
-    <Animated.View style={[tabStyles.wrap, focused && tabStyles.wrapActive, { transform: [{ scale }] }]}>
+    <Animated.View style={[tabStyles.wrap, focused && { backgroundColor: bgColor }, { transform: [{ scale }] }]}>
       <IconComponent color={color} size={22} />
     </Animated.View>
   );
@@ -187,76 +197,137 @@ const tabStyles = StyleSheet.create({
     justifyContent: 'center',
     borderRadius: 10,
   },
-  wrapActive: {
-    backgroundColor: colors.green + '18',
-  },
 });
 
-// ── App ───────────────────────────────────────────────────────────────────────
+// ── Main tab app ──────────────────────────────────────────────────────────────
+
+function TabApp() {
+  const { isPro } = useProStatus();
+  const { openPaywall, visible, closePaywall } = usePaywall();
+
+  return (
+    <>
+      <NavigationContainer ref={navigationRef} theme={ChalkNavTheme}>
+        <Tab.Navigator
+          screenOptions={{
+            headerShown: false,
+            tabBarStyle: {
+              backgroundColor: colors.surface,
+              borderTopColor: colors.border,
+              borderTopWidth: 1,
+              height: 68,
+              paddingBottom: 10,
+              paddingTop: 6,
+            },
+            tabBarActiveTintColor: colors.green,
+            tabBarInactiveTintColor: colors.grey,
+            tabBarLabelStyle: {
+              fontSize: 10,
+              fontWeight: '700',
+              letterSpacing: 0.4,
+              marginTop: 1,
+            },
+          }}
+        >
+          <Tab.Screen
+            name="Picks"
+            component={PicksTab}
+            options={{
+              tabBarIcon: ({ focused }) => (
+                <TabIcon IconComponent={PicksIcon} focused={focused} activeColor={GOLD} />
+              ),
+              tabBarActiveTintColor: GOLD,
+            }}
+          />
+          <Tab.Screen
+            name="Research"
+            component={ResearchTab}
+            listeners={() => ({
+              tabPress: (e) => {
+                if (!isPro) {
+                  e.preventDefault();
+                  openPaywall();
+                }
+              },
+            })}
+            options={{
+              tabBarIcon: ({ focused }) => (
+                <TabIcon IconComponent={ResearchIcon} focused={focused} activeColor={GOLD} />
+              ),
+              tabBarActiveTintColor: GOLD,
+            }}
+          />
+          <Tab.Screen
+            name="Scores"
+            component={ScoresTab}
+            options={{
+              tabBarIcon: ({ focused }) => (
+                <TabIcon IconComponent={ScoresIcon} focused={focused} activeColor={colors.green} />
+              ),
+            }}
+          />
+          <Tab.Screen
+            name="Players"
+            component={PlayersTab}
+            options={{
+              tabBarIcon: ({ focused }) => (
+                <TabIcon IconComponent={PlayersIcon} focused={focused} activeColor={colors.green} />
+              ),
+            }}
+          />
+        </Tab.Navigator>
+      </NavigationContainer>
+      <PaywallModal visible={visible} onClose={closePaywall} />
+    </>
+  );
+}
+
+// ── App — routing logic ───────────────────────────────────────────────────────
 
 function MainApp() {
-  return (
-    <NavigationContainer ref={navigationRef} theme={ChalkNavTheme}>
-      <ChalkyOnboarding />
-      <Tab.Navigator
-        screenOptions={{
-          headerShown: false,
-          tabBarStyle: {
-            backgroundColor: colors.surface,
-            borderTopColor: colors.border,
-            borderTopWidth: 1,
-            height: 68,
-            paddingBottom: 10,
-            paddingTop: 6,
-          },
-          tabBarActiveTintColor: colors.green,
-          tabBarInactiveTintColor: colors.grey,
-          tabBarLabelStyle: {
-            fontSize: 10,
-            fontWeight: '700',
-            letterSpacing: 0.4,
-            marginTop: 1,
-          },
-        }}
-      >
-        <Tab.Screen
-          name="Picks"
-          component={PicksTab}
-          options={{
-            tabBarIcon: ({ focused }) => <TabIcon IconComponent={PicksIcon} focused={focused} />,
-          }}
-        />
-        <Tab.Screen
-          name="Research"
-          component={ResearchTab}
-          options={{
-            tabBarIcon: ({ focused }) => <TabIcon IconComponent={ResearchIcon} focused={focused} />,
-          }}
-        />
-        <Tab.Screen
-          name="Scores"
-          component={ScoresTab}
-          options={{
-            tabBarIcon: ({ focused }) => <TabIcon IconComponent={ScoresIcon} focused={focused} />,
-          }}
-        />
-        <Tab.Screen
-          name="Players"
-          component={PlayersTab}
-          options={{
-            tabBarIcon: ({ focused }) => <TabIcon IconComponent={PlayersIcon} focused={focused} />,
-          }}
-        />
-      </Tab.Navigator>
-    </NavigationContainer>
-  );
+  const { isSignedIn, isLoaded } = useAuth();
+  const [onboardingSeen, setOnboardingSeen] = useState(null); // null = loading
+
+  useEffect(() => {
+    AsyncStorage.getItem(ONBOARDING_SEEN_KEY)
+      .then((val) => setOnboardingSeen(!!val))
+      .catch(() => setOnboardingSeen(true)); // if error, skip onboarding
+  }, []);
+
+  // Still loading Clerk or AsyncStorage
+  if (!isLoaded || onboardingSeen === null) {
+    return (
+      <View style={{ flex: 1, backgroundColor: colors.background, alignItems: 'center', justifyContent: 'center' }}>
+        <ActivityIndicator size="large" color={colors.green} />
+      </View>
+    );
+  }
+
+  // Not signed in + hasn't seen onboarding → show onboarding
+  if (!isSignedIn && !onboardingSeen) {
+    return (
+      <OnboardingScreen
+        onComplete={() => setOnboardingSeen(true)}
+      />
+    );
+  }
+
+  // Not signed in + has seen onboarding → show sign-in
+  if (!isSignedIn) {
+    return <SignInScreen />;
+  }
+
+  // Signed in → show the main app
+  return <TabApp />;
 }
 
 export default function App() {
   return (
     <ClerkProvider publishableKey={CLERK_PUBLISHABLE_KEY} tokenCache={tokenCache}>
       <TeamLogosProvider>
-        <MainApp />
+        <PaywallProvider>
+          <MainApp />
+        </PaywallProvider>
       </TeamLogosProvider>
     </ClerkProvider>
   );

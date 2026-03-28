@@ -3,6 +3,8 @@ import {
   View, Text, Image, FlatList, ScrollView, StyleSheet,
   SafeAreaView, StatusBar, ActivityIndicator, TouchableOpacity, Animated,
 } from 'react-native';
+import { BlurView } from 'expo-blur';
+import { Ionicons } from '@expo/vector-icons';
 
 const CHALKY_PNG = require('../../assets/chalky.png');
 import { colors, spacing, radius } from '../theme';
@@ -13,11 +15,34 @@ import PropDetailModal from '../components/picks/PropDetailModal';
 import ChalkyMenuButton from '../components/ChalkyMenuButton';
 import ChalkyLogo from '../components/ChalkyLogo';
 import { fetchPicksForTab, fetchPickCounts } from '../services/api';
+import { useProStatus } from '../hooks/useProStatus';
+import { usePaywall } from '../context/PaywallContext';
 
 const TABS = ["Chalky's Picks", 'NBA', 'MLB', 'NHL', 'Soccer', 'WNBA'];
 
 // Display-only labels — internal values stay the same so data filters still work
 const TAB_LABELS = { Soccer: 'World Cup' };
+
+// Free users see picks 1-2 unlocked; picks 3+ are blurred with a Pro lock overlay
+const FREE_PICK_LIMIT = 2;
+
+function LockedPickWrapper({ children, onUnlock }) {
+  return (
+    <TouchableOpacity activeOpacity={0.9} onPress={onUnlock} style={locked.container}>
+      <View style={locked.inner} pointerEvents="none">
+        {children}
+      </View>
+      <BlurView intensity={18} tint="dark" style={locked.blur} />
+      <View style={locked.overlay}>
+        <View style={locked.lockBadge}>
+          <Ionicons name="lock-closed" size={16} color="#FFD700" />
+          <Text style={locked.lockText}>Pro Pick</Text>
+        </View>
+        <Text style={locked.lockSub}>Unlock with Chalky Pro</Text>
+      </View>
+    </TouchableOpacity>
+  );
+}
 
 // Staggered card entrance animation
 function StaggeredItem({ index, children }) {
@@ -77,6 +102,8 @@ export default function PicksScreen() {
   const [error, setError]         = useState(false);
   const [selectedPick, setSelectedPick] = useState(null);
   const [activeTab, setActiveTab] = useState("Chalky's Picks");
+  const { isPro } = useProStatus();
+  const { openPaywall } = usePaywall();
 
   const today = new Date().toLocaleDateString('en-US', {
     weekday: 'long', month: 'long', day: 'numeric',
@@ -210,26 +237,34 @@ export default function PicksScreen() {
               />
             ) : null
           }
-          renderItem={({ item, index }) => (
-            <StaggeredItem index={index}>
-              <View>
-                <Text style={styles.pickRank}>#{index + 1}</Text>
-                {item.pickCategory === 'prop' ? (
-                  <PropPickCard
-                    pick={item}
-                    onPress={setSelectedPick}
-                    isTopPick={item.id === topPickId}
-                  />
-                ) : (
-                  <PickCard
-                    pick={item}
-                    onPress={setSelectedPick}
-                    isTopPick={item.id === topPickId}
-                  />
-                )}
-              </View>
-            </StaggeredItem>
-          )}
+          renderItem={({ item, index }) => {
+            const isLocked = !isPro && index >= FREE_PICK_LIMIT;
+            const card = item.pickCategory === 'prop' ? (
+              <PropPickCard
+                pick={item}
+                onPress={isLocked ? openPaywall : setSelectedPick}
+                isTopPick={item.id === topPickId}
+              />
+            ) : (
+              <PickCard
+                pick={item}
+                onPress={isLocked ? openPaywall : setSelectedPick}
+                isTopPick={item.id === topPickId}
+              />
+            );
+            return (
+              <StaggeredItem index={index}>
+                <View>
+                  <Text style={styles.pickRank}>#{index + 1}</Text>
+                  {isLocked ? (
+                    <LockedPickWrapper onUnlock={openPaywall}>
+                      {card}
+                    </LockedPickWrapper>
+                  ) : card}
+                </View>
+              </StaggeredItem>
+            );
+          }}
           ListEmptyComponent={
             <View style={styles.centered}>
               <Image source={CHALKY_PNG} style={styles.emptyImage} resizeMode="contain" />
@@ -391,4 +426,48 @@ const styles = StyleSheet.create({
   emptyText: { fontSize: 13, color: colors.grey, textAlign: 'center', marginTop: 4 },
   retryBtn: { marginTop: 16, paddingHorizontal: 24, paddingVertical: 10, borderRadius: 20, backgroundColor: colors.green },
   retryText: { fontSize: 14, fontWeight: '700', color: colors.background },
+});
+
+const locked = StyleSheet.create({
+  container: {
+    borderRadius: 12,
+    overflow: 'hidden',
+    marginBottom: 0,
+  },
+  inner: {
+    borderRadius: 12,
+    overflow: 'hidden',
+  },
+  blur: {
+    ...StyleSheet.absoluteFillObject,
+    borderRadius: 12,
+  },
+  overlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  lockBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: 'rgba(0,0,0,0.75)',
+    borderRadius: 99,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderWidth: 1,
+    borderColor: '#FFD70055',
+  },
+  lockText: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#FFD700',
+    letterSpacing: 0.5,
+  },
+  lockSub: {
+    fontSize: 12,
+    color: colors.grey,
+    fontWeight: '500',
+  },
 });
