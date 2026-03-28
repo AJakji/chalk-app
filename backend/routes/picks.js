@@ -1,7 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const { requireAuth } = require('../middleware/auth');
-const { generatePicks, getTodaysPicks } = require('../services/aiPicks');
+const { generateModelPicks, generatePicks, getTodaysPicks } = require('../services/aiPicks');
+const { generatePropPicks } = require('../services/propPicks');
 const db = require('../db');
 
 const MOCK_PICKS = [
@@ -162,8 +163,9 @@ router.get('/today', async (req, res) => {
   try {
     let picks = await getTodaysPicks();
     if (picks.length === 0) {
-      console.log('No picks for today yet — generating now...');
-      await generatePicks();
+      console.log('No picks for today yet — running full pipeline now...');
+      await generateModelPicks();
+      await Promise.allSettled([generatePicks(), generatePropPicks()]);
       picks = await getTodaysPicks();
     }
     res.json({ picks, generatedAt: new Date().toISOString() });
@@ -196,8 +198,14 @@ router.post('/generate', async (req, res) => {
   }
 
   try {
-    const picks = await generatePicks();
-    res.json({ generated: picks.length, picks });
+    const [modelPicks, gamePicks, propPicks] = await Promise.allSettled([
+      generateModelPicks(),
+      generatePicks(),
+      generatePropPicks(),
+    ]);
+    const total = (modelPicks.value?.length || 0) + (gamePicks.value?.length || 0) + (propPicks.value?.length || 0);
+    const picks = await getTodaysPicks();
+    res.json({ generated: total, picks });
   } catch (err) {
     console.error('Error generating picks:', err);
     res.status(500).json({ error: 'Pick generation failed', detail: err.message });
