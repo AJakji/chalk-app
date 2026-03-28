@@ -1516,10 +1516,8 @@ function RestDaysRow({ awayAbbr, homeAbbr, awayRest, homeRest }) {
   if (awayRest == null && homeRest == null) return null;
   const restLabel = (days, abbr) => {
     if (days == null) return null;
-    const isB2B    = days <= 1;
-    const label    = days === 0 ? 'Playing today'
-      : days === 1 ? `${abbr} B2B`
-      : `${abbr}: ${days} days rest`;
+    const isB2B = days <= 1;
+    const label = days <= 1 ? `${abbr} B2B` : `${abbr}: ${days} days rest`;
     return { label, isB2B };
   };
   const away = restLabel(awayRest, awayAbbr);
