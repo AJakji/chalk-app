@@ -3605,7 +3605,7 @@ export default function GameDetailModal({ game, visible, onClose, onPlayerPress 
   const { chalkPick, status, league } = game;
   const isLive     = status === 'live';
   const isUpcoming = status === 'upcoming' || status === 'scheduled';
-  const activeTabs = isUpcoming ? PRE_TABS : TABS;
+  const activeTabs = isUpcoming ? PRE_TABS : (isMLB ? TABS : ['Box Score', 'Game Info']);
 
   // For MLB, derive live state from the box score if the poll hasn't returned yet
   const activeLiveState = mlbLiveState || (isMLB && boxScore?.liveState) || null;
@@ -3847,12 +3847,12 @@ export default function GameDetailModal({ game, visible, onClose, onPlayerPress 
                   ? <NHLBoxScoreTab game={game} boxScore={boxScore} loading={bsLoading} onPlayerPress={(name) => onPlayerPress?.(name, game.league)} />
                   : <BoxScoreTab    game={game} boxScore={boxScore} loading={bsLoading} onPlayerPress={(name) => onPlayerPress?.(name, game.league)} />
             )}
-            {activeTab === 1 && (
-              <View style={{ flex: 1, paddingHorizontal: (isMLB || isNHL) ? 0 : spacing.md }}>
+            {activeTab === 1 && isMLB && (
+              <View style={{ flex: 1, paddingHorizontal: 0 }}>
                 {renderPBPContent()}
               </View>
             )}
-            {activeTab === 2 && (
+            {(isMLB ? activeTab === 2 : activeTab === 1) && (
               <GameInfoTab
                 game={game}
                 gameInfo={gameInfo}
