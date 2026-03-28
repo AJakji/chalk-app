@@ -70,4 +70,62 @@ async function getESPNScoresForDate(date) {
   });
 }
 
-module.exports = { fetchESPNScores, getESPNScoresForDate };
+// ── ESPN Injury API ───────────────────────────────────────────────────────────
+// ESPN exposes injury data via the same unofficial JSON API — no auth required.
+
+const INJURY_PATHS = {
+  NBA:  'basketball/nba',
+  NHL:  'hockey/nhl',
+  MLB:  'baseball/mlb',
+};
+
+/**
+ * Fetch injuries for a league from ESPN.
+ * Returns: [{teamAbbr, playerName, position, status, description}]
+ * Cache: 1hr (in-memory)
+ */
+const _injuryCache = new Map();
+
+async function getInjuries(league) {
+  const L = (league || '').toUpperCase();
+  const sportPath = INJURY_PATHS[L];
+  if (!sportPath) return [];
+
+  const cacheKey = `injuries:${L}`;
+  const cached = _injuryCache.get(cacheKey);
+  if (cached && Date.now() < cached.expires) return cached.data;
+
+  try {
+    const res = await fetch(`${BASE}/${sportPath}/injuries`, {
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return [];
+
+    const json = await res.json();
+    const teamGroups = json.injuries || [];
+    const results = [];
+
+    for (const group of teamGroups) {
+      const teamAbbr = group.team?.abbreviation || '';
+      for (const inj of (group.injuries || [])) {
+        const athlete = inj.athlete || {};
+        const injDetail = athlete.injuries?.[0] || {};
+        results.push({
+          teamAbbr,
+          playerName:  athlete.displayName || athlete.shortName || '',
+          position:    athlete.position?.abbreviation || '--',
+          status:      inj.status || injDetail.status || '',
+          description: injDetail.type?.description || inj.type?.description || '',
+        });
+      }
+    }
+
+    _injuryCache.set(cacheKey, { data: results, expires: Date.now() + 60 * 60 * 1000 });
+    return results;
+  } catch (err) {
+    console.warn(`[ESPN injuries] ${L}: ${err.message}`);
+    return [];
+  }
+}
+
+module.exports = { fetchESPNScores, getESPNScoresForDate, getInjuries };

@@ -245,6 +245,41 @@ async function getTeamRoster(teamId) {
 }
 
 /**
+ * Get all games for a specific team in a season.
+ * teamId: MLB team integer ID
+ * season: "2025"
+ * Returns flat array of game objects from the schedule endpoint.
+ * Cache: 1hr
+ */
+async function getTeamSchedule(teamId, season) {
+  const key = `team_schedule:${teamId}:${season}`;
+  const cached = cacheGet(key);
+  if (cached) return cached;
+
+  const json = await mlbFetch('/schedule', {
+    sportId: 1,
+    season,
+    teamId,
+    gameType: 'R',
+    hydrate: 'linescore',
+  });
+
+  const games = (json?.dates || []).flatMap(d => d.games || []);
+  cacheSet(key, games, TTL.ROSTER); // 1hr
+  return games;
+}
+
+/**
+ * Look up a team's integer ID by abbreviation (e.g. "NYY" → 147).
+ * Uses getTeams() which is cached for 24hr.
+ */
+async function getTeamIdByAbbr(abbr) {
+  const teams = await getTeams();
+  const team  = teams.find(t => t.abbreviation === abbr);
+  return team?.id || null;
+}
+
+/**
  * Get all active players for a season.
  * Returns: [{id, fullName, currentTeam:{id,name,abbreviation}, primaryPosition:{abbreviation,type:{description}}}]
  * Cache: 6hr
@@ -278,4 +313,6 @@ module.exports = {
   getStandings,
   getTeamRoster,
   getActivePlayers,
+  getTeamSchedule,
+  getTeamIdByAbbr,
 };

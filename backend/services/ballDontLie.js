@@ -373,6 +373,27 @@ async function getPlayByPlay(gameId) {
 }
 
 /**
+ * Get all games for a specific team in a season.
+ * teamId: BDL integer team ID
+ * season: e.g. 2025 (the year the season started)
+ * Returns all games (home + away), sorted by date ascending.
+ * Cache: 1hr
+ */
+async function getTeamGames(teamId, season) {
+  const key = `team_games:${teamId}:${season}`;
+  const cached = cacheGet(key);
+  if (cached) return cached;
+
+  const data = await fetchAllPages('/games', {
+    'seasons[]': [season],
+    'team_ids[]': [teamId],
+  });
+
+  cacheSet(key, data, TTL.STANDINGS); // 1hr
+  return data;
+}
+
+/**
  * Get per-player stats for a single game (used by pickGrader.js for NBA box scores).
  * Endpoint: GET /stats?game_ids[]=gameId
  * Cache: 5 min (score is final by the time grader runs)
@@ -406,4 +427,5 @@ module.exports = {
   getInjuries,
   getPlayByPlay,
   getStatsByGame,
+  getTeamGames,
 };

@@ -247,6 +247,24 @@ async function getTeams() {
 // ---------------------------------------------------------------------------
 
 /**
+ * Get the full season schedule for a team.
+ * teamAbbrev: e.g. "TOR", "EDM"
+ * season: "20252026"
+ * Returns: [{id, gameDate, gameState, awayTeam:{abbrev,score}, homeTeam:{abbrev,score}, gameOutcome}]
+ * Cache: 1hr
+ */
+async function getTeamSeasonSchedule(teamAbbrev, season) {
+  const key = `team_schedule:${teamAbbrev}:${season}`;
+  const cached = cacheGet(key);
+  if (cached) return cached;
+
+  const json = await nhlFetch(buildUrl(BASE, `/club-schedule-season/${teamAbbrev}/${season}`));
+  const games = json?.games || [];
+  cacheSet(key, games, TTL.STANDINGS); // 1hr cache
+  return games;
+}
+
+/**
  * Get skater stat leaders for a season.
  * season: "20242025"
  * category: 'goals' | 'assists' | 'points' | 'plusMinus' | 'shots'
@@ -283,4 +301,5 @@ module.exports = {
   getStandings,
   getTeams,
   getSkaterLeaders,
+  getTeamSeasonSchedule,
 };
