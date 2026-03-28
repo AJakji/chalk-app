@@ -284,7 +284,7 @@ async function storePropPicks(props) {
            away_team, home_team, game_time, game_id, matchup_text,
            pick_value, confidence, short_reason, analysis, odds_data)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
-         ON CONFLICT (game_id, pick_type) DO NOTHING`,
+         ON CONFLICT (game_id, pick_type, COALESCE(player_name, '')) DO NOTHING`,
         [
           prop.league,
           prop.sportKey,

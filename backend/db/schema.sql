@@ -46,8 +46,9 @@ ALTER TABLE picks ADD COLUMN IF NOT EXISTS player_position TEXT;  -- prop picks 
 ALTER TABLE picks ADD COLUMN IF NOT EXISTS matchup_text    TEXT;  -- "vs BOS · Tonight 7:30 PM ET"
 ALTER TABLE picks ADD COLUMN IF NOT EXISTS headshot_url    TEXT;  -- player headshot image URL
 
--- Prevent duplicate picks for the same game + pick type on the same day
-CREATE UNIQUE INDEX IF NOT EXISTS idx_picks_dedup ON picks (game_id, pick_type);
+-- Prevent duplicate picks for the same game + pick type + player (for props, player_name distinguishes rows)
+DROP INDEX IF EXISTS idx_picks_dedup;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_picks_dedup ON picks (game_id, pick_type, COALESCE(player_name, ''));
 
 -- Index so "today's picks" queries are fast
 CREATE INDEX IF NOT EXISTS idx_picks_date ON picks (pick_date DESC);
