@@ -6,6 +6,7 @@
  */
 
 const BASE = 'https://api.sportsdata.io/v3';
+const mlbStats = require('./mlbStats');
 
 // ── In-memory cache ───────────────────────────────────────────────────────────
 const _cache = new Map();
@@ -336,15 +337,199 @@ const soccerTeamGameStats     = (date)         => sdSafe('soccer', `stats/json/T
 const soccerPlayerSeasonStats = ()             => sdSafe('soccer', `stats/json/PlayerSeasonStats/${soccerComp()}/${soccerSeason()}`,     TTL.TEAM_SEASON);
 const soccerTeamSeasonStats   = ()             => sdSafe('soccer', `stats/json/TeamSeasonStats/${soccerComp()}/${soccerSeason()}`,       TTL.TEAM_SEASON);
 
+// ── MLB Stats API helpers (free, no subscription required) ───────────────────
+
+function isoToMLBDate(isoDate) {
+  const [y, m, d] = (isoDate || '').split('-');
+  return `${m}/${d}/${y}`;
+}
+
+function mapMLBStatsStatus(detailedState) {
+  const s = (detailedState || '').toLowerCase();
+  if (s.includes('in progress') || s.includes('warmup') || s.includes('delayed: start') || s.includes('manager challenge')) return 'live';
+  if (s.includes('final') || s.includes('game over') || s.includes('completed') || s.includes('postponed')) return 'final';
+  return 'upcoming';
+}
+
+function mapMLBStatsGame(g, chalkPick = null) {
+  const status   = mapMLBStatsStatus(g.status?.detailedState || '');
+  const awayAbbr = g.teams?.away?.team?.abbreviation || '';
+  const homeAbbr = g.teams?.home?.team?.abbreviation || '';
+  const awayName = g.teams?.away?.team?.name || teamName('MLB', awayAbbr);
+  const homeName = g.teams?.home?.team?.name || teamName('MLB', homeAbbr);
+  const awayScore = status !== 'upcoming' ? (g.teams?.away?.score ?? null) : null;
+  const homeScore = status !== 'upcoming' ? (g.teams?.home?.score ?? null) : null;
+
+  const ls       = g.linescore || {};
+  const inning   = ls.currentInning || null;
+  const half     = ls.inningHalf;
+  const clock    = inning ? `${half === 'Bottom' ? '▼' : '▲'} ${inning}` : '';
+
+  return {
+    id:         String(g.gamePk),
+    sdGameId:   g.gamePk,
+    league:     'MLB',
+    status,
+    clock,
+    awayTeam:   { name: awayName, abbr: awayAbbr, score: awayScore },
+    homeTeam:   { name: homeName, abbr: homeAbbr, score: homeScore },
+    chalkPick,
+    boxScore:   null,
+    playByPlay: [],
+  };
+}
+
+function mapMLBStatsBoxScore(boxData, linescoreData) {
+  if (!boxData) return null;
+
+  const awayTeam = boxData.teams?.away;
+  const homeTeam = boxData.teams?.home;
+  const ls       = linescoreData || {};
+
+  const liveState = {
+    inning:         ls.currentInning || null,
+    inningHalf:     ls.inningHalf === 'Bottom' ? 'B' : (ls.inningHalf === 'Top' ? 'T' : null),
+    balls:          ls.balls    ?? null,
+    strikes:        ls.strikes  ?? null,
+    outs:           ls.outs     ?? null,
+    firstBase:      !!(ls.offense?.first),
+    secondBase:     !!(ls.offense?.second),
+    thirdBase:      !!(ls.offense?.third),
+    currentPitcher: ls.defense?.pitcher?.fullName || '',
+    currentHitter:  ls.offense?.batter?.fullName  || '',
+    awayScore:      ls.teams?.away?.runs ?? null,
+    homeScore:      ls.teams?.home?.runs ?? null,
+  };
+
+  const innings = (ls.innings || []).map(inn => ({
+    number: inn.num,
+    away:   inn.away?.runs ?? null,
+    home:   inn.home?.runs ?? null,
+  }));
+
+  const awayRHE = { r: ls.teams?.away?.runs ?? null, h: ls.teams?.away?.hits ?? null, e: ls.teams?.away?.errors ?? null };
+  const homeRHE = { r: ls.teams?.home?.runs ?? null, h: ls.teams?.home?.hits ?? null, e: ls.teams?.home?.errors ?? null };
+
+  const mapBattersFromTeam = (teamData) => {
+    const players      = teamData?.players || {};
+    const battingOrder = teamData?.battingOrder || [];
+    return battingOrder.map((id, idx) => {
+      const p = players[`ID${id}`];
+      if (!p) return null;
+      const s = p.stats?.batting || {};
+      return {
+        name:  p.person?.fullName || '',
+        pos:   p.allPositions?.map(x => x.abbreviation).join('-') || p.position?.abbreviation || '--',
+        order: idx + 1,
+        ab:    s.atBats       || 0,
+        r:     s.runs         || 0,
+        h:     s.hits         || 0,
+        rbi:   s.rbi          || 0,
+        bb:    s.baseOnBalls  || 0,
+        so:    s.strikeOuts   || 0,
+        avg:   s.avg          || '--',
+        hr:    s.homeRuns     || 0,
+        sb:    s.stolenBases  || 0,
+      };
+    }).filter(Boolean);
+  };
+
+  const mapPitchersFromTeam = (teamData) => {
+    const players  = teamData?.players || {};
+    const pitchers = teamData?.pitchers || [];
+    return pitchers.map((id, idx) => {
+      const p = players[`ID${id}`];
+      if (!p) return null;
+      const s = p.stats?.pitching || {};
+      return {
+        name:      p.person?.fullName || '',
+        pos:       idx === 0 ? 'SP' : 'RP',
+        isStarter: idx === 0,
+        ip:        s.inningsPitched  || '0.0',
+        h:         s.hits            || 0,
+        r:         s.runs            || 0,
+        er:        s.earnedRuns      || 0,
+        bb:        s.baseOnBalls     || 0,
+        so:        s.strikeOuts      || 0,
+        era:       s.era             || '--',
+        pitches:   s.numberOfPitches || 0,
+        strikes:   s.strikes         || 0,
+        decision:  '',
+        isCurrent: false,
+      };
+    }).filter(Boolean);
+  };
+
+  const battingTotals = (batters) => {
+    const ab  = batters.reduce((s, p) => s + p.ab, 0);
+    const h   = batters.reduce((s, p) => s + p.h,  0);
+    const r   = batters.reduce((s, p) => s + p.r,  0);
+    const rbi = batters.reduce((s, p) => s + p.rbi, 0);
+    const bb  = batters.reduce((s, p) => s + p.bb,  0);
+    const so  = batters.reduce((s, p) => s + p.so,  0);
+    return { ab, h, r, rbi, bb, so, avg: ab > 0 ? (h / ab).toFixed(3) : '.000' };
+  };
+
+  const awayBatters  = mapBattersFromTeam(awayTeam);
+  const homeBatters  = mapBattersFromTeam(homeTeam);
+  const awayPitchers = mapPitchersFromTeam(awayTeam);
+  const homePitchers = mapPitchersFromTeam(homeTeam);
+  const officials    = (boxData.officials || []).map(o => o.official?.fullName || '').filter(Boolean);
+
+  return {
+    league:    'MLB',
+    arena:     '',
+    arenaCity: '',
+    officials,
+    weather:   null,
+    liveState,
+    innings,
+    awayRHE,
+    homeRHE,
+    away: { batters: awayBatters, pitchers: awayPitchers, totals: battingTotals(awayBatters) },
+    home: { batters: homeBatters, pitchers: homePitchers, totals: battingTotals(homeBatters) },
+    quarters: { away: innings.map(i => i.away), home: innings.map(i => i.home) },
+  };
+}
+
+function mapMLBStatsPBP(pbpData) {
+  if (!pbpData) return [];
+  const allPlays = pbpData.allPlays || [];
+  const plays = allPlays.map(play => {
+    const result  = play.result  || {};
+    const about   = play.about   || {};
+    const matchup = play.matchup || {};
+    const half    = about.halfInning === 'bottom' ? 'B' : 'T';
+    const inning  = about.inning || 0;
+    return {
+      time:       `${half === 'T' ? '▲' : '▼'} ${inning}`,
+      event:      result.description || '',
+      quarter:    inning,
+      inningHalf: half,
+      type:       classifyMLBPlay(result.description),
+      teamAbbr:   null,
+      rbi:        result.rbi  || 0,
+      runs:       (result.homeScore || 0) + (result.awayScore || 0),
+      outs:       play.count?.outs || 0,
+      isScoring:  (result.rbi || 0) > 0,
+      awayScore:  result.awayScore ?? null,
+      homeScore:  result.homeScore ?? null,
+      hitter:     matchup.batter?.fullName  || '',
+      pitcher:    matchup.pitcher?.fullName || '',
+    };
+  });
+  return plays.reverse().slice(0, 100);
+}
+
 // ── Composite: all games for a date ──────────────────────────────────────────
 
 async function getScoresForDate(date, chalkPickMatcher) {
   const match = chalkPickMatcher || (() => null);
 
-  const [nbaDone, nhlDone, mlbDone, soccerDone] = await Promise.allSettled([
+  const [nbaDone, nhlDone, mlbStatsDone, soccerDone] = await Promise.allSettled([
     nbaGamesByDate(date),
     nhlGamesByDate(date),
-    mlbGamesByDate(date),
+    mlbStats.getSchedule(isoToMLBDate(date)),
     soccerGamesByDate(date),
   ]);
 
@@ -364,11 +549,11 @@ async function getScoresForDate(date, chalkPickMatcher) {
       results.push(mapNHLGame(g, match(away, home)));
     }
   }
-  if (mlbDone.status === 'fulfilled' && Array.isArray(mlbDone.value)) {
-    for (const g of mlbDone.value) {
-      const away = teamName('MLB', g.AwayTeam);
-      const home = teamName('MLB', g.HomeTeam);
-      results.push(mapMLBGame(g, match(away, home)));
+  if (mlbStatsDone.status === 'fulfilled' && Array.isArray(mlbStatsDone.value)) {
+    for (const g of mlbStatsDone.value) {
+      const away = g.teams?.away?.team?.name || '';
+      const home = g.teams?.home?.team?.name || '';
+      results.push(mapMLBStatsGame(g, match(away, home)));
     }
   }
   if (soccerDone.status === 'fulfilled' && Array.isArray(soccerDone.value)) {
@@ -971,6 +1156,7 @@ module.exports = {
   getScoresForDate, buildPicksContext,
   // Box score mappers
   mapNBABoxScore, mapNHLBoxScore, mapMLBBoxScore, mapPBP, extractGameMeta,
+  mapMLBStatsBoxScore, mapMLBStatsPBP,
   // NHL helpers
   classifyNHLPlay,
   // MLB helpers

@@ -6,6 +6,7 @@
 const express = require('express');
 const router = express.Router();
 const sd = require('../services/sportsdata');
+const mlbStats = require('../services/mlbStats');
 
 // GET /api/sports/boxscore?league=NBA&gameId=123
 router.get('/boxscore', async (req, res) => {
@@ -24,8 +25,11 @@ router.get('/boxscore', async (req, res) => {
       raw = await sd.nhlBoxScore(gameId);
       mapped = sd.mapNHLBoxScore(raw);
     } else if (L === 'MLB') {
-      raw = await sd.mlbBoxScore(gameId);
-      mapped = sd.mapMLBBoxScore(raw);
+      const [boxData, linescoreData] = await Promise.all([
+        mlbStats.getBoxScore(gameId),
+        mlbStats.getLiveLinescore(gameId),
+      ]);
+      mapped = sd.mapMLBStatsBoxScore(boxData, linescoreData);
     } else if (L === 'NFL') {
       raw = await sd.nflBoxScore(gameId);
       mapped = sd.mapNBABoxScore(raw); // NFL box score uses similar PlayerGames structure
@@ -49,9 +53,13 @@ router.get('/playbyplay', async (req, res) => {
     let raw = null;
     const L = league.toUpperCase();
 
+    if (L === 'MLB') {
+      const pbpData = await mlbStats.getPlayByPlay(gameId);
+      return res.json({ data: sd.mapMLBStatsPBP(pbpData) });
+    }
+
     if (L === 'NBA')      raw = await sd.nbaPlayByPlay(gameId);
     else if (L === 'NHL') raw = await sd.nhlPlayByPlay(gameId);
-    else if (L === 'MLB') raw = await sd.mlbPlayByPlay(gameId);
     else if (L === 'NFL') raw = await sd.nflPlayByPlay(gameId);
     else return res.json({ data: [] });
 
@@ -114,34 +122,26 @@ router.get('/injuries', async (req, res) => {
 // GET /api/sports/mlblive?date=YYYY-MM-DD&gameId=123
 // Returns live at-bat state for a specific MLB game (balls, strikes, outs, bases, pitcher, batter)
 router.get('/mlblive', async (req, res) => {
-  const { date, gameId } = req.query;
-  if (!date) return res.status(400).json({ error: 'date required' });
+  const { gameId } = req.query;
+  if (!gameId) return res.status(400).json({ error: 'gameId required' });
 
   try {
-    const raw = await sd.mlbLiveGameStatsByDate(date);
-    if (!Array.isArray(raw)) return res.json({ liveState: null });
-
-    // Find the specific game — match by GameID or by team abbrs
-    const game = raw.find(g =>
-      String(g.GameID) === String(gameId) ||
-      String(g.GameId) === String(gameId)
-    );
-
-    if (!game) return res.json({ liveState: null });
+    const ls = await mlbStats.getLiveLinescore(gameId);
+    if (!ls) return res.json({ liveState: null });
 
     const liveState = {
-      inning:        game.CurrentInning || game.Inning || null,
-      inningHalf:    game.InningHalf    || 'T',
-      balls:         game.Balls         ?? null,
-      strikes:       game.Strikes       ?? null,
-      outs:          game.Outs          ?? null,
-      firstBase:     !!(game.ManOnFirst  || game.FirstBase),
-      secondBase:    !!(game.ManOnSecond || game.SecondBase),
-      thirdBase:     !!(game.ManOnThird  || game.ThirdBase),
-      currentPitcher: game.CurrentPitcherName || '',
-      currentHitter:  game.CurrentHitterName  || '',
-      awayScore:      game.AwayTeamRuns        ?? null,
-      homeScore:      game.HomeTeamRuns        ?? null,
+      inning:         ls.currentInning || null,
+      inningHalf:     ls.inningHalf === 'Bottom' ? 'B' : (ls.inningHalf === 'Top' ? 'T' : null),
+      balls:          ls.balls    ?? null,
+      strikes:        ls.strikes  ?? null,
+      outs:           ls.outs     ?? null,
+      firstBase:      !!(ls.offense?.first),
+      secondBase:     !!(ls.offense?.second),
+      thirdBase:      !!(ls.offense?.third),
+      currentPitcher: ls.defense?.pitcher?.fullName || '',
+      currentHitter:  ls.offense?.batter?.fullName  || '',
+      awayScore:      ls.teams?.away?.runs ?? null,
+      homeScore:      ls.teams?.home?.runs ?? null,
     };
 
     res.json({ liveState });
