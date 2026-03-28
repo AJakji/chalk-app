@@ -17,6 +17,7 @@ const CHALKY_PNG = require('../../assets/chalky.png');
 import { colors, spacing, radius } from '../theme';
 import ScoreCard from '../components/scores/ScoreCard';
 import GameDetailModal from '../components/scores/GameDetailModal';
+import PlayerProfileModal from '../components/players/PlayerProfileModal';
 import ChalkyMenuButton from '../components/ChalkyMenuButton';
 import ChalkyLogo from '../components/ChalkyLogo';
 import { fetchTodaysScores } from '../services/api';
@@ -83,6 +84,7 @@ export default function ScoresScreen() {
   const [activeLeague, setActiveLeague] = useState('All');
   const [selectedGame, setSelectedGame] = useState(null);
   const [activeDate, setActiveDate] = useState(todayStr);
+  const [selectedPlayer, setSelectedPlayer] = useState(null);
 
   const load = useCallback(async (dateStr) => {
     setLoading(true);
@@ -276,6 +278,14 @@ export default function ScoresScreen() {
         game={selectedGame}
         visible={!!selectedGame}
         onClose={() => setSelectedGame(null)}
+        onPlayerPress={(name, league) => setSelectedPlayer({ name, league })}
+      />
+
+      <PlayerProfileModal
+        visible={!!selectedPlayer}
+        playerName={selectedPlayer?.name}
+        playerLeague={selectedPlayer?.league || 'NBA'}
+        onClose={() => setSelectedPlayer(null)}
       />
     </SafeAreaView>
   );

@@ -201,11 +201,13 @@ export default function PlayerProfileModal({ playerId, playerLeague = 'NBA', pla
   const [error, setError]     = useState(false);
 
   useEffect(() => {
-    if (visible && playerId) {
-      setPlayer(null);
-      setError(false);
-      setLoading(true);
-      fetch(`${API_URL}/api/players/${playerId}?league=${playerLeague}`)
+    if (!visible) return;
+    setPlayer(null);
+    setError(false);
+    setLoading(true);
+
+    const fetchById = (id) =>
+      fetch(`${API_URL}/api/players/${id}?league=${playerLeague}`)
         .then(r => r.json())
         .then(({ player: p }) => {
           setPlayer(p || null);
@@ -213,8 +215,36 @@ export default function PlayerProfileModal({ playerId, playerLeague = 'NBA', pla
           setLoading(false);
         })
         .catch(() => { setError(true); setLoading(false); });
+
+    if (playerId) {
+      fetchById(playerId);
+    } else if (playerName) {
+      // No ID — search by name first, then fetch full profile
+      // Handle abbreviated names like "S. Curry" by trying surname fallback
+      const searchName = playerName;
+      const surname = playerName.split(' ').pop(); // last word as fallback
+      fetch(`${API_URL}/api/players/search?q=${encodeURIComponent(searchName)}&league=${playerLeague}`)
+        .then(r => r.json())
+        .then(({ players }) => {
+          const match = players?.[0];
+          if (match?.id) return fetchById(match.id);
+          // Try again with just the surname (handles "S. Curry" → "Curry")
+          if (surname && surname !== searchName) {
+            return fetch(`${API_URL}/api/players/search?q=${encodeURIComponent(surname)}&league=${playerLeague}`)
+              .then(r => r.json())
+              .then(({ players: p2 }) => {
+                const m2 = p2?.[0];
+                if (m2?.id) return fetchById(m2.id);
+                setError(true); setLoading(false);
+              });
+          }
+          setError(true); setLoading(false);
+        })
+        .catch(() => { setError(true); setLoading(false); });
+    } else {
+      setLoading(false);
     }
-  }, [visible, playerId, playerLeague]);
+  }, [visible, playerId, playerName, playerLeague]);
 
   useEffect(() => {
     if (visible) {
