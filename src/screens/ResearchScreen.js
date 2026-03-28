@@ -21,6 +21,7 @@ import ChalkyMenuButton from '../components/ChalkyMenuButton';
 import ChalkyLogo from '../components/ChalkyLogo';
 import ReportModal from '../components/ReportModal';
 import { onResearchMessage } from '../researchBridge';
+import { Ionicons } from '@expo/vector-icons';
 import {
   FormattedText,
   ComponentRenderer,
@@ -122,7 +123,7 @@ function ChatBubble({ message, onSend, onReport }) {
         {/* Report button — only on completed assistant messages */}
         {!isUser && !message.isStreaming && !message.isLimitMsg && onReport && (
           <TouchableOpacity style={styles.reportBtn} onPress={() => onReport(message)} activeOpacity={0.7}>
-            <Text style={styles.reportBtnText}>⚑  Report a problem</Text>
+            <Ionicons name="flag-outline" size={11} color="#3a3a3a" /><Text style={styles.reportBtnText}>  Report a problem</Text>
           </TouchableOpacity>
         )}
 
@@ -428,14 +429,11 @@ export default function ResearchScreen() {
             disabled={!input.trim() || loading || isStreaming}
             activeOpacity={0.8}
           >
-            <Text
-              style={[
-                styles.sendBtnText,
-                (!input.trim() || loading || isStreaming) && styles.sendBtnTextDisabled,
-              ]}
-            >
-              ↑
-            </Text>
+            <Ionicons
+              name="arrow-up"
+              size={18}
+              color={(!input.trim() || loading || isStreaming) ? colors.grey : colors.background}
+            />
           </TouchableOpacity>
         </View>
       </KeyboardAvoidingView>
@@ -673,6 +671,9 @@ const styles = StyleSheet.create({
     marginTop: 6,
     marginLeft: 4,
     alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
   },
   reportBtnText: {
     fontSize: 11,

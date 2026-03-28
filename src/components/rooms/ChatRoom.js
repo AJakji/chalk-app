@@ -13,6 +13,7 @@ import {
   StatusBar,
 } from 'react-native';
 import { colors, spacing, radius } from '../../theme';
+import { Ionicons } from '@expo/vector-icons';
 import { simulatedMessages } from '../../data/mockRooms';
 import TeamLogo from '../TeamLogo';
 import { useTeamLogos } from '../../context/TeamLogosContext';
@@ -225,7 +226,7 @@ export default function ChatRoom({ room, visible, onClose }) {
               disabled={!input.trim()}
               activeOpacity={0.8}
             >
-              <Text style={styles.sendBtnText}>↑</Text>
+              <Ionicons name="arrow-up" size={18} color={!input.trim() ? colors.grey : colors.background} />
             </TouchableOpacity>
           </View>
         </KeyboardAvoidingView>

@@ -1,5 +1,6 @@
 import React, { useRef, useEffect, useState } from 'react';
 import { View, Text, Image, Pressable, Animated, StyleSheet } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import ConfidenceInfoModal from './ConfidenceInfoModal';
 import { colors, typography, spacing, radius } from '../../theme';
 import TeamLogo from '../TeamLogo';
@@ -22,7 +23,7 @@ function InfoButton({ onPress }) {
       hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
       style={styles.infoBtn}
     >
-      <Text style={styles.infoBtnText}>ⓘ</Text>
+      <Ionicons name="information-circle-outline" size={16} color={colors.grey} />
     </Pressable>
   );
 }

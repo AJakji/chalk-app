@@ -1,5 +1,6 @@
 import React, { useRef, useEffect, useState } from 'react';
 import { View, Text, Image, Pressable, Animated, StyleSheet, Linking } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import { colors, spacing, radius } from '../../theme';
 import { AFFILIATE_LINKS } from '../../config';
 import ConfidenceInfoModal from './ConfidenceInfoModal';
@@ -156,7 +157,7 @@ export default function PropPickCard({ pick, onPress, isTopPick }) {
             style={styles.confPctRow}
           >
             <Text style={[styles.confPct, { color: barColor }]}>{pick.confidence}%</Text>
-            <Text style={styles.infoIcon}>ⓘ</Text>
+            <Ionicons name="information-circle-outline" size={16} color={colors.grey} />
           </Pressable>
           {resultBadge && (
             <View style={[styles.resultBadge, { backgroundColor: resultBadge.bg }]}>
