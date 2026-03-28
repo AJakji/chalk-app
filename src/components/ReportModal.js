@@ -104,7 +104,7 @@ export default function ReportModal({ visible, onClose, question, chalkyResponse
         ) : (
           <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
             <Text style={styles.title}>Report a Problem</Text>
-            <Text style={styles.subtitle}>Help us improve Chalky's answers</Text>
+            <Text style={styles.subtitle}>Help us improve Chalky's answers. Chalky is still young — every report makes it sharper.</Text>
 
             <Text style={styles.label}>Question asked</Text>
             <View style={styles.questionBox}>
