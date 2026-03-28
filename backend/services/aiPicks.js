@@ -3,7 +3,7 @@
 // Flow (fallback): fetch odds → enrich with real stats → send to Claude → store picks
 
 const Anthropic = require('@anthropic-ai/sdk');
-const { fetchAllOdds } = require('./odds');
+const oddsService = require('./oddsService');
 const nba = require('./nba');
 const sd = require('./sportsdata');
 const db = require('../db');
@@ -676,10 +676,35 @@ async function storeModelPicks(picks, headshotMap = {}) {
 
 // ── FALLBACK: Standard game picks from raw odds ───────────────────────────────
 
+// Fetch game-level odds for all active leagues using oddsService (has retry/caching).
+// Returns the same flat format the enrichment + Claude prompt pipeline expects.
+async function fetchAllGamesForPicks() {
+  const leagues = ['NBA', 'MLB', 'NHL'];
+  const results = [];
+  for (const league of leagues) {
+    try {
+      const games = await oddsService.fetchGameOdds(league);
+      for (const g of (games || [])) {
+        const odds = {};
+        for (const bm of (g.bookmakers || [])) {
+          odds[bm.key] = {};
+          for (const mkt of (bm.markets || [])) {
+            odds[bm.key][mkt.key] = mkt.outcomes.map(o => ({ name: o.name, price: o.price, point: o.point }));
+          }
+        }
+        results.push({ gameId: g.id, sportKey: g.sport_key, awayTeam: g.away_team, homeTeam: g.home_team, commenceTime: g.commence_time, odds, league });
+      }
+    } catch (err) {
+      console.warn(`[generatePicks] Skipping ${league}: ${err.message}`);
+    }
+  }
+  return results;
+}
+
 async function generatePicks() {
   const _start = Date.now();
   console.log('🤖 Fetching odds from The Odds API...');
-  const games = await fetchAllOdds();
+  const games = await fetchAllGamesForPicks();
 
   if (games.length === 0) {
     console.log('No games found across any league today.');
