@@ -1349,15 +1349,15 @@ def upsert_player_projections(conn, proj: PlayerProjection) -> int:
             # Read market line from player_props_history (posted ~9 AM by sportsbooks).
             # Store projection regardless of line availability so the 9:15 AM --props-only
             # re-run and edge detector can apply the edge filter once lines are posted.
+            threshold = MIN_EDGE.get(prop_type, 0.5)  # always defined — used below
             line = get_market_line(conn, proj.player_name, prop_type, proj.game_date)
             if line is not None:
-                edge_val  = round(raw_proj - line, 2)
-                threshold = MIN_EDGE.get(prop_type, 0.5)
+                edge_val = round(raw_proj - line, 2)
                 if abs(edge_val) < threshold:
                     continue  # edge too small — not worth storing
                 factors = {**factors, 'market_line': line, 'edge': edge_val}
             else:
-                edge_val = 0.0   # placeholder until lines post
+                edge_val = 0.0   # placeholder until lines post at 9 AM
 
             # Normalize prop_type to full DB name (e.g. 'pra' → 'points_rebounds_assists')
             db_prop_type = PROP_TYPE_TO_DB.get(prop_type, prop_type)
