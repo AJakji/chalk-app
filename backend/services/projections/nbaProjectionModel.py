@@ -374,21 +374,11 @@ def get_position_defense_factor(conn, opponent: str, position: str, stat: str) -
     if not col:
         return 1.0
 
-    # Map DB column to LEAGUE_AVG key for normalization
-    lg_key_map = {
-        'pts_allowed':   'pts_pg',
-        'reb_allowed':   'reb_pg',
-        'ast_allowed':   'ast_pg',
-        'three_allowed': 'fg3m_pg',
-    }
-    lg_key = lg_key_map.get(col, 'pts_pg')
-    league_avg_val = LEAGUE_AVG.get(lg_key, 0.0)
-    if league_avg_val <= 0:
-        return 1.0
-
     try:
         with conn.cursor() as cur:
-            # Try position-specific row first, then fall back to aggregate 'ALL' row
+            # Try position-specific row first, then fall back to aggregate 'ALL' row.
+            # Normalization: use the league-wide average of the same column for that position,
+            # NOT a per-individual-player LEAGUE_AVG (which is a different scale).
             for pos_lookup in (position.upper(), 'ALL'):
                 cur.execute(
                     f"""SELECT {col}
@@ -399,8 +389,19 @@ def get_position_defense_factor(conn, opponent: str, position: str, stat: str) -
                 )
                 row = cur.fetchone()
                 if row and row[0] is not None:
-                    factor = float(row[0]) / league_avg_val
-                    # Tighter clamp: ±20% vs ±30% to avoid dominating total projection
+                    team_val = float(row[0])
+                    # League average for this column+position across all NBA teams
+                    cur.execute(
+                        f"SELECT AVG({col}) FROM position_defense_ratings "
+                        f"WHERE position = %s AND sport = 'NBA'",
+                        (pos_lookup,)
+                    )
+                    lg_row = cur.fetchone()
+                    league_avg_val = float(lg_row[0]) if lg_row and lg_row[0] else 0.0
+                    if league_avg_val <= 0:
+                        return 1.0
+                    factor = team_val / league_avg_val
+                    # Clamp: ±20% max adjustment to avoid dominating total projection
                     return clamp(factor, 0.80, 1.20)
     except Exception:
         pass
@@ -1025,9 +1026,11 @@ def project_team_props(
     pace_f       = clamp(avg_pace / LEAGUE_AVG['pace'], 0.90, 1.10)
     total_base   = implied_total if implied_total > 0 else LEAGUE_AVG['game_total']
 
-    # Position defense aggregates per team
-    # Compute a single composite factor = avg pts_allowed / league_avg pts
-    lg_pts = LEAGUE_AVG.get('pts_pg', 15.0)
+    # Position defense aggregates per team.
+    # position_defense_ratings.pts_allowed = total pts scored against this team
+    # per game (SUM across all player logs / games) — a TEAM-level total (~108-118).
+    # The correct league baseline is game_total/2, not pts_pg (which is per-player ~15).
+    lg_pts = LEAGUE_AVG.get('game_total', 225.0) / 2  # ~112.5 team pts allowed/game
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -1038,7 +1041,7 @@ def project_team_props(
             )
             row = cur.fetchone()
             raw_home = float(row[0]) if row and row[0] else None
-            home_def_f = clamp(raw_home / lg_pts, 0.85, 1.15) if raw_home else 1.0
+            home_def_f = clamp(raw_home / lg_pts, 0.88, 1.12) if raw_home else 1.0
 
             cur.execute(
                 """SELECT AVG(pts_allowed)
@@ -1048,7 +1051,7 @@ def project_team_props(
             )
             row = cur.fetchone()
             raw_away = float(row[0]) if row and row[0] else None
-            away_def_f = clamp(raw_away / lg_pts, 0.85, 1.15) if raw_away else 1.0
+            away_def_f = clamp(raw_away / lg_pts, 0.88, 1.12) if raw_away else 1.0
     except Exception:
         home_def_f = 1.0
         away_def_f = 1.0
@@ -1343,16 +1346,18 @@ def upsert_player_projections(conn, proj: PlayerProjection) -> int:
             if raw_proj <= 0:
                 continue
 
-            # Read market line from player_props_history
+            # Read market line from player_props_history (posted ~9 AM by sportsbooks).
+            # Store projection regardless of line availability so the 9:15 AM --props-only
+            # re-run and edge detector can apply the edge filter once lines are posted.
             line = get_market_line(conn, proj.player_name, prop_type, proj.game_date)
-            if line is None:
-                # No market line posted yet — skip this prop
-                continue
-
-            edge_val  = round(raw_proj - line, 2)
-            threshold = MIN_EDGE.get(prop_type, 0.5)
-            if abs(edge_val) < threshold:
-                continue  # edge too small — not a pick
+            if line is not None:
+                edge_val  = round(raw_proj - line, 2)
+                threshold = MIN_EDGE.get(prop_type, 0.5)
+                if abs(edge_val) < threshold:
+                    continue  # edge too small — not worth storing
+                factors = {**factors, 'market_line': line, 'edge': edge_val}
+            else:
+                edge_val = 0.0   # placeholder until lines post
 
             # Normalize prop_type to full DB name (e.g. 'pra' → 'points_rebounds_assists')
             db_prop_type = PROP_TYPE_TO_DB.get(prop_type, prop_type)
