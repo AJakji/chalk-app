@@ -178,7 +178,7 @@ function TextbookModal({ visible, onClose }) {
           ))}
 
           <Text style={styles.textbookDisclaimer}>
-            Chalky is for entertainment only. Bet responsibly. Must be 21+. Terms apply.
+            Not Financial Advice, Bet Responsibly
           </Text>
         </ScrollView>
       </SafeAreaView>

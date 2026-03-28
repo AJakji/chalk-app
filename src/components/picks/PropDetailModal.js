@@ -285,7 +285,7 @@ export default function PropDetailModal({ pick, visible, onClose }) {
             </View>
 
             <Text style={styles.disclaimer}>
-              Chalky is for entertainment only. Bet responsibly. 18+.
+              Not Financial Advice, Bet Responsibly
             </Text>
             <View style={{ height: 40 }} />
           </ScrollView>

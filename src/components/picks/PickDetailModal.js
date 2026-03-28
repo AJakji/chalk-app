@@ -226,7 +226,7 @@ export default function PickDetailModal({ pick, visible, onClose }) {
 
             {/* Disclaimer */}
             <Text style={styles.disclaimer}>
-              Chalky is for entertainment only. Bet responsibly. 18+.
+              Not Financial Advice, Bet Responsibly
             </Text>
 
             <View style={{ height: 40 }} />

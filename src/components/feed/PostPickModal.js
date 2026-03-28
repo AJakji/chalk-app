@@ -132,7 +132,7 @@ export default function PostPickModal({ visible, onClose, onPosted }) {
           />
 
           <Text style={styles.disclaimer}>
-            Chalky is for entertainment only. Please bet responsibly.
+            Not Financial Advice, Bet Responsibly
           </Text>
         </ScrollView>
       </View>
