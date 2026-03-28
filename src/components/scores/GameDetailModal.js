@@ -3449,14 +3449,16 @@ export default function GameDetailModal({ game, visible, onClose, onPlayerPress 
   const isMLB = game?.league === 'MLB';
   const isNHL = game?.league === 'NHL';
 
-  const fetchAll = useCallback(async () => {
+  const fetchAll = useCallback(async ({ silent = false } = {}) => {
     if (!game) return;
     const hasNBA = !!game.nbaGameId;
     const hasSD  = !!game.sdGameId && !!game.league;
     if (!hasNBA && !hasSD) return;
 
-    setBsLoading(true);
-    setPbpLoading(true);
+    if (!silent) {
+      setBsLoading(true);
+      setPbpLoading(true);
+    }
 
     let bs  = null;
     let pbp = null;
@@ -3476,8 +3478,10 @@ export default function GameDetailModal({ game, visible, onClose, onPlayerPress 
 
     setBoxScore(bs);
     setPlays(Array.isArray(pbp) ? pbp : []);
-    setBsLoading(false);
-    setPbpLoading(false);
+    if (!silent) {
+      setBsLoading(false);
+      setPbpLoading(false);
+    }
 
     // MLB: also fetch live at-bat state
     if (isMLB && game.sdGameId && game.status === 'live') {
@@ -3573,7 +3577,7 @@ export default function GameDetailModal({ game, visible, onClose, onPlayerPress 
     }
 
     if (game?.status === 'live') {
-      pollRef.current = setInterval(fetchAll, 30000);
+      pollRef.current = setInterval(() => fetchAll({ silent: true }), 30000);
     }
 
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
