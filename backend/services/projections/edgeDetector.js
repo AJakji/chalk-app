@@ -187,42 +187,74 @@ const MARKET_TO_EDGE_COL = {
 
 // ── Odds API helpers ───────────────────────────────────────────────────────────
 
+/**
+ * Fetch a URL with exponential backoff on 429 rate-limit responses.
+ * Retries up to maxRetries times, waiting 2^attempt * baseDelayMs between retries.
+ * Returns the parsed JSON on success, or null/fallback on permanent failure.
+ */
+async function fetchWithRetry(url, { fallback = null, maxRetries = 3, baseDelayMs = 2000, timeoutMs = 12000 } = {}) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+
+      if (res.ok) {
+        return await res.json();
+      }
+
+      if (res.status === 429) {
+        // Rate limited — check Retry-After header first, otherwise use exponential backoff
+        const retryAfter = res.headers.get('Retry-After');
+        const waitMs = retryAfter
+          ? parseInt(retryAfter, 10) * 1000
+          : baseDelayMs * Math.pow(2, attempt);
+
+        if (attempt < maxRetries) {
+          console.warn(`  [Odds API] 429 rate-limited — waiting ${(waitMs / 1000).toFixed(1)}s before retry ${attempt + 1}/${maxRetries}…`);
+          await new Promise(r => setTimeout(r, waitMs));
+          continue;
+        }
+        console.error(`  [Odds API] 429 rate-limit exceeded after ${maxRetries} retries: ${url.split('?')[0]}`);
+        return fallback;
+      }
+
+      if (res.status === 401) {
+        console.error(`  [Odds API] 401 Unauthorized — check ODDS_API_KEY`);
+        return fallback;
+      }
+
+      console.warn(`  [Odds API] HTTP ${res.status} for ${url.split('?')[0]}`);
+      return fallback;
+    } catch (err) {
+      if (attempt < maxRetries) {
+        const waitMs = baseDelayMs * Math.pow(2, attempt);
+        console.warn(`  [Odds API] fetch error (attempt ${attempt + 1}): ${err.message} — retrying in ${waitMs}ms`);
+        await new Promise(r => setTimeout(r, waitMs));
+      } else {
+        console.warn(`  [Odds API] fetch failed after ${maxRetries} retries: ${err.message}`);
+        return fallback;
+      }
+    }
+  }
+  return fallback;
+}
+
 async function fetchPlayerProps(sportKey, eventId) {
   if (!ODDS_API_KEY) return null;
   const markets = Object.values(PROP_MARKET_MAP).join(',');
   const url = `${BASE_URL}/sports/${sportKey}/events/${eventId}/odds?apiKey=${ODDS_API_KEY}&regions=us&markets=${markets}&oddsFormat=american`;
-  try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
-    if (!res.ok) return null;
-    return await res.json();
-  } catch {
-    return null;
-  }
+  return await fetchWithRetry(url, { fallback: null });
 }
 
 async function fetchNBAEvents() {
   if (!ODDS_API_KEY) return [];
   const url = `${BASE_URL}/sports/basketball_nba/events?apiKey=${ODDS_API_KEY}`;
-  try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
-    if (!res.ok) return [];
-    const data = await res.json();
-    return data || [];
-  } catch {
-    return [];
-  }
+  return (await fetchWithRetry(url, { fallback: [] })) || [];
 }
 
 async function fetchNBAGameOdds() {
   if (!ODDS_API_KEY) return [];
   const url = `${BASE_URL}/sports/basketball_nba/odds?apiKey=${ODDS_API_KEY}&regions=us&markets=h2h,spreads,totals&oddsFormat=american&bookmakers=draftkings,fanduel,betmgm,bet365`;
-  try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
-    if (!res.ok) return [];
-    return await res.json();
-  } catch {
-    return [];
-  }
+  return (await fetchWithRetry(url, { fallback: [] })) || [];
 }
 
 // ── MLB prop market maps ───────────────────────────────────────────────────────
@@ -773,13 +805,7 @@ const MAX_TEAM_PICKS  = 12;
 async function fetchGameOdds(sportKey) {
   if (!ODDS_API_KEY) return [];
   const url = `${BASE_URL}/sports/${sportKey}/odds?apiKey=${ODDS_API_KEY}&regions=us&markets=h2h,spreads,totals&oddsFormat=american&bookmakers=draftkings,fanduel,betmgm,bet365`;
-  try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
-    if (!res.ok) return [];
-    return (await res.json()) || [];
-  } catch {
-    return [];
-  }
+  return (await fetchWithRetry(url, { fallback: [] })) || [];
 }
 
 // ── Read team projections from DB ─────────────────────────────────────────────
@@ -1737,22 +1763,26 @@ async function detectEdges(gameDate) {
 
         allEdges.push(edgeObj);
 
-        // Store to DB
-        await storeEdge({
-          playerId:        edgeObj.playerId,
-          playerName:      edgeObj.playerName,
-          team:            edgeObj.team,
-          gameDate:        today,
-          propType,
-          propLine:        line,
-          dkOdds:          lineData.dk_odds,
-          fdOdds:          lineData.fd_odds,
-          mgmOdds:         lineData.mgm_odds,
-          bet365Odds:      lineData.bet365_odds,
-          chalkProjection: projValue,
-          chalkEdge:       edgeObj.chalkEdge,
-          confidence,
-        });
+        // Store to DB — wrapped so one failure doesn't abort the rest of the player loop
+        try {
+          await storeEdge({
+            playerId:        edgeObj.playerId,
+            playerName:      edgeObj.playerName,
+            team:            edgeObj.team,
+            gameDate:        today,
+            propType,
+            propLine:        line,
+            dkOdds:          lineData.dk_odds,
+            fdOdds:          lineData.fd_odds,
+            mgmOdds:         lineData.mgm_odds,
+            bet365Odds:      lineData.bet365_odds,
+            chalkProjection: projValue,
+            chalkEdge:       edgeObj.chalkEdge,
+            confidence,
+          });
+        } catch (err) {
+          console.error(`  [storeEdge] Failed for ${edgeObj.playerName} ${propType}: ${err.message}`);
+        }
       }
     }
   }
@@ -1787,21 +1817,31 @@ async function detectEdges(gameDate) {
 
 async function getTodaysEdges(gameDate, sport = null) {
   const today = gameDate || getTodayET();
-  const sportClause = sport ? `AND pph.sport = '${sport}'` : '';
-  const { rows } = await db.query(
-    `SELECT pph.*, cp.opponent, cp.home_away, cp.factors_json
-     FROM player_props_history pph
-     LEFT JOIN chalk_projections cp
-       ON cp.player_id = pph.player_id AND cp.game_date = pph.game_date
-     WHERE pph.game_date = $1
-       ${sportClause}
-       AND pph.chalk_edge IS NOT NULL
-       AND pph.confidence >= $2
-     ORDER BY pph.confidence DESC, ABS(pph.chalk_edge) DESC
-     LIMIT $3`,
-    [today, MIN_CONFIDENCE, MAX_PICKS]
-  );
-  return rows;
+  // Use parameterized sport filter to avoid SQL injection and handle null cleanly
+  const params = sport
+    ? [today, MIN_CONFIDENCE, MAX_PICKS, sport]
+    : [today, MIN_CONFIDENCE, MAX_PICKS];
+  const sportClause = sport ? `AND pph.sport = $4` : '';
+
+  try {
+    const { rows } = await db.query(
+      `SELECT pph.*, cp.opponent, cp.home_away, cp.factors_json
+       FROM player_props_history pph
+       LEFT JOIN chalk_projections cp
+         ON cp.player_id = pph.player_id AND cp.game_date = pph.game_date
+       WHERE pph.game_date = $1
+         ${sportClause}
+         AND pph.chalk_edge IS NOT NULL
+         AND pph.confidence >= $2
+       ORDER BY pph.confidence DESC, ABS(pph.chalk_edge) DESC
+       LIMIT $3`,
+      params
+    );
+    return rows;
+  } catch (err) {
+    console.error(`[getTodaysEdges] DB query failed: ${err.message}`);
+    return [];
+  }
 }
 
 // ── Detect edges for MLB or NHL (same architecture as NBA detectEdges) ────────
@@ -1822,11 +1862,8 @@ async function detectEdgesForSport(sport, gameDate) {
   // Fetch events from Odds API for this sport
   let events = [];
   if (ODDS_API_KEY) {
-    try {
-      const url = `${BASE_URL}/sports/${sportKey}/events?apiKey=${ODDS_API_KEY}`;
-      const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
-      if (res.ok) events = await res.json() || [];
-    } catch {}
+    const url = `${BASE_URL}/sports/${sportKey}/events?apiKey=${ODDS_API_KEY}`;
+    events = (await fetchWithRetry(url, { fallback: [] })) || [];
   }
   console.log(`  Found ${events.length} ${sport} events from Odds API`);
 
@@ -1837,10 +1874,7 @@ async function detectEdgesForSport(sport, gameDate) {
     if (ODDS_API_KEY) {
       const markets = Object.values(propMap).join(',');
       const url = `${BASE_URL}/sports/${sportKey}/events/${event.id}/odds?apiKey=${ODDS_API_KEY}&regions=us&markets=${markets}&oddsFormat=american`;
-      try {
-        const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
-        if (res.ok) propsData = await res.json();
-      } catch {}
+      propsData = await fetchWithRetry(url, { fallback: null });
     }
 
     const playerLines = propsData ? extractPlayerLines(propsData) : {};
@@ -1920,22 +1954,26 @@ async function detectEdgesForSport(sport, gameDate) {
         };
 
         allEdges.push(edgeObj);
-        await storeEdge({
-          playerId:        edgeObj.playerId,
-          playerName:      edgeObj.playerName,
-          team:            edgeObj.team,
-          sport,
-          gameDate:        today,
-          propType:        propTypeInternal,
-          propLine:        line,
-          dkOdds:          lineData.dk_odds,
-          fdOdds:          lineData.fd_odds,
-          mgmOdds:         lineData.mgm_odds,
-          bet365Odds:      lineData.bet365_odds,
-          chalkProjection: projValue,
-          chalkEdge:       edgeObj.chalkEdge,
-          confidence,
-        });
+        try {
+          await storeEdge({
+            playerId:        edgeObj.playerId,
+            playerName:      edgeObj.playerName,
+            team:            edgeObj.team,
+            sport,
+            gameDate:        today,
+            propType:        propTypeInternal,
+            propLine:        line,
+            dkOdds:          lineData.dk_odds,
+            fdOdds:          lineData.fd_odds,
+            mgmOdds:         lineData.mgm_odds,
+            bet365Odds:      lineData.bet365_odds,
+            chalkProjection: projValue,
+            chalkEdge:       edgeObj.chalkEdge,
+            confidence,
+          });
+        } catch (err) {
+          console.error(`  [storeEdge] Failed for ${edgeObj.playerName} ${propType}: ${err.message}`);
+        }
       }
     }
   }
@@ -1956,17 +1994,10 @@ async function collectPropsLines() {
   let totalEvents = 0;
 
   for (const sportKey of sports) {
-    try {
-      const url = `${BASE_URL}/sports/${sportKey}/events?apiKey=${ODDS_API_KEY}`;
-      const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
-      if (res.ok) {
-        const data = await res.json() || [];
-        totalEvents += data.length;
-        console.log(`  ${sportKey}: ${data.length} events tonight`);
-      }
-    } catch (err) {
-      console.error(`  ${sportKey}: failed — ${err.message}`);
-    }
+    const url = `${BASE_URL}/sports/${sportKey}/events?apiKey=${ODDS_API_KEY}`;
+    const data = (await fetchWithRetry(url, { fallback: [] })) || [];
+    totalEvents += data.length;
+    console.log(`  ${sportKey}: ${data.length} events tonight`);
   }
 
   console.log(`  Total: ${totalEvents} events across all sports`);

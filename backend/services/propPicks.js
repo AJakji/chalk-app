@@ -98,21 +98,42 @@ async function generatePropPicks() {
   const userContent = buildPromptContent(propLines, projections, today);
   console.log('📊 Sending prop data to Claude...');
 
-  const message = await client.messages.create({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 4096,
-    system: PROP_SYSTEM_PROMPT,
-    messages: [{ role: 'user', content: userContent }],
-  });
+  let message;
+  try {
+    message = await client.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 4096,
+      system: PROP_SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: userContent }],
+    });
+  } catch (err) {
+    console.error(`[generatePropPicks] Claude API error: ${err.status || ''} ${err.message}`);
+    console.error('  Prop picks generation skipped — Claude unavailable.');
+    return [];
+  }
 
-  const raw = message.content[0].text;
+  const raw = message?.content?.[0]?.text;
+  if (!raw) {
+    console.error('[generatePropPicks] Claude returned empty content — no prop picks generated');
+    return [];
+  }
+
   let parsed;
   try {
     parsed = JSON.parse(raw);
   } catch {
     const match = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
-    if (match) parsed = JSON.parse(match[1]);
-    else throw new Error('Claude returned unparseable prop output: ' + raw.slice(0, 200));
+    if (match) {
+      try { parsed = JSON.parse(match[1]); } catch {
+        console.error('[generatePropPicks] Failed to parse Claude code-fenced JSON');
+        console.error('  Raw response (first 500 chars):', raw.slice(0, 500));
+        return [];
+      }
+    } else {
+      console.error('[generatePropPicks] Claude returned unparseable prop output');
+      console.error('  Raw response (first 500 chars):', raw.slice(0, 500));
+      return [];
+    }
   }
 
   const props = parsed.props ?? [];

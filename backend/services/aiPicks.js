@@ -99,9 +99,9 @@ Respond with a JSON object — no markdown, no text outside the JSON:
 {
   "picks": [
     {
-      "league": "NBA",
+      "league": "<copy exactly from edge 'league' field: NBA, NHL, or MLB>",
       "gameId": "",
-      "sportKey": "basketball_nba",
+      "sportKey": "<copy exactly from edge 'sportKey' field>",
       "awayTeam": "<opponent team full name>",
       "homeTeam": "<player's home team full name if playing at home, else opponent>",
       "gameTime": "Tonight",
@@ -257,9 +257,17 @@ function formatEdgeForChalky(edge) {
     ctx = parsed.context || {};
   } catch {}
 
+  // Map sport to the correct league label and sport key for the picks table
+  const SPORT_TO_LEAGUE = { NBA: 'NBA', NHL: 'NHL', MLB: 'MLB' };
+  const SPORT_TO_KEY    = { NBA: 'basketball_nba', NHL: 'icehockey_nhl', MLB: 'baseball_mlb' };
+  const sport = edge.sport || 'NBA';
+
   return {
     player:        edge.player_name,
     team:          edge.team,
+    sport,
+    league:        SPORT_TO_LEAGUE[sport] || sport,
+    sportKey:      SPORT_TO_KEY[sport]    || 'basketball_nba',
     opponent:      edge.opponent || '',
     matchup,
     propType:      edge.prop_type,
@@ -557,9 +565,10 @@ async function generateModelPicks() {
 
   const edgesForClaude = enrichedEdges.map(formatEdgeForChalky);
 
-  const userContent = `Tonight's NBA edges from Chalk's proprietary projection model.
+  const userContent = `Tonight's edges from Chalk's proprietary projection model (NBA, NHL, and MLB).
 Each edge represents a gap between our projection and the posted sportsbook line.
-These are already filtered — only edges with abs(edge) > 1.5 and confidence ≥ 62 are included.
+These are already filtered — only edges with abs(edge) > threshold and confidence ≥ 62 are included.
+Each edge includes a 'league' and 'sportKey' field — copy them exactly into your response.
 
 Write Chalky picks for the best of these. Be selective. Skip anything that doesn't feel clean.
 
@@ -568,14 +577,35 @@ ${JSON.stringify(edgesForClaude, null, 2)}`;
 
   console.log(`  Sending ${edgesForClaude.length} edges to Claude (Chalky's voice)…`);
 
-  const message = await client.messages.create({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 4096,
-    system: CHALKY_SYSTEM_PROMPT,
-    messages: [{ role: 'user', content: userContent }],
-  });
+  let message;
+  try {
+    message = await client.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 4096,
+      system: CHALKY_SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: userContent }],
+    });
+  } catch (err) {
+    console.error(`[generateModelPicks] Claude API error: ${err.status || ''} ${err.message}`);
+    console.error('  Picks generation skipped — Claude unavailable. Check ANTHROPIC_API_KEY and API status.');
+    return [];
+  }
 
-  const parsed = parseClaudeResponse(message.content[0].text);
+  const rawText = message?.content?.[0]?.text;
+  if (!rawText) {
+    console.error('[generateModelPicks] Claude returned empty content — no picks generated');
+    return [];
+  }
+
+  let parsed;
+  try {
+    parsed = parseClaudeResponse(rawText);
+  } catch (err) {
+    console.error(`[generateModelPicks] Failed to parse Claude response: ${err.message}`);
+    console.error('  Raw response (first 500 chars):', rawText.slice(0, 500));
+    return [];
+  }
+
   const picks  = parsed.picks ?? [];
   console.log(`  ✅ Chalky generated ${picks.length} model picks`);
 
@@ -673,19 +703,25 @@ async function generatePicks() {
 
   console.log(`📊 Sending to Claude (${contextBlocks ? 'with' : 'without'} real stats)...`);
 
-  const message = await client.messages.create({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 4096,
-    system: SYSTEM_PROMPT,
-    messages: [
-      {
-        role: 'user',
-        content: userContent,
-      },
-    ],
-  });
+  let message;
+  try {
+    message = await client.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 4096,
+      system: SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: userContent }],
+    });
+  } catch (err) {
+    console.error(`[generatePicks] Claude API error: ${err.status || ''} ${err.message}`);
+    console.error('  Game picks generation skipped — Claude unavailable.');
+    return [];
+  }
 
-  const raw = message.content[0].text;
+  const raw = message?.content?.[0]?.text;
+  if (!raw) {
+    console.error('[generatePicks] Claude returned empty content — no picks generated');
+    return [];
+  }
 
   let parsed;
   try {
@@ -694,9 +730,15 @@ async function generatePicks() {
     // Claude sometimes wraps JSON in a code block — strip it
     const match = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
     if (match) {
-      parsed = JSON.parse(match[1]);
+      try { parsed = JSON.parse(match[1]); } catch {
+        console.error('[generatePicks] Failed to parse Claude code-fenced JSON');
+        console.error('  Raw response (first 500 chars):', raw.slice(0, 500));
+        return [];
+      }
     } else {
-      throw new Error('Claude returned unparseable output: ' + raw.slice(0, 200));
+      console.error('[generatePicks] Claude returned unparseable output');
+      console.error('  Raw response (first 500 chars):', raw.slice(0, 500));
+      return [];
     }
   }
 

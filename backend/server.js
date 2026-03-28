@@ -12,6 +12,34 @@ const { gradeYesterdaysPicks, getModelAccuracy } = require('./services/projectio
 const { fetchAllVenueWeather, router: weatherRouter } = require('./services/weatherService');
 const { runGoalieConfirmation, getConfirmationSchedule, router: goalieRouter } = require('./services/nhlGoalieConfirmation');
 
+// ── Startup env var validation ─────────────────────────────────────────────────
+// Fail loud at boot rather than silently at 4:30 AM.
+// REQUIRED: server cannot function without these.
+// OPTIONAL: missing ones degrade specific features but don't crash the server.
+const REQUIRED_ENV = ['DATABASE_URL', 'ANTHROPIC_API_KEY'];
+const OPTIONAL_ENV = [
+  ['ODDS_API_KEY',         'edge detector + team bets will produce zero picks'],
+  ['BALLDONTLIE_API_KEY',  'NBA projections + nightly roster will fail (401)'],
+  ['CLERK_SECRET_KEY',     'auth middleware will not verify tokens'],
+];
+
+const missingRequired = REQUIRED_ENV.filter(k => !process.env[k]);
+if (missingRequired.length > 0) {
+  console.error('🚨 FATAL: Missing required environment variables:');
+  missingRequired.forEach(k => console.error(`   — ${k}`));
+  console.error('Server cannot start. Set these in Railway → Variables.');
+  process.exit(1);
+}
+
+OPTIONAL_ENV.forEach(([key, impact]) => {
+  const val = process.env[key];
+  if (!val || !val.trim()) {
+    console.warn(`⚠️  Missing optional env var: ${key} — ${impact}`);
+  } else {
+    console.log(`✅ Env: ${key} present (len=${val.trim().length})`);
+  }
+});
+
 const app = express();
 const PORT = process.env.PORT || 3001;
 
@@ -261,6 +289,45 @@ if (process.env.MOCK_MODE !== 'true') {
       runPipeline('MLB Projection Model', () => runPythonScript('mlbProjectionModel.py')),
       runPipeline('NHL Projection Model', () => runPythonScript('nhlProjectionModel.py')),
     ]);
+
+    // ── Projection row count check (fail-loud before edge detection wastes time) ──
+    // If models wrote 0 rows the edge detector will find no edges and aiPicks will
+    // generate zero picks. Catch it here at 4:30 AM instead of 6:55 AM.
+    try {
+      const db = require('./db');
+      const today = getTodayET();
+      const { rows } = await db.query(
+        `SELECT sport, COUNT(*) AS count
+         FROM chalk_projections
+         WHERE game_date = $1
+         GROUP BY sport
+         ORDER BY sport`,
+        [today]
+      );
+
+      const bySport = Object.fromEntries(rows.map(r => [r.sport, parseInt(r.count)]));
+      const total   = rows.reduce((sum, r) => sum + parseInt(r.count), 0);
+
+      if (total === 0) {
+        console.error(`\n🚨 [4:30 AM] ALERT: chalk_projections has ZERO rows for ${today}`);
+        console.error('  Possible causes:');
+        console.error('  — BALLDONTLIE_API_KEY missing/invalid (NBA 401 → 0 players)');
+        console.error('  — No games scheduled today');
+        console.error('  — Market line gate blocking all writes (pre-9 AM run)');
+        console.error('  Edge detection and aiPicks will produce zero picks unless resolved.');
+      } else {
+        console.log(`✅ [4:30 AM] chalk_projections: ${total} rows for ${today}`);
+        rows.forEach(r => console.log(`   ${r.sport}: ${r.count} rows`));
+
+        // Warn if any sport that had games last run is now empty
+        const missing = ['NBA', 'MLB', 'NHL'].filter(s => !bySport[s]);
+        if (missing.length > 0) {
+          console.warn(`⚠️  [4:30 AM] Missing projections for: ${missing.join(', ')} — check those model logs`);
+        }
+      }
+    } catch (err) {
+      console.error('[4:30 AM] Projection row count check failed:', err.message);
+    }
   }, { timezone: 'America/New_York' });
 
   // ── 5:30 AM — Edge detection (all sports) ────────────────────────────────────
