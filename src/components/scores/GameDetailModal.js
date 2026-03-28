@@ -17,6 +17,7 @@ import {
 import { colors, spacing, radius } from '../../theme';
 import TeamLogo from '../TeamLogo';
 import { useTeamLogos } from '../../context/TeamLogosContext';
+import PlayerProfileModal from '../players/PlayerProfileModal';
 import {
   fetchNBALiveBoxScore,
   fetchNBAPlayByPlay,
@@ -3427,8 +3428,9 @@ function ChalkBanner({ chalkPick }) {
 
 // ── Main modal ────────────────────────────────────────────────────────────────
 
-export default function GameDetailModal({ game, visible, onClose, onPlayerPress }) {
+export default function GameDetailModal({ game, visible, onClose }) {
   const [activeTab,      setActiveTab]      = useState(0);
+  const [selectedPlayer, setSelectedPlayer] = useState(null);
   const [boxScore,       setBoxScore]       = useState(null);
   const [plays,          setPlays]          = useState(null);
   const [gameInfo,       setGameInfo]       = useState(null);
@@ -3563,6 +3565,7 @@ export default function GameDetailModal({ game, visible, onClose, onPlayerPress 
       setLeadersData(null);
       setChalkyTake(null);
       setActiveTab(0);
+      setSelectedPlayer(null);
       setShowLiveBanner(false);
       prevStatusRef.current = null;
       if (pollRef.current) clearInterval(pollRef.current);
@@ -3846,10 +3849,10 @@ export default function GameDetailModal({ game, visible, onClose, onPlayerPress 
           >
             {activeTab === 0 && (
               isMLB
-                ? <MLBBoxScoreTab game={game} boxScore={boxScore} loading={bsLoading} onPlayerPress={(name) => onPlayerPress?.(name, game.league)} />
+                ? <MLBBoxScoreTab game={game} boxScore={boxScore} loading={bsLoading} onPlayerPress={(name) => setSelectedPlayer({ name, league: game.league })} />
                 : isNHL
-                  ? <NHLBoxScoreTab game={game} boxScore={boxScore} loading={bsLoading} onPlayerPress={(name) => onPlayerPress?.(name, game.league)} />
-                  : <BoxScoreTab    game={game} boxScore={boxScore} loading={bsLoading} onPlayerPress={(name) => onPlayerPress?.(name, game.league)} />
+                  ? <NHLBoxScoreTab game={game} boxScore={boxScore} loading={bsLoading} onPlayerPress={(name) => setSelectedPlayer({ name, league: game.league })} />
+                  : <BoxScoreTab    game={game} boxScore={boxScore} loading={bsLoading} onPlayerPress={(name) => setSelectedPlayer({ name, league: game.league })} />
             )}
             {activeTab === 1 && isMLB && (
               <View style={{ flex: 1, paddingHorizontal: 0 }}>
@@ -3871,6 +3874,13 @@ export default function GameDetailModal({ game, visible, onClose, onPlayerPress 
         {/* Live transition banner — slides in when game goes live */}
         <LiveTransitionBanner visible={showLiveBanner} />
       </SafeAreaView>
+
+      <PlayerProfileModal
+        visible={!!selectedPlayer}
+        playerName={selectedPlayer?.name}
+        playerLeague={selectedPlayer?.league || 'NBA'}
+        onClose={() => setSelectedPlayer(null)}
+      />
     </Modal>
   );
 }
