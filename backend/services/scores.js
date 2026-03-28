@@ -2,9 +2,9 @@
  * scores.js — Scores data layer
  *
  * Priority:
- *   1. SportsData.io (primary) — all leagues
+ *   1. Official free APIs (NBA: BDL, NHL: NHL API, MLB: MLB Stats) via sportsdata.js
  *   2. nba_api Python service (supplement) — NBA live clock accuracy
- *   3. ESPN public API (fallback) — if SD.io returns nothing
+ *   3. ESPN public API (fallback) — if primary returns nothing
  */
 
 const db  = require('../db');
@@ -75,9 +75,9 @@ async function fetchAllScores() {
     console.warn(`[Scores] NBA supplement failed: ${err.message}`);
   }
 
-  // Fallback to ESPN if SD.io returned nothing
+  // Fallback to ESPN if official APIs returned nothing
   if (games.length === 0) {
-    console.warn('[Scores] SD.io returned no games for today — falling back to ESPN');
+    console.warn('[Scores] Official APIs returned no games for today — falling back to ESPN');
     games = await espn.getESPNScoresForDate(today);
   }
 
@@ -94,7 +94,7 @@ async function fetchScoresForDate(dateStr) {
   let games = await sd.getScoresForDate(dateStr, match);
 
   if (games.length === 0) {
-    console.warn(`[Scores] SD.io returned no games for ${dateStr} — falling back to ESPN`);
+    console.warn(`[Scores] Official APIs returned no games for ${dateStr} — falling back to ESPN`);
     games = await espn.getESPNScoresForDate(dateStr);
   }
 

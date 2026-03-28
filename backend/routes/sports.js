@@ -1,40 +1,36 @@
 /**
- * /api/sports — Unified SportsData.io proxy
- * Box scores and play-by-play for all leagues.
+ * /api/sports — Unified sports data proxy
+ * NBA: BallDontLie API | NHL: NHL Official API | MLB: MLB Official Stats API
  */
 
-const express = require('express');
-const router = express.Router();
-const sd = require('../services/sportsdata');
+const express  = require('express');
+const router   = express.Router();
+const sd       = require('../services/sportsdata');
+const bdl      = require('../services/ballDontLie');
+const nhlApi   = require('../services/nhlApi');
 const mlbStats = require('../services/mlbStats');
 
-// GET /api/sports/boxscore?league=NBA&gameId=123
+// ── GET /api/sports/boxscore?league=NBA&gameId=123 ────────────────────────────
 router.get('/boxscore', async (req, res) => {
   const { league, gameId } = req.query;
   if (!league || !gameId) return res.status(400).json({ error: 'league and gameId required' });
 
+  const L = league.toUpperCase();
   try {
-    let raw = null;
     let mapped = null;
-    const L = league.toUpperCase();
 
     if (L === 'NBA') {
-      raw = await sd.nbaBoxScore(gameId);
-      mapped = sd.mapNBABoxScore(raw);
+      const statsRows = await bdl.getStatsByGame(gameId);
+      mapped = sd.mapBDLBoxScore(statsRows);
     } else if (L === 'NHL') {
-      raw = await sd.nhlBoxScore(gameId);
-      mapped = sd.mapNHLBoxScore(raw);
+      const boxData = await nhlApi.getBoxScore(gameId);
+      mapped = sd.mapNHLApiBoxScore(boxData);
     } else if (L === 'MLB') {
       const [boxData, linescoreData] = await Promise.all([
         mlbStats.getBoxScore(gameId),
         mlbStats.getLiveLinescore(gameId),
       ]);
       mapped = sd.mapMLBStatsBoxScore(boxData, linescoreData);
-    } else if (L === 'NFL') {
-      raw = await sd.nflBoxScore(gameId);
-      mapped = sd.mapNBABoxScore(raw); // NFL box score uses similar PlayerGames structure
-    } else {
-      return res.json({ data: null });
     }
 
     res.json({ data: mapped });
@@ -44,83 +40,72 @@ router.get('/boxscore', async (req, res) => {
   }
 });
 
-// GET /api/sports/playbyplay?league=NBA&gameId=123
+// ── GET /api/sports/playbyplay?league=NBA&gameId=123 ──────────────────────────
 router.get('/playbyplay', async (req, res) => {
   const { league, gameId } = req.query;
   if (!league || !gameId) return res.status(400).json({ error: 'league and gameId required' });
 
+  const L = league.toUpperCase();
   try {
-    let raw = null;
-    const L = league.toUpperCase();
-
-    if (L === 'MLB') {
-      const pbpData = await mlbStats.getPlayByPlay(gameId);
-      return res.json({ data: sd.mapMLBStatsPBP(pbpData) });
+    if (L === 'NBA') {
+      const plays = await bdl.getPlayByPlay(gameId);
+      return res.json({ data: sd.mapBDLPBP(plays) });
     }
-
-    if (L === 'NBA')      raw = await sd.nbaPlayByPlay(gameId);
-    else if (L === 'NHL') raw = await sd.nhlPlayByPlay(gameId);
-    else if (L === 'NFL') raw = await sd.nflPlayByPlay(gameId);
-    else return res.json({ data: [] });
-
-    const plays = sd.mapPBP(raw, L);
-    res.json({ data: plays });
+    if (L === 'NHL') {
+      const data = await nhlApi.getPlayByPlay(gameId);
+      return res.json({ data: sd.mapNHLApiPBP(data) });
+    }
+    if (L === 'MLB') {
+      const data = await mlbStats.getPlayByPlay(gameId);
+      return res.json({ data: sd.mapMLBStatsPBP(data) });
+    }
+    res.json({ data: [] });
   } catch (err) {
     console.error(`[/api/sports/playbyplay] ${err.message}`);
     res.json({ data: [] });
   }
 });
 
-// GET /api/sports/standings?league=NBA&season=2025
+// ── GET /api/sports/standings?league=NBA&season=2025 ──────────────────────────
 router.get('/standings', async (req, res) => {
-  const { league, season } = req.query;
-  const s = season || process.env.CURRENT_SEASON || '2025';
-  try {
-    let data = null;
-    const L = (league || '').toUpperCase();
-    if (L === 'NBA')      data = await sd.nbaStandings(s);
-    else if (L === 'NHL') data = await sd.nhlStandings(s);
-    else if (L === 'MLB') data = await sd.mlbStandings(s);
-    else if (L === 'NFL') data = await sd.nflStandings(s);
-    res.json({ data });
-  } catch (err) {
-    res.json({ data: null });
-  }
-});
-
-// GET /api/sports/news?league=NBA
-router.get('/news', async (req, res) => {
   const L = (req.query.league || '').toUpperCase();
   try {
     let data = null;
-    if (L === 'NBA')      data = await sd.nbaNews();
-    else if (L === 'NHL') data = await sd.nhlNews();
-    else if (L === 'MLB') data = await sd.mlbNews();
-    else if (L === 'NFL') data = await sd.nflNews();
-    else if (L === 'SOCCER') data = await sd.soccerNews();
+    if (L === 'NBA') {
+      data = await bdl.getTeamStats(2024);
+    } else if (L === 'NHL') {
+      data = await nhlApi.getStandings();
+    } else if (L === 'MLB') {
+      const year = (req.query.season || new Date().getFullYear()).toString();
+      data = await mlbStats.getStandings(year);
+    }
     res.json({ data: data || [] });
   } catch (err) {
     res.json({ data: [] });
   }
 });
 
-// GET /api/sports/injuries?league=NBA
+// ── GET /api/sports/news?league=NBA ───────────────────────────────────────────
+// Free official APIs do not have news endpoints — return empty.
+router.get('/news', async (req, res) => {
+  res.json({ data: [] });
+});
+
+// ── GET /api/sports/injuries?league=NBA ───────────────────────────────────────
 router.get('/injuries', async (req, res) => {
   const L = (req.query.league || '').toUpperCase();
   try {
     let data = null;
-    if (L === 'NBA')      data = await sd.nbaInjuries();
-    else if (L === 'NHL') data = await sd.nhlInjuries();
-    else if (L === 'MLB') data = await sd.mlbInjuries();
-    else if (L === 'NFL') data = await sd.nflInjuries();
+    if (L === 'NBA') data = await bdl.getInjuries();
+    // NHL and MLB official APIs do not expose injury endpoints
     res.json({ data: data || [] });
   } catch (err) {
     res.json({ data: [] });
   }
 });
 
-// GET /api/sports/mlblive?date=YYYY-MM-DD&gameId=123
-// Returns live at-bat state for a specific MLB game (balls, strikes, outs, bases, pitcher, batter)
+// ── GET /api/sports/mlblive?gameId=12345 ─────────────────────────────────────
+// Live at-bat state for a specific MLB game (balls, strikes, outs, bases, pitcher, batter)
 router.get('/mlblive', async (req, res) => {
   const { gameId } = req.query;
   if (!gameId) return res.status(400).json({ error: 'gameId required' });
@@ -151,218 +136,119 @@ router.get('/mlblive', async (req, res) => {
   }
 });
 
-// GET /api/sports/gameinfo?league=NBA&gameId=123&awayAbbr=GS&homeAbbr=BOS
-// Returns arena, officials, injuries, team last 5, head-to-head for Game Info tab
+// ── GET /api/sports/gameinfo?league=NBA&gameId=123&awayAbbr=BOS&homeAbbr=MIA ──
+// Pre-game and in-game context: injuries, team stats, goalie matchup (NHL)
 router.get('/gameinfo', async (req, res) => {
   const { league, gameId, awayAbbr, homeAbbr } = req.query;
   if (!league || !gameId) return res.status(400).json({ error: 'league and gameId required' });
 
-  const L      = (league || '').toUpperCase();
-  const season = process.env.CURRENT_SEASON || '2025';
-
-  const empty = { arena: '', arenaCity: '', officials: [], awayInjuries: [], homeInjuries: [], awayLast5: [], homeLast5: [], headToHead: [] };
+  const L = (league || '').toUpperCase();
+  const empty = {
+    arena: '', arenaCity: '', officials: [],
+    awayInjuries: [], homeInjuries: [],
+    awayLast5: [], homeLast5: [], headToHead: [],
+    goalieMatchup: null, awayTeamStats: null, homeTeamStats: null, keyPlayers: null,
+  };
 
   try {
-    // ── 1. Box score meta (arena / officials) ──
-    let raw = null;
-    if (L === 'NBA')      raw = await sd.nbaBoxScore(gameId);
-    else if (L === 'NHL') raw = await sd.nhlBoxScore(gameId);
-    else if (L === 'MLB') raw = await sd.mlbBoxScore(gameId);
-
-    const meta = sd.extractGameMeta(raw || {});
-
-    // ── 2. Injuries ──
-    let injuriesRaw = null;
-    if (L === 'NBA')      injuriesRaw = await sd.nbaInjuries();
-    else if (L === 'NHL') injuriesRaw = await sd.nhlInjuries();
-    else if (L === 'MLB') injuriesRaw = await sd.mlbInjuries();
-    else if (L === 'NFL') injuriesRaw = await sd.nflInjuries();
-
-    const mapInj = (p) => ({
-      name:        p.Name || '',
-      status:      p.Status || '',
-      description: p.InjuryDescription || p.Practice || '',
-    });
-    const awayInjuries = (injuriesRaw || []).filter(p => p.Team === awayAbbr).slice(0, 8).map(mapInj);
-    const homeInjuries = (injuriesRaw || []).filter(p => p.Team === homeAbbr).slice(0, 8).map(mapInj);
-
-    // ── 3. Season games → last 5 + head-to-head ──
-    let awayLast5 = [], homeLast5 = [], headToHead = [];
-    let seasonGames = null;
-    if (L === 'NBA') seasonGames = await sd.nbaGames(season);
-    if (L === 'NHL') seasonGames = await sd.nhlGames(season);
-    if (L === 'MLB') seasonGames = await sd.mlbGames(season);
-
-    if (Array.isArray(seasonGames) && awayAbbr && homeAbbr) {
-      const completed = seasonGames.filter(g => {
-        const s = (g.Status || '').toLowerCase();
-        return s === 'final' || s === 'f/ot' || s === 'f/so';
+    // ── Injuries ──
+    let awayInjuries = [], homeInjuries = [];
+    if (L === 'NBA') {
+      const allInjuries = await bdl.getInjuries();
+      const mapInj = (p) => ({
+        name:        `${p.player?.first_name || ''} ${p.player?.last_name || ''}`.trim(),
+        status:      p.status      || '',
+        description: p.description || '',
       });
-
-      const formatTeamGame = (g, abbr) => {
-        const isHome   = g.HomeTeam === abbr;
-        const oppAbbr  = isHome ? g.AwayTeam : g.HomeTeam;
-        const myScore  = isHome ? g.HomeTeamScore : g.AwayTeamScore;
-        const oppScore = isHome ? g.AwayTeamScore : g.HomeTeamScore;
-        const dateStr  = g.DateTime || g.Day || '';
-        const date     = dateStr ? new Date(dateStr).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '';
-        return {
-          date,
-          opponent: sd.teamName(L, oppAbbr) || oppAbbr,
-          isHome,
-          result:   myScore > oppScore ? 'W' : 'L',
-          teamScore: myScore,
-          oppScore,
-        };
-      };
-
-      const byDate = (a, b) => new Date(b.DateTime || b.Day || 0) - new Date(a.DateTime || a.Day || 0);
-
-      awayLast5 = completed
-        .filter(g => g.AwayTeam === awayAbbr || g.HomeTeam === awayAbbr)
-        .sort(byDate).slice(0, 5)
-        .map(g => formatTeamGame(g, awayAbbr));
-
-      homeLast5 = completed
-        .filter(g => g.AwayTeam === homeAbbr || g.HomeTeam === homeAbbr)
-        .sort(byDate).slice(0, 5)
-        .map(g => formatTeamGame(g, homeAbbr));
-
-      headToHead = completed
-        .filter(g =>
-          (g.AwayTeam === awayAbbr && g.HomeTeam === homeAbbr) ||
-          (g.AwayTeam === homeAbbr && g.HomeTeam === awayAbbr)
-        )
-        .sort(byDate).slice(0, 5)
-        .map(g => ({
-          date:      g.DateTime ? new Date(g.DateTime).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '',
-          awayAbbr:  g.AwayTeam,
-          homeAbbr:  g.HomeTeam,
-          awayScore: g.AwayTeamScore,
-          homeScore: g.HomeTeamScore,
-          awayWon:   g.AwayTeamScore > g.HomeTeamScore,
-        }));
+      awayInjuries = (allInjuries || []).filter(p => (p.player?.team?.abbreviation || '') === awayAbbr).slice(0, 8).map(mapInj);
+      homeInjuries = (allInjuries || []).filter(p => (p.player?.team?.abbreviation || '') === homeAbbr).slice(0, 8).map(mapInj);
     }
 
-    // ── 4. NHL goalie matchup (season stats for starting goalies) ──
+    // ── Team season stats ──
+    let awayTeamStats = null, homeTeamStats = null;
+
+    if (L === 'NBA') {
+      const teamStatsRaw = await bdl.getTeamStats(2024);
+      if (Array.isArray(teamStatsRaw)) {
+        const find = (abbr) => teamStatsRaw.find(t => (t.team?.abbreviation || '') === abbr);
+        const mapStats = (t) => t ? {
+          ppg:   t.pts  != null ? Number(t.pts).toFixed(1)  : '--',
+          rpg:   t.reb  != null ? Number(t.reb).toFixed(1)  : '--',
+          apg:   t.ast  != null ? Number(t.ast).toFixed(1)  : '--',
+          fg:    t.fg_pct  != null ? `${(t.fg_pct  * 100).toFixed(1)}%` : '--',
+          three: t.fg3_pct != null ? `${(t.fg3_pct * 100).toFixed(1)}%` : '--',
+          ft:    t.ft_pct  != null ? `${(t.ft_pct  * 100).toFixed(1)}%` : '--',
+          tov:   t.turnover != null ? Number(t.turnover).toFixed(1) : '--',
+          blk:   t.blk != null ? Number(t.blk).toFixed(1) : '--',
+          stl:   t.stl != null ? Number(t.stl).toFixed(1) : '--',
+        } : null;
+        awayTeamStats = mapStats(find(awayAbbr));
+        homeTeamStats = mapStats(find(homeAbbr));
+      }
+    }
+
+    if (L === 'NHL') {
+      const standings = await nhlApi.getStandings();
+      if (Array.isArray(standings)) {
+        const find = (abbr) => standings.find(t => (t.teamAbbrev?.default || '') === abbr);
+        const mapStats = (t) => t ? {
+          gf:    t.goalFor   != null ? Number(t.goalFor   / (t.gamesPlayed || 1)).toFixed(2) : '--',
+          ga:    t.goalAgainst != null ? Number(t.goalAgainst / (t.gamesPlayed || 1)).toFixed(2) : '--',
+          ppPct: t.powerPlayPct != null ? `${t.powerPlayPct.toFixed(1)}%` : '--',
+          pkPct: t.penaltyKillPct != null ? `${t.penaltyKillPct.toFixed(1)}%` : '--',
+          wins:  t.wins  || 0,
+          losses: t.losses || 0,
+          otl:   t.otLosses || 0,
+        } : null;
+        awayTeamStats = mapStats(find(awayAbbr));
+        homeTeamStats = mapStats(find(homeAbbr));
+      }
+    }
+
+    if (L === 'MLB') {
+      const year = new Date().getFullYear().toString();
+      const divs = await mlbStats.getStandings(year);
+      if (Array.isArray(divs)) {
+        const all = divs.flatMap(d => d.teamRecords || []);
+        const find = (abbr) => all.find(t => t.team?.abbreviation === abbr);
+        const mapStats = (t) => t ? {
+          w:    t.wins   || 0,
+          l:    t.losses || 0,
+          pct:  t.winningPercentage || '--',
+          gb:   t.gamesBack || '--',
+          rs:   t.runsScored    != null ? Number(t.runsScored    / (t.gamesPlayed || 1)).toFixed(2) : '--',
+          ra:   t.runsAllowed   != null ? Number(t.runsAllowed   / (t.gamesPlayed || 1)).toFixed(2) : '--',
+        } : null;
+        awayTeamStats = mapStats(find(awayAbbr));
+        homeTeamStats = mapStats(find(homeAbbr));
+      }
+    }
+
+    // ── NHL goalie matchup ──
     let goalieMatchup = null;
     if (L === 'NHL') {
       try {
-        const [boxRaw, seasonStats] = await Promise.all([
-          sd.nhlBoxScore(gameId),
-          sd.nhlPlayerSeasonStats(season),
-        ]);
-
-        // Identify starting goalies from box score (first goalie per team)
-        const playerGames = boxRaw?.PlayerGames || [];
-        const awayStarterRaw = playerGames.find(p => p.Team === awayAbbr && p.Position === 'G');
-        const homeStarterRaw = playerGames.find(p => p.Team === homeAbbr && p.Position === 'G');
-        const allStats = Array.isArray(seasonStats) ? seasonStats : [];
-
-        const buildGoalieSeason = (starterRaw) => {
-          if (!starterRaw) return null;
-          const ss = allStats.find(p => p.PlayerID === starterRaw.PlayerID) || {};
-          const wins   = ss.Wins   || 0;
-          const losses = ss.Losses || 0;
-          const otl    = ss.OvertimeLosses || 0;
-          return {
-            name:  starterRaw.Name,
-            svPct: ss.SavePercentage != null ? ss.SavePercentage.toFixed(3) : '--',
-            gaa:   ss.GoalsAgainstAverage != null ? ss.GoalsAgainstAverage.toFixed(2) : '--',
-            record: `${wins}-${losses}-${otl}`,
-          };
-        };
-
-        goalieMatchup = {
-          away: buildGoalieSeason(awayStarterRaw),
-          home: buildGoalieSeason(homeStarterRaw),
-        };
-      } catch (_) { goalieMatchup = null; }
-    }
-
-    // ── 5. Team season stats (for pre-match matchup bars) ──
-    let awayTeamStats = null, homeTeamStats = null;
-    try {
-      let teamStatsRaw = null;
-      if (L === 'NBA')      teamStatsRaw = await sd.nbaTeamSeasonStats(season);
-      else if (L === 'NHL') teamStatsRaw = await sd.nhlTeamSeasonStats(season);
-      else if (L === 'MLB') teamStatsRaw = await sd.mlbTeamSeasonStats(season);
-
-      if (Array.isArray(teamStatsRaw)) {
-        const awayRaw = teamStatsRaw.find(t => t.Team === awayAbbr);
-        const homeRaw = teamStatsRaw.find(t => t.Team === homeAbbr);
-        const pct = (v) => v != null ? (v > 1 ? v.toFixed(1) : (v * 100).toFixed(1)) : '--';
-        const fix1 = (v) => v != null ? Number(v).toFixed(1) : '--';
-        const fix2 = (v) => v != null ? Number(v).toFixed(2) : '--';
-        const fix3 = (v) => v != null ? Number(v).toFixed(3) : '--';
-
-        if (L === 'NBA') {
-          const map = (t) => t ? {
-            ppg:   fix1(t.PointsPerGame),
-            rpg:   fix1(t.ReboundsPerGame),
-            apg:   fix1(t.AssistsPerGame),
-            fg:    pct(t.FieldGoalsPercentage),
-            three: pct(t.ThreePointersPercentage),
-            ft:    pct(t.FreeThrowsPercentage),
-            tov:   fix1(t.TurnoversPerGame),
-            blk:   fix1(t.BlocksPerGame),
-            stl:   fix1(t.StealsPerGame),
-            ortg:  t.OffensiveRating != null ? Number(t.OffensiveRating).toFixed(1) : '--',
-            drtg:  t.DefensiveRating != null ? Number(t.DefensiveRating).toFixed(1) : '--',
+        const boxData = await nhlApi.getBoxScore(gameId);
+        if (boxData) {
+          const mapGoalie = (g) => g ? {
+            name:   g.name?.default || '',
+            svPct:  g.savePercentage != null ? g.savePercentage.toFixed(3) : '--',
+            gaa:    '--',  // Not available from box score alone
+            record: '--',
           } : null;
-          awayTeamStats = map(awayRaw);
-          homeTeamStats = map(homeRaw);
-        } else if (L === 'NHL') {
-          const map = (t) => t ? {
-            sog:   fix1(t.ShotsOnGoalPerGame),
-            gf:    fix2(t.GoalsPerGame),
-            ga:    fix2(t.GoalsAgainstPerGame),
-            ppPct: pct(t.PowerPlayPercentage),
-            pkPct: pct(t.PenaltyKillPercentage),
-          } : null;
-          awayTeamStats = map(awayRaw);
-          homeTeamStats = map(homeRaw);
-        } else if (L === 'MLB') {
-          const map = (t) => t ? {
-            era: fix2(t.EarnedRunAverage),
-            avg: fix3(t.BattingAverage),
-            rpg: fix2(t.RunsPerGame),
-            hr:  fix2(t.HomeRunsPerGame),
-            so:  fix1(t.PitchingStrikeoutsPerGame || t.StrikeoutsPerGame),
-          } : null;
-          awayTeamStats = map(awayRaw);
-          homeTeamStats = map(homeRaw);
-        }
-      }
-    } catch (_) {}
-
-    // ── 6. NBA key players (top 3 scorers per team for matchup section) ──
-    let keyPlayers = null;
-    if (L === 'NBA') {
-      try {
-        const playerStats = await sd.nbaPlayerSeasonStats(season);
-        if (Array.isArray(playerStats)) {
-          const mapP = (p) => ({
-            name: p.Name || '',
-            pos:  p.Position || '--',
-            pts:  p.PointsPerGame != null    ? Number(p.PointsPerGame).toFixed(1)    : '--',
-            reb:  p.ReboundsPerGame != null  ? Number(p.ReboundsPerGame).toFixed(1)  : '--',
-            ast:  p.AssistsPerGame != null   ? Number(p.AssistsPerGame).toFixed(1)   : '--',
-            fg:   p.FieldGoalsPercentage != null
-                    ? `${(p.FieldGoalsPercentage > 1 ? p.FieldGoalsPercentage : p.FieldGoalsPercentage * 100).toFixed(1)}%`
-                    : '--',
-          });
-          const qualify = (p) => (p.Games || 0) >= 5;
-          const byPPG   = (a, b) => (b.PointsPerGame || 0) - (a.PointsPerGame || 0);
-          keyPlayers = {
-            away: playerStats.filter(p => p.Team === awayAbbr && qualify(p)).sort(byPPG).slice(0, 3).map(mapP),
-            home: playerStats.filter(p => p.Team === homeAbbr && qualify(p)).sort(byPPG).slice(0, 3).map(mapP),
-          };
+          const awayGoalies = boxData.playerByGameStats?.awayTeam?.goalies || [];
+          const homeGoalies = boxData.playerByGameStats?.homeTeam?.goalies || [];
+          if (awayGoalies.length || homeGoalies.length) {
+            goalieMatchup = {
+              away: mapGoalie(awayGoalies[0]),
+              home: mapGoalie(homeGoalies[0]),
+            };
+          }
         }
       } catch (_) {}
     }
 
-    res.json({ ...meta, awayInjuries, homeInjuries, awayLast5, homeLast5, headToHead, goalieMatchup, awayTeamStats, homeTeamStats, keyPlayers });
+    res.json({ ...empty, awayInjuries, homeInjuries, awayTeamStats, homeTeamStats, goalieMatchup });
   } catch (err) {
     console.error(`[/api/sports/gameinfo] ${err.message}`);
     res.json(empty);
