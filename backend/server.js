@@ -376,26 +376,32 @@ if (process.env.MOCK_MODE !== 'true') {
     }
   }, { timezone: 'America/New_York' });
 
-  // ── 9:15 AM ET — NBA player props run ────────────────────────────────────────
-  // The 4:30 AM model run skips player props because sportsbooks haven't posted lines yet.
-  // This second run fires 15 min after writePropLinesToDB fills player_props_history.
-  // --props-only skips team props (already written at 4:30 AM) and only generates
-  // player prop picks: points, rebounds, assists, threes, PRA, P+R, P+A, A+R.
+  // ── 9:15 AM ET — All sports player props run ─────────────────────────────────
+  // Sportsbooks post player prop lines between 9-10 AM ET.
+  // writePropLinesToDB (9 AM) has just filled player_props_history.
+  // NBA --props-only: re-runs full player projection with now-available lines.
+  // MLB --props-only: re-gates existing 4:30 AM projections against real lines.
+  // NHL --props-only: re-gates existing 4:30 AM projections against real lines.
   cron.schedule('15 9 * * *', async () => {
-    console.log('\n⏰ [9:15 AM] NBA player props run (lines now posted)…');
-    await runPipeline('NBA Player Props Run',
-      () => runPythonScript('nbaProjectionModel.py', ['--props-only'])
-    );
+    console.log('\n⏰ [9:15 AM] All sports player props run (lines now posted)…');
+    await Promise.allSettled([
+      runPipeline('NBA Player Props Run', () => runPythonScript('nbaProjectionModel.py', ['--props-only'])),
+      runPipeline('MLB Player Props Run', () => runPythonScript('mlbProjectionModel.py', ['--props-only'])),
+      runPipeline('NHL Player Props Run', () => runPythonScript('nhlProjectionModel.py', ['--props-only'])),
+    ]);
   }, { timezone: 'America/New_York' });
 
-  // ── 9:30 AM ET — NBA player prop edge detection ───────────────────────────────
+  // ── 9:30 AM ET — All sports player prop edge detection ───────────────────────
   // The 5:30 AM detectEdges() ran before player projections existed in chalk_projections.
-  // Now that --props-only has written player projections, run edge detection again to
-  // compare our projections against live prop lines and write chalk_edge + confidence
-  // to player_props_history. Required before generateModelPicks() can find player prop picks.
+  // Now projections are written (9:15 AM run) — re-run edge detection for all sports
+  // to write chalk_edge + confidence to player_props_history before pick generation.
   cron.schedule('30 9 * * *', async () => {
-    console.log('\n⏰ [9:30 AM] NBA player prop edge detection (post props-only run)…');
-    await runPipeline('NBA Player Prop Edges', () => detectEdges());
+    console.log('\n⏰ [9:30 AM] All sports player prop edge detection…');
+    await Promise.allSettled([
+      runPipeline('NBA Player Prop Edges', () => detectEdges()),
+      runPipeline('MLB Player Prop Edges', () => detectEdgesForSport('MLB')),
+      runPipeline('NHL Player Prop Edges', () => detectEdgesForSport('NHL')),
+    ]);
   }, { timezone: 'America/New_York' });
 
   // ── 9:45 AM ET — Generate Chalky's player prop picks ─────────────────────────
@@ -513,9 +519,99 @@ app.get('/api/model/accuracy', async (req, res) => {
   }
 });
 
+// ── Startup pipeline recovery ─────────────────────────────────────────────────
+// If Railway restarts the server after 4:30 AM ET with no picks for today,
+// the daily crons have already missed. This runs once on startup and re-runs
+// the appropriate pipeline steps based on the current ET time.
+async function recoverMissedPipeline() {
+  if (process.env.MOCK_MODE === 'true') return;
+
+  const today    = getTodayET();
+  const etOffset = isDST(new Date()) ? 4 : 5;
+  const etNow    = new Date(Date.now() - etOffset * 60 * 60 * 1000);
+  const etHour   = etNow.getUTCHours() + etNow.getUTCMinutes() / 60;
+
+  // Before 4:30 AM ET — crons will fire on schedule, nothing to recover
+  if (etHour < 4.5) {
+    console.log(`ℹ️  Startup at ${etNow.getUTCHours()}:${String(etNow.getUTCMinutes()).padStart(2,'0')} ET — crons will fire on schedule`);
+    return;
+  }
+
+  // After 10 PM ET — too late to run picks for today
+  if (etHour >= 22) return;
+
+  const db = require('./db');
+  try {
+    const { rows } = await db.query(
+      `SELECT COUNT(*) as count FROM picks WHERE pick_date = $1`, [today]
+    );
+    const pickCount = parseInt(rows[0].count);
+
+    if (pickCount > 0) {
+      console.log(`✅ Startup: ${pickCount} picks already exist for ${today}`);
+      return;
+    }
+
+    console.log(`\n⚠️  STARTUP RECOVERY: No picks for ${today} — server restarted after cron window`);
+    console.log(`   ET time: ${etNow.getUTCHours()}:${String(etNow.getUTCMinutes()).padStart(2,'0')}`);
+    console.log(`   Re-running pipeline from appropriate step…\n`);
+
+    // Always run roster + prop lines first (fast, idempotent)
+    await runPipeline('Recovery: Nightly Roster',  () => buildNightlyRoster());
+    const { writePropLinesToDB } = require('./services/oddsService');
+    await Promise.allSettled([
+      writePropLinesToDB('NBA', today).catch(e => console.error('Recovery props NBA:', e.message)),
+      writePropLinesToDB('NHL', today).catch(e => console.error('Recovery props NHL:', e.message)),
+      writePropLinesToDB('MLB', today).catch(e => console.error('Recovery props MLB:', e.message)),
+    ]);
+
+    // Run projection models (skipped if before 4:30 AM, but we're past that)
+    console.log('  Recovery: running projection models…');
+    await Promise.allSettled([
+      runPipeline('Recovery: NBA Model', () => runPythonScript('nbaProjectionModel.py')),
+      runPipeline('Recovery: MLB Model', () => runPythonScript('mlbProjectionModel.py')),
+      runPipeline('Recovery: NHL Model', () => runPythonScript('nhlProjectionModel.py')),
+    ]);
+
+    // Edge detection
+    console.log('  Recovery: running edge detection…');
+    await Promise.allSettled([
+      runPipeline('Recovery: NBA Edges', () => detectEdges()),
+      runPipeline('Recovery: MLB Edges', () => detectEdgesForSport('MLB')),
+      runPipeline('Recovery: NHL Edges', () => detectEdgesForSport('NHL')),
+      runPipeline('Recovery: NBA Teams', () => detectTeamBetEdges('NBA')),
+      runPipeline('Recovery: MLB Teams', () => detectTeamBetEdges('MLB')),
+      runPipeline('Recovery: NHL Teams', () => detectTeamBetEdges('NHL')),
+    ]);
+
+    // Pick generation
+    console.log('  Recovery: generating picks…');
+    await runPipeline('Recovery: Model Picks', async () => {
+      const picks = await generateModelPicks();
+      console.log(`  Recovery model picks: ${picks.length}`);
+    });
+    await Promise.allSettled([
+      runPipeline('Recovery: Game Picks', async () => {
+        const picks = await generatePicks();
+        console.log(`  Recovery game picks: ${picks.length}`);
+      }),
+      runPipeline('Recovery: Prop Picks', async () => {
+        const picks = await generatePropPicks();
+        console.log(`  Recovery prop picks: ${picks.length}`);
+      }),
+    ]);
+
+    console.log(`✅ Startup recovery complete for ${today}`);
+  } catch (err) {
+    console.error('Startup recovery failed:', err.message);
+  }
+}
+
 // ── Start ────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`\n🎯 Chalk API running on port ${PORT}`);
   console.log(`   Health: http://localhost:${PORT}/health`);
   console.log(`   Picks:  http://localhost:${PORT}/api/picks/today\n`);
+  // Fire-and-forget: recover missed pipeline steps if server restarted after 4:30 AM
+  setTimeout(() => recoverMissedPipeline().catch(e => console.error('Recovery error:', e.message)), 5000);
 });

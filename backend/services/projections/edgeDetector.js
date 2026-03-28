@@ -28,6 +28,17 @@ const BASE_URL     = 'https://api.the-odds-api.com/v4';
 const ODDS_API_KEY = process.env.ODDS_API_KEY;
 const MODEL_VERSION = 'v1.0';
 
+// Returns today's date in ET (YYYY-MM-DD), correct on UTC servers
+function getTodayET() {
+  const d = new Date();
+  const jan = new Date(d.getFullYear(), 0, 1).getTimezoneOffset();
+  const jul = new Date(d.getFullYear(), 6, 1).getTimezoneOffset();
+  const isDST = d.getTimezoneOffset() < Math.max(jan, jul);
+  const etOffset = isDST ? 4 : 5;
+  const etNow = new Date(Date.now() - etOffset * 60 * 60 * 1000);
+  return etNow.toISOString().split('T')[0];
+}
+
 // Per-sport minimum edge thresholds (projection − market line)
 // Different for each sport because scales differ (HR rate vs K count vs points)
 const MIN_EDGE_BY_SPORT = {
@@ -851,7 +862,7 @@ function calculateTeamBetConfidence({ coverProb, gamesUsed = 0, backupGoalie = f
  * Returns array of team bet pick objects.
  */
 async function detectTeamBetEdges(sport, gameDate) {
-  const today = gameDate || new Date().toISOString().split('T')[0];
+  const today = gameDate || getTodayET();
   const sportKey = SPORT_KEY_MAP[sport];
   if (!sportKey) return [];
 
@@ -1280,7 +1291,7 @@ async function isPlayerConfirmedPlaying(playerName, sport, gameDate) {
  *     (unless status is 'questionable' → null)
  */
 async function buildNightlyRoster(gameDate) {
-  const today = gameDate || new Date().toISOString().split('T')[0];
+  const today = gameDate || getTodayET();
   console.log(`\n📋 Building nightly_roster for ${today}...`);
 
   // Get tonight's NBA games
@@ -1373,7 +1384,7 @@ async function buildNightlyRoster(gameDate) {
  * Goalie starter status is resolved separately at puck-drop minus 90 min.
  */
 async function buildNHLRoster(gameDate) {
-  const today = gameDate || new Date().toISOString().split('T')[0];
+  const today = gameDate || getTodayET();
   console.log(`\n🏒 Building NHL nightly_roster for ${today}…`);
 
   let schedData = null;
@@ -1518,7 +1529,7 @@ async function getTeammateAstInjuryAdj(team, playerId, sport, gameDate) {
 // ── Main pipeline ──────────────────────────────────────────────────────────────
 
 async function detectEdges(gameDate) {
-  const today = gameDate || new Date().toISOString().split('T')[0];
+  const today = gameDate || getTodayET();
   console.log(`\n🔍 Edge Detector — ${today}`);
 
   // ── Step 1: Load our projections ────────────────────────────────────────────
@@ -1775,7 +1786,7 @@ async function detectEdges(gameDate) {
 // ── Read today's top edges across all sports (called by aiPicks.js) ──────────
 
 async function getTodaysEdges(gameDate, sport = null) {
-  const today = gameDate || new Date().toISOString().split('T')[0];
+  const today = gameDate || getTodayET();
   const sportClause = sport ? `AND pph.sport = '${sport}'` : '';
   const { rows } = await db.query(
     `SELECT pph.*, cp.opponent, cp.home_away, cp.factors_json
@@ -1796,7 +1807,7 @@ async function getTodaysEdges(gameDate, sport = null) {
 // ── Detect edges for MLB or NHL (same architecture as NBA detectEdges) ────────
 
 async function detectEdgesForSport(sport, gameDate) {
-  const today = gameDate || new Date().toISOString().split('T')[0];
+  const today = gameDate || getTodayET();
   const sportKey = SPORT_KEY_MAP[sport];
   if (!sportKey) return [];
 

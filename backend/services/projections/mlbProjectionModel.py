@@ -2308,26 +2308,22 @@ def upsert_player_projection(
 
     with conn.cursor() as cur:
         for prop_type, proj_value, prop_factors in prop_rows:
-            # Gate on market line from player_props_history — skip if no line posted
-            line = get_market_line(conn, player_name, prop_type, game_date)
-            if line is None:
-                continue  # No market line for this prop — not a tradeable market today
-
             # Resolve DB-stored prop_type (handles rbi→rbis, runs→runs_scored, etc.)
             db_prop_type = MLB_PROP_TYPE_MAP.get(prop_type, prop_type)
 
-            # Only write picks with meaningful edge vs the posted line
-            edge = round(proj_value - line, 2)
-            threshold = MLB_MIN_EDGE.get(db_prop_type, 0.15)
-            if abs(edge) < threshold:
-                continue  # Edge too small — not a pick
+            # Include market line + edge in factors if available (for UI display)
+            # Do NOT skip if no line — store all projections so --props-only and
+            # edge detector can find them after sportsbooks post lines at 9 AM
+            line = get_market_line(conn, player_name, prop_type, game_date)
 
             merged = dict(prop_factors)
             if 'context' in factors_all:
                 merged['context'] = factors_all['context']
             merged['lineup_confirmed'] = proj.get('lineup_confirmed', True)
-            merged['market_line'] = line
-            merged['edge'] = edge
+            if line is not None:
+                edge = round(proj_value - line, 2)
+                merged['market_line'] = line
+                merged['edge'] = edge
 
             cur.execute(
                 """INSERT INTO chalk_projections (

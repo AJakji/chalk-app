@@ -1563,19 +1563,15 @@ def upsert_player_projection(conn, player_id: int, player_name: str,
     if proj_value == 0 and prop_type in ('goals', 'shots_on_goal', 'toi', 'saves'):
         return
 
-    # Gate on market line from player_props_history — skip if no line posted
+    # Include market line in factors if available (for UI display and audit)
+    # Do NOT skip if no line — store all projections so --props-only and edge
+    # detector can find them after sportsbooks post lines at 9 AM
     line = get_market_line(conn, player_name, prop_type, game_date)
-    if line is None:
-        return  # No market line for this prop — not a tradeable market today
-
-    # Only write picks with meaningful edge vs the posted line
-    edge = round(proj_value - line, 2)
-    threshold = NHL_MIN_EDGE.get(prop_type, 0.3)
-    if abs(edge) < threshold:
-        return  # Edge too small — not a pick
-
-    # Store line and edge in factors for UI display and audit
-    stored_factors = {**factors, 'market_line': line, 'edge': edge}
+    if line is not None:
+        edge = round(proj_value - line, 2)
+        stored_factors = {**factors, 'market_line': line, 'edge': edge}
+    else:
+        stored_factors = dict(factors)
 
     try:
         with conn.cursor() as cur:
