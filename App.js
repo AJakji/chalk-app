@@ -12,6 +12,7 @@ import ResearchScreen from './src/screens/ResearchScreen';
 import PlayersScreen from './src/screens/PlayersScreen';
 import ChalkyOnboarding from './src/components/ChalkyOnboarding';
 import { colors } from './src/theme';
+import { navigationRef } from './src/navigationRef';
 
 const CLERK_PUBLISHABLE_KEY = 'pk_test_cXVhbGl0eS1wZXJjaC0zOC5jbGVyay5hY2NvdW50cy5kZXYk';
 
@@ -195,7 +196,7 @@ const tabStyles = StyleSheet.create({
 
 function MainApp() {
   return (
-    <NavigationContainer theme={ChalkNavTheme}>
+    <NavigationContainer ref={navigationRef} theme={ChalkNavTheme}>
       <ChalkyOnboarding />
       <Tab.Navigator
         screenOptions={{

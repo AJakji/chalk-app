@@ -20,6 +20,7 @@ import { askChalky } from '../services/api';
 import ChalkyMenuButton from '../components/ChalkyMenuButton';
 import ChalkyLogo from '../components/ChalkyLogo';
 import ReportModal from '../components/ReportModal';
+import { onResearchMessage } from '../researchBridge';
 import {
   FormattedText,
   ComponentRenderer,
@@ -208,6 +209,13 @@ export default function ResearchScreen() {
   const conversationHistory = useRef([]);
 
   const remaining = Math.max(0, DAILY_LIMIT - dailyCount);
+
+  // Listen for messages fired from player profiles / other screens
+  useEffect(() => {
+    return onResearchMessage((msg) => {
+      if (msg) send(msg);
+    });
+  }, [send]);
 
   const openReportModal = useCallback((message) => {
     setReportingMessage(message);

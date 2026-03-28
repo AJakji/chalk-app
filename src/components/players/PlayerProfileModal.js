@@ -7,6 +7,8 @@ import {
 import { colors, spacing, radius } from '../../theme';
 import { API_URL } from '../../config';
 import PlayerAvatar from './PlayerAvatar';
+import { navigate } from '../../navigationRef';
+import { sendToResearch } from '../../researchBridge';
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -310,8 +312,10 @@ export default function PlayerProfileModal({ playerId, playerLeague = 'NBA', pla
           <Pressable
             style={styles.askChalkyBtn}
             onPress={() => {
+              const message = `Tell me about ${displayName}'s stats and any prop bets available for them tonight`;
               onClose();
-              onAskChalky?.(`Tell me about ${displayName}'s stats and any prop bets available for them tonight`);
+              sendToResearch(message);
+              navigate('Research');
             }}
           >
             <Text style={styles.askChalkyBtnText}>Ask Chalky about {displayName} →</Text>
