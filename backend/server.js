@@ -15,6 +15,20 @@ const { runGoalieConfirmation, getConfirmationSchedule, router: goalieRouter } =
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// Returns true if date is in US Daylight Saving Time (second Sun Mar → first Sun Nov)
+function isDST(d) {
+  const jan = new Date(d.getFullYear(), 0, 1).getTimezoneOffset();
+  const jul = new Date(d.getFullYear(), 6, 1).getTimezoneOffset();
+  return d.getTimezoneOffset() < Math.max(jan, jul);
+}
+
+// Returns today's date in ET (YYYY-MM-DD), works correctly on UTC servers
+function getTodayET() {
+  const etOffset = isDST(new Date()) ? 4 : 5;
+  const etNow = new Date(Date.now() - etOffset * 60 * 60 * 1000);
+  return etNow.toISOString().split('T')[0];
+}
+
 // ── Middleware ──────────────────────────────────────────────────────────────
 app.use(cors());
 app.use(express.json());
@@ -300,20 +314,31 @@ if (process.env.MOCK_MODE !== 'true') {
     console.log('\n⏰ [6:55 AM] Pre-delivery verification…');
     try {
       const db = require('./db');
-      const today = new Date().toISOString().split('T')[0];
+      const today = getTodayET();
+
       const { rows } = await db.query(`
-        SELECT sport, COUNT(*) AS count
+        SELECT league, COUNT(*) AS count
         FROM picks
         WHERE pick_date = $1
-        GROUP BY sport
-        ORDER BY sport
+        GROUP BY league
+        ORDER BY league
       `, [today]);
 
-      if (rows.length === 0) {
-        console.error('🚨 6:55 AM ALERT: No picks in DB for today! aiPicks.js may have failed.');
+      const totalPicks = rows.reduce((sum, r) => sum + parseInt(r.count), 0);
+
+      if (totalPicks === 0) {
+        console.error(`\n🚨🚨🚨 CRITICAL ALERT 🚨🚨🚨`);
+        console.error(`ZERO PICKS GENERATED TODAY`);
+        console.error(`Date: ${today}`);
+        console.error(`Time: ${new Date().toISOString()}`);
+        console.error(`Check Railway logs immediately. Manual intervention required.`);
+        console.error(`  — Did 4:30 AM model run complete?`);
+        console.error(`  — Did BDL API return games? (check BALLDONTLIE_API_KEY)`);
+        console.error(`  — Did 5:30 AM edge detection find edges?`);
+        console.error(`  — Did 6:00 AM aiPicks.js run without crash?`);
       } else {
-        console.log('✅ 6:55 AM: Picks ready for delivery at 7:00 AM:');
-        rows.forEach(row => console.log(`   ${row.sport}: ${row.count} picks`));
+        console.log(`✅ 6:55 AM: ${totalPicks} picks live for ${today}:`);
+        rows.forEach(row => console.log(`   ${row.league}: ${row.count} picks`));
       }
     } catch (err) {
       console.error('🚨 6:55 AM verification failed:', err.message);
@@ -339,7 +364,7 @@ if (process.env.MOCK_MODE !== 'true') {
   // ── 9:00 AM ET — Write player prop lines to DB (all sports) ─────────────────
   // Runs after the 8 AM grader. Stores fresh lines for that night's games.
   cron.schedule('0 9 * * *', async () => {
-    const today = new Date().toISOString().split('T')[0];
+    const today = getTodayET();
     console.log(`\n⏰ [9:00 AM] Writing prop lines to DB for all sports (${today})…`);
     const { writePropLinesToDB } = require('./services/oddsService');
     try {
