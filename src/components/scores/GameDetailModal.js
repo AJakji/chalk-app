@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View,
   Text,
+  Image,
   ScrollView,
   TouchableOpacity,
   StyleSheet,
@@ -1750,7 +1751,41 @@ function ChalkyAnalysis({ chalkPick }) {
 
 // ── Team Leaders Section ──────────────────────────────────────────────────────
 
-function LeaderRow({ row }) {
+const _headshotCache = {};
+
+function LeaderAvatar({ name, league, align = 'left' }) {
+  const [url, setUrl] = useState(null);
+
+  useEffect(() => {
+    if (!name) return;
+    const key = `${league}:${name}`;
+    if (_headshotCache[key] !== undefined) { setUrl(_headshotCache[key]); return; }
+    fetch(`${require('../../config').API_URL}/api/players/search?q=${encodeURIComponent(name)}&league=${league}`)
+      .then(r => r.json())
+      .then(({ players }) => {
+        const hs = players?.[0]?.headshot || null;
+        _headshotCache[key] = hs;
+        setUrl(hs);
+      })
+      .catch(() => { _headshotCache[key] = null; });
+  }, [name, league]);
+
+  const initials = name ? name.split(' ').map(w => w[0]).filter(Boolean).slice(0, 2).join('') : '?';
+
+  return (
+    <View style={[preStyles.leaderAvatarWrap, align === 'right' && { alignSelf: 'flex-end' }]}>
+      {url ? (
+        <Image source={{ uri: url }} style={preStyles.leaderAvatar} />
+      ) : (
+        <View style={preStyles.leaderAvatarFallback}>
+          <Text style={preStyles.leaderAvatarInitials}>{initials}</Text>
+        </View>
+      )}
+    </View>
+  );
+}
+
+function LeaderRow({ row, league }) {
   if (!row) return null;
   return (
     <View style={preStyles.leaderRow}>
@@ -1758,6 +1793,7 @@ function LeaderRow({ row }) {
       <View style={preStyles.leaderSide}>
         {row.away ? (
           <>
+            <LeaderAvatar name={row.away.name} league={league} align="left" />
             <Text style={preStyles.leaderValue}>{row.away.value}<Text style={preStyles.leaderUnit}> {row.unit}</Text></Text>
             <Text style={preStyles.leaderName} numberOfLines={1}>{row.away.name}</Text>
           </>
@@ -1773,6 +1809,7 @@ function LeaderRow({ row }) {
       <View style={[preStyles.leaderSide, { alignItems: 'flex-end' }]}>
         {row.home ? (
           <>
+            <LeaderAvatar name={row.home.name} league={league} align="right" />
             <Text style={[preStyles.leaderValue, { textAlign: 'right' }]}>{row.home.value}<Text style={preStyles.leaderUnit}> {row.unit}</Text></Text>
             <Text style={[preStyles.leaderName, { textAlign: 'right' }]} numberOfLines={1}>{row.home.name}</Text>
           </>
@@ -1784,7 +1821,7 @@ function LeaderRow({ row }) {
   );
 }
 
-function TeamLeadersSection({ leaders, awayAbbr, homeAbbr, loading }) {
+function TeamLeadersSection({ leaders, awayAbbr, homeAbbr, loading, league }) {
   if (loading && !leaders) {
     return (
       <View style={preStyles.leadersBlock}>
@@ -1806,7 +1843,7 @@ function TeamLeadersSection({ leaders, awayAbbr, homeAbbr, loading }) {
         <Text style={[preStyles.leadersTeam, { textAlign: 'right' }]}>{homeAbbr}</Text>
       </View>
       {leaders.rows.map((row, i) => (
-        <LeaderRow key={row.label} row={row} />
+        <LeaderRow key={row.label} row={row} league={league} />
       ))}
     </View>
   );
@@ -1832,8 +1869,8 @@ function ChalkyTakeCard({ take, loading }) {
 }
 
 // ── Preview Tab ────────────────────────────────────────────────────────────────
-function PreviewTab({ game, gameInfo, loading, leadersData, chalkyTake, leadersLoading, chalkyLoading }) {
-  const { chalkPick, awayTeam, homeTeam, league } = game;
+function PreviewTab({ game, gameInfo, loading, leadersData, leadersLoading }) {
+  const { awayTeam, homeTeam, league } = game;
   const {
     awayLast5 = [], homeLast5 = [], headToHead = [],
     arena, arenaCity, awayRecord, homeRecord,
@@ -1939,25 +1976,12 @@ function PreviewTab({ game, gameInfo, loading, leadersData, chalkyTake, leadersL
             awayAbbr={awayTeam.abbr}
             homeAbbr={homeTeam.abbr}
             loading={leadersLoading}
+            league={league}
           />
         </View>
       )}
 
-      {/* 4. CHALKY'S TAKE */}
-      {(chalkyTake || chalkyLoading) && (
-        <View style={preStyles.section}>
-          <ChalkyTakeCard take={chalkyTake} loading={chalkyLoading} />
-        </View>
-      )}
-
-      {/* 5. CHALKY'S PICK (from picks engine, if game has a Chalk pick) */}
-      {chalkPick && (
-        <View style={preStyles.section}>
-          <ChalkyAnalysis chalkPick={chalkPick} />
-        </View>
-      )}
-
-      {/* 6. STARTING PITCHERS (MLB) or PROBABLE GOALIES (NHL) */}
+      {/* 4. STARTING PITCHERS (MLB) or PROBABLE GOALIES (NHL) */}
       {isMLB && (
         <View style={preStyles.section}>
           <Text style={preStyles.sectionTitle}>Probable Pitchers</Text>
@@ -2633,6 +2657,10 @@ const preStyles = StyleSheet.create({
   leaderUnit:     { fontSize: 11, fontWeight: '600', color: colors.grey },
   leaderName:     { fontSize: 11, color: colors.grey, lineHeight: 14 },
   leaderNA:       { fontSize: 14, color: colors.grey },
+  leaderAvatarWrap:      { marginBottom: 4 },
+  leaderAvatar:          { width: 36, height: 36, borderRadius: 18, backgroundColor: colors.surfaceAlt },
+  leaderAvatarFallback:  { width: 36, height: 36, borderRadius: 18, backgroundColor: colors.surfaceAlt, alignItems: 'center', justifyContent: 'center' },
+  leaderAvatarInitials:  { fontSize: 11, fontWeight: '700', color: colors.grey },
 
   // Chalky's Take card
   chalkyTakeCard:  { backgroundColor: '#0D2A1A', borderRadius: radius.md, borderLeftWidth: 3, borderLeftColor: colors.green, borderWidth: 1, borderColor: colors.green + '33', padding: spacing.md, gap: spacing.sm },
@@ -3805,9 +3833,6 @@ export default function GameDetailModal({ game, visible, onClose }) {
           <NHLStrengthBadge strength={nhlStrength} />
         )}
 
-        {/* Chalky pick */}
-        <ChalkBanner chalkPick={chalkPick} />
-
         {/* Tabs */}
         <TabBar activeTab={activeTab} onPress={setActiveTab} tabs={activeTabs} />
 
@@ -3824,9 +3849,7 @@ export default function GameDetailModal({ game, visible, onClose }) {
                 gameInfo={gameInfo}
                 loading={infoLoading}
                 leadersData={leadersData}
-                chalkyTake={chalkyTake}
                 leadersLoading={leadersLoading}
-                chalkyLoading={chalkyLoading}
               />
             )}
             {activeTab === 1 && (
