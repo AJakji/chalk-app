@@ -19,6 +19,7 @@ import { colors, spacing, radius } from '../theme';
 import { askChalky } from '../services/api';
 import ChalkyMenuButton from '../components/ChalkyMenuButton';
 import ChalkyLogo from '../components/ChalkyLogo';
+import ReportModal from '../components/ReportModal';
 import {
   FormattedText,
   ComponentRenderer,
@@ -69,7 +70,7 @@ function sanitizeMessage(text) {
 
 // ── Message bubble ────────────────────────────────────────────────────────────
 
-function ChatBubble({ message, onSend }) {
+function ChatBubble({ message, onSend, onReport }) {
   const isUser = message.role === 'user';
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(4)).current;
@@ -116,6 +117,13 @@ function ChatBubble({ message, onSend }) {
           message.components?.map((comp, i) => (
             <ComponentRenderer key={i} component={comp} index={i} />
           ))}
+
+        {/* Report button — only on completed assistant messages */}
+        {!isUser && !message.isStreaming && !message.isLimitMsg && onReport && (
+          <TouchableOpacity style={styles.reportBtn} onPress={() => onReport(message)} activeOpacity={0.7}>
+            <Text style={styles.reportBtnText}>⚑  Report a problem</Text>
+          </TouchableOpacity>
+        )}
 
       </View>
     </Animated.View>
@@ -193,11 +201,18 @@ export default function ResearchScreen() {
   const [isStreaming, setIsStreaming] = useState(false);
   const [dailyCount, setDailyCount] = useState(0);
   const [limitLoaded, setLimitLoaded] = useState(false);
+  const [reportModalVisible, setReportModalVisible] = useState(false);
+  const [reportingMessage, setReportingMessage] = useState(null);
   const scrollRef = useRef(null);
   const streamTimerRef = useRef(null);
   const conversationHistory = useRef([]);
 
   const remaining = Math.max(0, DAILY_LIMIT - dailyCount);
+
+  const openReportModal = useCallback((message) => {
+    setReportingMessage(message);
+    setReportModalVisible(true);
+  }, []);
 
   useEffect(() => {
     loadDailyCount().then((count) => {
@@ -218,7 +233,7 @@ export default function ResearchScreen() {
     scrollToBottom();
   }, [scrollToBottom]);
 
-  const startStreaming = useCallback((fullText, components, hasPick, visualData) => {
+  const startStreaming = useCallback((fullText, components, hasPick, visualData, userQuestion) => {
     const words = fullText.split(' ').filter(Boolean);
     if (words.length === 0) return;
     setIsStreaming(true);
@@ -242,6 +257,7 @@ export default function ResearchScreen() {
             components,
             hasPick,
             visualData: visualData || null,
+            userQuestion: userQuestion || '',
             isStreaming: false,
           });
           setStreamingMsg(null);
@@ -296,6 +312,7 @@ export default function ResearchScreen() {
         data.components || [],
         data.hasPick || false,
         data.visualData || null,
+        msg,
       );
     } catch {
       setLoading(false);
@@ -360,7 +377,7 @@ export default function ResearchScreen() {
             }
           >
             {messages.map((msg) => (
-              <ChatBubble key={msg.id} message={msg} onSend={send} />
+              <ChatBubble key={msg.id} message={msg} onSend={send} onReport={openReportModal} />
             ))}
 
             {/* Streaming bubble */}
@@ -414,6 +431,16 @@ export default function ResearchScreen() {
           </TouchableOpacity>
         </View>
       </KeyboardAvoidingView>
+
+      <ReportModal
+        visible={reportModalVisible}
+        onClose={() => {
+          setReportModalVisible(false);
+          setReportingMessage(null);
+        }}
+        question={reportingMessage?.userQuestion || ''}
+        chalkyResponse={reportingMessage?.content || ''}
+      />
     </SafeAreaView>
   );
 }
@@ -631,6 +658,18 @@ const styles = StyleSheet.create({
   },
   sendBtnTextDisabled: {
     color: colors.grey,
+  },
+
+  // Report button
+  reportBtn: {
+    marginTop: 6,
+    marginLeft: 4,
+    alignSelf: 'flex-start',
+  },
+  reportBtnText: {
+    fontSize: 11,
+    color: '#3a3a3a',
+    letterSpacing: 0.3,
   },
 
 });

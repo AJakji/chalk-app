@@ -567,3 +567,17 @@ CREATE TABLE IF NOT EXISTS league_averages (
   PRIMARY KEY (sport, stat_name, computed_date)
 );
 CREATE INDEX IF NOT EXISTS idx_la_sport_stat ON league_averages (sport, stat_name, computed_date DESC);
+
+-- User-submitted Chalky research reports
+CREATE TABLE IF NOT EXISTS research_reports (
+  id              SERIAL PRIMARY KEY,
+  user_id         TEXT,
+  question        TEXT NOT NULL,
+  chalky_response TEXT,
+  details         TEXT,
+  sport           TEXT,
+  screenshot_url  TEXT,
+  status          TEXT NOT NULL DEFAULT 'open',
+  created_at      TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_rr_status_date ON research_reports (status, created_at DESC);

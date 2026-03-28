@@ -25,6 +25,15 @@
     "web": {
       "favicon": "./assets/favicon.png"
     },
+    "plugins": [
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow Chalk to access your photos to upload screenshots",
+          "cameraPermission": "Allow Chalk to use your camera to capture a screenshot"
+        }
+      ]
+    ],
     "extra": {
       "eas": {
         "projectId": ""
