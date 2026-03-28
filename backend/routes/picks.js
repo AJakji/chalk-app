@@ -152,6 +152,72 @@ const MOCK_PICKS = [
   },
 ];
 
+// GET /api/picks
+// Returns today's picks ordered by confidence DESC.
+// Optional: ?sport=NBA  → only that sport (for league tabs)
+// Optional: ?limit=5    → cap results (default 5)
+// Optional: ?date=YYYY-MM-DD → specific date (defaults to today)
+// No sport param → all sports (for Chalky's Picks tab)
+router.get('/', async (req, res) => {
+  if (process.env.MOCK_MODE === 'true') {
+    let mock = [...MOCK_PICKS].sort((a, b) => b.confidence - a.confidence);
+    if (req.query.sport) mock = mock.filter(p => p.league === req.query.sport);
+    const limit = parseInt(req.query.limit || '5', 10);
+    return res.json({ picks: mock.slice(0, limit) });
+  }
+
+  try {
+    const date  = req.query.date  || new Date().toISOString().split('T')[0];
+    const limit = parseInt(req.query.limit || '5', 10);
+    const sport = req.query.sport || null;
+
+    let query, params;
+    if (sport) {
+      query  = `SELECT * FROM picks WHERE pick_date = $1 AND league = $2 ORDER BY confidence DESC LIMIT $3`;
+      params = [date, sport, limit];
+    } else {
+      query  = `SELECT * FROM picks WHERE pick_date = $1 ORDER BY confidence DESC LIMIT $2`;
+      params = [date, limit];
+    }
+
+    const { rows } = await db.query(query, params);
+    res.json({ picks: rows });
+  } catch (err) {
+    console.error('Error fetching picks:', err);
+    res.status(500).json({ error: 'Failed to load picks' });
+  }
+});
+
+// GET /api/picks/counts
+// Returns how many picks exist per sport today, plus a CHALKY total (capped at 5).
+// Used to show count badges on league tabs.
+router.get('/counts', async (req, res) => {
+  if (process.env.MOCK_MODE === 'true') {
+    return res.json({ counts: { NBA: 4, CHALKY: 4 } });
+  }
+
+  try {
+    const date = req.query.date || new Date().toISOString().split('T')[0];
+    const { rows } = await db.query(
+      `SELECT league AS sport, COUNT(*) AS total
+         FROM picks
+        WHERE pick_date = $1
+        GROUP BY league
+        UNION ALL
+       SELECT 'CHALKY' AS sport, LEAST(COUNT(*), 5) AS total
+         FROM picks
+        WHERE pick_date = $1`,
+      [date]
+    );
+    const counts = {};
+    for (const row of rows) counts[row.sport] = parseInt(row.total, 10);
+    res.json({ counts });
+  } catch (err) {
+    console.error('Error fetching pick counts:', err);
+    res.status(500).json({ counts: {} });
+  }
+});
+
 // GET /api/picks/today
 // In MOCK_MODE: returns static picks instantly — no API credits used.
 // In live mode: fetches from DB, generates via Claude if none exist yet.

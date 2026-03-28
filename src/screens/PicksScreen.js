@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View, Text, Image, FlatList, ScrollView, StyleSheet,
   SafeAreaView, StatusBar, ActivityIndicator, TouchableOpacity, Animated,
@@ -12,7 +12,7 @@ import PickDetailModal from '../components/picks/PickDetailModal';
 import PropDetailModal from '../components/picks/PropDetailModal';
 import ChalkyMenuButton from '../components/ChalkyMenuButton';
 import ChalkyLogo from '../components/ChalkyLogo';
-import { fetchTodaysPicks } from '../services/api';
+import { fetchPicksForTab, fetchPickCounts } from '../services/api';
 
 const TABS = ["Chalky's Picks", 'NBA', 'MLB', 'NHL', 'Soccer', 'WNBA'];
 
@@ -71,9 +71,10 @@ function ChalkysPicksHeader({ date, totalCount, highConfCount }) {
 }
 
 export default function PicksScreen() {
-  const [picks, setPicks] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(false);
+  const [picks, setPicks]         = useState([]);
+  const [counts, setCounts]       = useState({});  // { NBA: 12, NHL: 8, CHALKY: 5, ... }
+  const [loading, setLoading]     = useState(true);
+  const [error, setError]         = useState(false);
   const [selectedPick, setSelectedPick] = useState(null);
   const [activeTab, setActiveTab] = useState("Chalky's Picks");
 
@@ -81,11 +82,12 @@ export default function PicksScreen() {
     weekday: 'long', month: 'long', day: 'numeric',
   });
 
-  const loadPicks = useCallback(async () => {
+  // Fetch picks for the active tab — each tab is independently ranked 1–5
+  const loadPicks = useCallback(async (tab) => {
     setLoading(true);
     setError(false);
     try {
-      const data = await fetchTodaysPicks();
+      const data = await fetchPicksForTab(tab);
       setPicks(data);
     } catch (err) {
       console.warn('Picks API unavailable:', err.message);
@@ -95,18 +97,19 @@ export default function PicksScreen() {
     }
   }, []);
 
-  useEffect(() => { loadPicks(); }, [loadPicks]);
+  // Fetch count badges once on mount
+  useEffect(() => {
+    fetchPickCounts().then(setCounts).catch(() => {});
+  }, []);
 
-  // Filtered picks based on active tab
-  const displayedPicks = useMemo(() => {
-    const sorted = [...picks].sort((a, b) => b.confidence - a.confidence);
-    if (activeTab === "Chalky's Picks") return sorted.slice(0, 5);
-    return sorted.filter(p => p.league === activeTab);
-  }, [picks, activeTab]);
+  // Re-fetch whenever the active tab changes
+  useEffect(() => { loadPicks(activeTab); }, [activeTab, loadPicks]);
 
-  const topPickId = picks.length > 0
-    ? picks.reduce((best, p) => p.confidence > best.confidence ? p : best, picks[0]).id
-    : null;
+  // Picks are already sorted by confidence from the backend — use as-is
+  const displayedPicks = picks;
+
+  // Top pick is always index 0 in the current view
+  const topPickId = picks.length > 0 ? picks[0].id : null;
 
   const highConfCount = picks.filter(p => p.confidence >= 80).length;
 
@@ -138,8 +141,10 @@ export default function PicksScreen() {
         contentContainerStyle={styles.tabBar}
       >
         {TABS.map((tab) => {
-          const isActive = activeTab === tab;
-          const isChalky = tab === "Chalky's Picks";
+          const isActive  = activeTab === tab;
+          const isChalky  = tab === "Chalky's Picks";
+          const countKey  = isChalky ? 'CHALKY' : tab;
+          const count     = counts[countKey];
           return (
             <TouchableOpacity
               key={tab}
@@ -159,6 +164,11 @@ export default function PicksScreen() {
               ]}>
                 {TAB_LABELS[tab] || tab}
               </Text>
+              {count != null && count > 0 && (
+                <Text style={[styles.tabCount, isActive && styles.tabCountActive]}>
+                  {count}
+                </Text>
+              )}
             </TouchableOpacity>
           );
         })}
@@ -183,7 +193,7 @@ export default function PicksScreen() {
           <Image source={CHALKY_PNG} style={styles.emptyImage} resizeMode="contain" />
           <Text style={styles.emptyTitle}>Can't reach the server.</Text>
           <Text style={styles.emptyText}>Check your connection and try again.</Text>
-          <TouchableOpacity style={styles.retryBtn} onPress={loadPicks}>
+          <TouchableOpacity style={styles.retryBtn} onPress={() => loadPicks(activeTab)}>
             <Text style={styles.retryText}>Retry</Text>
           </TouchableOpacity>
         </View>
@@ -202,19 +212,22 @@ export default function PicksScreen() {
           }
           renderItem={({ item, index }) => (
             <StaggeredItem index={index}>
-              {item.pickCategory === 'prop' ? (
-                <PropPickCard
-                  pick={item}
-                  onPress={setSelectedPick}
-                  isTopPick={item.id === topPickId}
-                />
-              ) : (
-                <PickCard
-                  pick={item}
-                  onPress={setSelectedPick}
-                  isTopPick={item.id === topPickId}
-                />
-              )}
+              <View>
+                <Text style={styles.pickRank}>#{index + 1}</Text>
+                {item.pickCategory === 'prop' ? (
+                  <PropPickCard
+                    pick={item}
+                    onPress={setSelectedPick}
+                    isTopPick={item.id === topPickId}
+                  />
+                ) : (
+                  <PickCard
+                    pick={item}
+                    onPress={setSelectedPick}
+                    isTopPick={item.id === topPickId}
+                  />
+                )}
+              </View>
             </StaggeredItem>
           )}
           ListEmptyComponent={
@@ -309,6 +322,25 @@ const styles = StyleSheet.create({
   tabText: { fontSize: 13, fontWeight: '600', color: colors.grey },
   tabTextActive: { color: colors.background },
   tabTextActiveChalky: { color: colors.green },
+  tabCount: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: colors.grey,
+    backgroundColor: colors.background,
+    borderRadius: 8,
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+    overflow: 'hidden',
+  },
+  tabCountActive: { color: colors.offWhite },
+  pickRank: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: colors.grey,
+    letterSpacing: 0.5,
+    marginBottom: 4,
+    marginLeft: 2,
+  },
   // Chalky's Picks header card
   chalkysHeader: {
     backgroundColor: colors.surface,

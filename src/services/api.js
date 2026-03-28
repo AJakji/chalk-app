@@ -253,6 +253,30 @@ export async function fetchTodaysPicks() {
   return picks.map(normalizePick);
 }
 
+// Fetch top 5 picks for a specific tab, independently ranked.
+// tab = "Chalky's Picks" → top 5 across all sports
+// tab = "NBA" / "NHL" / etc. → top 5 for that sport, ranked 1–5 within it
+export async function fetchPicksForTab(tab, date) {
+  const dateParam = date || new Date().toISOString().split('T')[0];
+  const isChalky  = tab === "Chalky's Picks";
+  const url = isChalky
+    ? `${API_URL}/api/picks?date=${dateParam}&limit=5`
+    : `${API_URL}/api/picks?date=${dateParam}&sport=${encodeURIComponent(tab)}&limit=5`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Picks API error: ${res.status}`);
+  const { picks } = await res.json();
+  return picks.map(normalizePick);
+}
+
+// Fetch per-sport pick counts for tab badges.
+export async function fetchPickCounts(date) {
+  const dateParam = date || new Date().toISOString().split('T')[0];
+  const res = await fetch(`${API_URL}/api/picks/counts?date=${dateParam}`);
+  if (!res.ok) return {};
+  const { counts } = await res.json();
+  return counts || {};
+}
+
 export async function fetchPickById(id) {
   const res = await fetch(`${API_URL}/api/picks/${id}`);
   if (!res.ok) throw new Error(`Pick not found: ${res.status}`);
