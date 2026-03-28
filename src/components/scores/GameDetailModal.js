@@ -361,7 +361,64 @@ function PlayerTable({ players, teamName, awayAbbr, onPlayerPress }) {
 
 // ── Box Score Tab ─────────────────────────────────────────────────────────────
 
+// ── Shared team selector ──────────────────────────────────────────────────────
+
+function TeamSelector({ awayAbbr, awayName, homeAbbr, homeName, selected, onSelect }) {
+  return (
+    <View style={styles.teamSelector}>
+      <TouchableOpacity
+        style={[styles.teamBtn, selected === 'away' && styles.teamBtnActive]}
+        onPress={() => onSelect('away')}
+        activeOpacity={0.8}
+      >
+        <Text style={styles.teamBtnAbbr}>{awayAbbr}</Text>
+        <Text style={[styles.teamBtnName, selected === 'away' && styles.teamBtnNameActive]} numberOfLines={1}>
+          {awayName}
+        </Text>
+      </TouchableOpacity>
+      <View style={styles.teamSelectorDivider}>
+        <Text style={styles.vsText}>VS</Text>
+      </View>
+      <TouchableOpacity
+        style={[styles.teamBtn, selected === 'home' && styles.teamBtnActive]}
+        onPress={() => onSelect('home')}
+        activeOpacity={0.8}
+      >
+        <Text style={styles.teamBtnAbbr}>{homeAbbr}</Text>
+        <Text style={[styles.teamBtnName, selected === 'home' && styles.teamBtnNameActive]} numberOfLines={1}>
+          {homeName}
+        </Text>
+      </TouchableOpacity>
+    </View>
+  );
+}
+
+function MLBStatFilter({ view, onSelect }) {
+  return (
+    <View style={styles.mlbFilter}>
+      <TouchableOpacity
+        style={[styles.mlbFilterBtn, view === 'batting' && styles.mlbFilterBtnActive]}
+        onPress={() => onSelect('batting')}
+        activeOpacity={0.8}
+      >
+        <Text style={[styles.mlbFilterText, view === 'batting' && styles.mlbFilterTextActive]}>Batting</Text>
+      </TouchableOpacity>
+      <TouchableOpacity
+        style={[styles.mlbFilterBtn, view === 'pitching' && styles.mlbFilterBtnActive]}
+        onPress={() => onSelect('pitching')}
+        activeOpacity={0.8}
+      >
+        <Text style={[styles.mlbFilterText, view === 'pitching' && styles.mlbFilterTextActive]}>Pitching</Text>
+      </TouchableOpacity>
+    </View>
+  );
+}
+
+// ── NBA Box Score Tab ─────────────────────────────────────────────────────────
+
 function BoxScoreTab({ game, boxScore, loading, onPlayerPress }) {
+  const [selectedTeam, setSelectedTeam] = useState('away');
+
   if (loading && !boxScore) return <SkeletonBoxScore />;
 
   if (!boxScore) {
@@ -375,40 +432,47 @@ function BoxScoreTab({ game, boxScore, loading, onPlayerPress }) {
     );
   }
 
+  const isAway = selectedTeam === 'away';
+  const teamPlayers = isAway ? boxScore.away?.players : boxScore.home?.players;
+  const teamName    = isAway ? game.awayTeam.name : game.homeTeam.name;
+  const teamAbbr    = isAway ? game.awayTeam.abbr : game.homeTeam.abbr;
+
   return (
-    <View style={{ paddingHorizontal: spacing.md }}>
-      {/* Line score */}
-      <Text style={styles.sectionLabel}>Line Score</Text>
-      <LineScore
-        quarters={boxScore.quarters}
+    <View>
+      <View style={{ paddingHorizontal: spacing.md }}>
+        <Text style={styles.sectionLabel}>Line Score</Text>
+        <LineScore
+          quarters={boxScore.quarters}
+          awayAbbr={game.awayTeam.abbr}
+          homeAbbr={game.homeTeam.abbr}
+        />
+        <Text style={[styles.sectionLabel, { marginTop: spacing.lg }]}>Team Stats</Text>
+        <TeamStatsBlock
+          awayStats={boxScore.awayStats}
+          homeStats={boxScore.homeStats}
+          awayAbbr={game.awayTeam.abbr}
+          homeAbbr={game.homeTeam.abbr}
+        />
+      </View>
+
+      <TeamSelector
         awayAbbr={game.awayTeam.abbr}
+        awayName={game.awayTeam.name}
         homeAbbr={game.homeTeam.abbr}
+        homeName={game.homeTeam.name}
+        selected={selectedTeam}
+        onSelect={setSelectedTeam}
       />
 
-      {/* Team stats */}
-      <Text style={[styles.sectionLabel, { marginTop: spacing.lg }]}>Team Stats</Text>
-      <TeamStatsBlock
-        awayStats={boxScore.awayStats}
-        homeStats={boxScore.homeStats}
-        awayAbbr={game.awayTeam.abbr}
-        homeAbbr={game.homeTeam.abbr}
-      />
-
-      {/* Player tables */}
-      <PlayerTable
-        players={boxScore.away?.players}
-        teamName={game.awayTeam.name}
-        awayAbbr={game.awayTeam.abbr}
-        onPlayerPress={onPlayerPress}
-      />
-      <PlayerTable
-        players={boxScore.home?.players}
-        teamName={game.homeTeam.name}
-        awayAbbr={game.homeTeam.abbr}
-        onPlayerPress={onPlayerPress}
-      />
-
-      <View style={{ height: 40 }} />
+      <View style={{ paddingHorizontal: spacing.md }}>
+        <PlayerTable
+          players={teamPlayers}
+          teamName={teamName}
+          awayAbbr={teamAbbr}
+          onPlayerPress={onPlayerPress}
+        />
+        <View style={{ height: 40 }} />
+      </View>
     </View>
   );
 }
@@ -1006,6 +1070,14 @@ function MLBPitchingTable({ pitchers, teamName, onPlayerPress }) {
 }
 
 function MLBBoxScoreTab({ game, boxScore, loading, onPlayerPress }) {
+  const [selectedTeam, setSelectedTeam] = useState('away');
+  const [mlbView, setMlbView] = useState('batting');
+
+  const handleTeamChange = (team) => {
+    setSelectedTeam(team);
+    setMlbView('batting');
+  };
+
   if (loading && !boxScore) {
     return (
       <View style={{ padding: spacing.md, gap: spacing.md }}>
@@ -1028,29 +1100,51 @@ function MLBBoxScoreTab({ game, boxScore, loading, onPlayerPress }) {
     );
   }
 
+  const isAway  = selectedTeam === 'away';
+  const teamBs  = isAway ? boxScore.away : boxScore.home;
+  const teamName = isAway ? game.awayTeam.name : game.homeTeam.name;
+
   return (
-    <View style={{ paddingHorizontal: spacing.md }}>
-      {/* Inning line score */}
-      <Text style={styles.sectionLabel}>Line Score</Text>
-      <MLBInningLineScore
-        innings={boxScore.innings || []}
+    <View>
+      <View style={{ paddingHorizontal: spacing.md }}>
+        <Text style={styles.sectionLabel}>Line Score</Text>
+        <MLBInningLineScore
+          innings={boxScore.innings || []}
+          awayAbbr={game.awayTeam.abbr}
+          homeAbbr={game.homeTeam.abbr}
+          awayRHE={boxScore.awayRHE}
+          homeRHE={boxScore.homeRHE}
+        />
+      </View>
+
+      <TeamSelector
         awayAbbr={game.awayTeam.abbr}
+        awayName={game.awayTeam.name}
         homeAbbr={game.homeTeam.abbr}
-        awayRHE={boxScore.awayRHE}
-        homeRHE={boxScore.homeRHE}
+        homeName={game.homeTeam.name}
+        selected={selectedTeam}
+        onSelect={handleTeamChange}
       />
 
-      {/* Batting tables */}
-      <Text style={[styles.sectionLabel, { marginTop: spacing.lg }]}>Batting</Text>
-      <MLBBattingTable batters={boxScore.away?.batters} totals={boxScore.away?.totals} teamName={game.awayTeam.name} onPlayerPress={onPlayerPress} />
-      <MLBBattingTable batters={boxScore.home?.batters} totals={boxScore.home?.totals} teamName={game.homeTeam.name} onPlayerPress={onPlayerPress} />
+      <MLBStatFilter view={mlbView} onSelect={setMlbView} />
 
-      {/* Pitching tables */}
-      <Text style={[styles.sectionLabel, { marginTop: spacing.lg }]}>Pitching</Text>
-      <MLBPitchingTable pitchers={boxScore.away?.pitchers} teamName={game.awayTeam.name} onPlayerPress={onPlayerPress} />
-      <MLBPitchingTable pitchers={boxScore.home?.pitchers} teamName={game.homeTeam.name} onPlayerPress={onPlayerPress} />
-
-      <View style={{ height: 40 }} />
+      <View style={{ paddingHorizontal: spacing.md }}>
+        {mlbView === 'batting' ? (
+          <MLBBattingTable
+            batters={teamBs?.batters}
+            totals={teamBs?.totals}
+            teamName={teamName}
+            onPlayerPress={onPlayerPress}
+          />
+        ) : (
+          <MLBPitchingTable
+            pitchers={teamBs?.pitchers}
+            teamName={teamName}
+            onPlayerPress={onPlayerPress}
+          />
+        )}
+        <View style={{ height: 40 }} />
+      </View>
     </View>
   );
 }
@@ -2652,6 +2746,23 @@ const preStyles = StyleSheet.create({
   leaderAvatarFallback:  { width: 36, height: 36, borderRadius: 18, backgroundColor: colors.surfaceAlt, alignItems: 'center', justifyContent: 'center' },
   leaderAvatarInitials:  { fontSize: 11, fontWeight: '700', color: colors.grey },
 
+  // Team selector
+  teamSelector:         { flexDirection: 'row', marginHorizontal: spacing.md, marginVertical: 12, backgroundColor: '#0f0f0f', borderRadius: 12, borderWidth: 1, borderColor: colors.border, overflow: 'hidden' },
+  teamBtn:              { flex: 1, paddingVertical: 14, paddingHorizontal: 12, alignItems: 'center', backgroundColor: '#0f0f0f' },
+  teamBtnActive:        { backgroundColor: '#141414', borderBottomWidth: 2, borderBottomColor: colors.green },
+  teamBtnAbbr:          { fontSize: 18, fontWeight: '800', color: colors.offWhite, letterSpacing: 1 },
+  teamBtnName:          { fontSize: 11, color: colors.grey, marginTop: 3, letterSpacing: 0.3 },
+  teamBtnNameActive:    { color: colors.green },
+  teamSelectorDivider:  { width: 1, backgroundColor: colors.border, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 12 },
+  vsText:               { fontSize: 10, color: '#3a3a3a', fontWeight: '700', letterSpacing: 2 },
+
+  // MLB stat filter
+  mlbFilter:            { flexDirection: 'row', marginHorizontal: spacing.md, marginBottom: 12, backgroundColor: '#0f0f0f', borderRadius: 8, borderWidth: 1, borderColor: colors.border, padding: 3 },
+  mlbFilterBtn:         { flex: 1, paddingVertical: 8, alignItems: 'center', borderRadius: 6 },
+  mlbFilterBtnActive:   { backgroundColor: '#141414' },
+  mlbFilterText:        { fontSize: 13, color: colors.grey, fontWeight: '500' },
+  mlbFilterTextActive:  { color: colors.offWhite, fontWeight: '600' },
+
   // Chalky's Take card
   chalkyTakeCard:  { backgroundColor: '#0D2A1A', borderRadius: radius.md, borderLeftWidth: 3, borderLeftColor: colors.green, borderWidth: 1, borderColor: colors.green + '33', padding: spacing.md, gap: spacing.sm },
   chalkyTakeLabel: { fontSize: 10, fontWeight: '800', color: colors.green, textTransform: 'uppercase', letterSpacing: 1 },
@@ -2840,6 +2951,8 @@ function NHLGoalieTable({ goalies, teamName: tName, onPlayerPress }) {
 
 // Full NHL box score tab
 function NHLBoxScoreTab({ game, boxScore, loading, onPlayerPress }) {
+  const [selectedTeam, setSelectedTeam] = useState('away');
+
   if (loading && !boxScore) {
     return (
       <View style={{ padding: spacing.md, gap: spacing.md }}>
@@ -2864,47 +2977,49 @@ function NHLBoxScoreTab({ game, boxScore, loading, onPlayerPress }) {
 
   const awayAbbr = game.awayTeam.abbr;
   const homeAbbr = game.homeTeam.abbr;
-  const awayName = game.awayTeam.name;
-  const homeName = game.homeTeam.name;
+  const isAway   = selectedTeam === 'away';
+  const teamBs   = isAway ? boxScore.away : boxScore.home;
+  const teamAbbr = isAway ? awayAbbr : homeAbbr;
 
   return (
-    <View style={{ paddingHorizontal: spacing.md, paddingTop: spacing.sm }}>
-      {/* Period line score */}
-      <Text style={styles.sectionLabel}>Line Score</Text>
-      <NHLPeriodLineScore
-        periods={boxScore.periods}
+    <View>
+      <View style={{ paddingHorizontal: spacing.md, paddingTop: spacing.sm }}>
+        <Text style={styles.sectionLabel}>Line Score</Text>
+        <NHLPeriodLineScore
+          periods={boxScore.periods}
+          awayAbbr={awayAbbr}
+          homeAbbr={homeAbbr}
+          awayScore={game.awayTeam.score}
+          homeScore={game.homeTeam.score}
+        />
+        {boxScore.teamStats && (
+          <>
+            <Text style={[styles.sectionLabel, { marginTop: spacing.md }]}>Team Stats</Text>
+            <NHLTeamStatsBlock
+              awayStats={boxScore.teamStats.away}
+              homeStats={boxScore.teamStats.home}
+              awayAbbr={awayAbbr}
+              homeAbbr={homeAbbr}
+            />
+          </>
+        )}
+      </View>
+
+      <TeamSelector
         awayAbbr={awayAbbr}
+        awayName={game.awayTeam.name}
         homeAbbr={homeAbbr}
-        awayScore={game.awayTeam.score}
-        homeScore={game.homeTeam.score}
+        homeName={game.homeTeam.name}
+        selected={selectedTeam}
+        onSelect={setSelectedTeam}
       />
 
-      {/* Team stats */}
-      {boxScore.teamStats && (
-        <>
-          <Text style={[styles.sectionLabel, { marginTop: spacing.md }]}>Team Stats</Text>
-          <NHLTeamStatsBlock
-            awayStats={boxScore.teamStats.away}
-            homeStats={boxScore.teamStats.home}
-            awayAbbr={awayAbbr}
-            homeAbbr={homeAbbr}
-          />
-        </>
-      )}
-
-      {/* Away skaters + goalies */}
-      <Text style={[styles.sectionLabel, { marginTop: spacing.md }]}>{awayName}</Text>
-      <NHLSkaterTable skaters={boxScore.away?.skaters} teamName={awayAbbr} onPlayerPress={onPlayerPress} />
-      <View style={{ height: spacing.sm }} />
-      <NHLGoalieTable goalies={boxScore.away?.goalies} teamName={awayAbbr} onPlayerPress={onPlayerPress} />
-
-      {/* Home skaters + goalies */}
-      <Text style={[styles.sectionLabel, { marginTop: spacing.md }]}>{homeName}</Text>
-      <NHLSkaterTable skaters={boxScore.home?.skaters} teamName={homeAbbr} onPlayerPress={onPlayerPress} />
-      <View style={{ height: spacing.sm }} />
-      <NHLGoalieTable goalies={boxScore.home?.goalies} teamName={homeAbbr} onPlayerPress={onPlayerPress} />
-
-      <View style={{ height: 40 }} />
+      <View style={{ paddingHorizontal: spacing.md }}>
+        <NHLSkaterTable skaters={teamBs?.skaters} teamName={teamAbbr} onPlayerPress={onPlayerPress} />
+        <View style={{ height: spacing.sm }} />
+        <NHLGoalieTable goalies={teamBs?.goalies} teamName={teamAbbr} onPlayerPress={onPlayerPress} />
+        <View style={{ height: 40 }} />
+      </View>
     </View>
   );
 }
