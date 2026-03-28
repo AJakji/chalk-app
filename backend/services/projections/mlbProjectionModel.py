@@ -180,6 +180,62 @@ MLB_PARK_FACTORS = {
 }
 
 
+# ── Domed / retractable-roof parks (weather irrelevant — always climate-controlled) ──
+# Tropicana Field: fully enclosed. The rest have retractable roofs that are
+# closed for ≥ 85% of home games. Applying real-time weather to these parks
+# produced systematic errors (e.g. Miami 88°F boosting hits at loanDepot).
+DOMED_PARKS = frozenset([
+    'tropicana field',
+    'rogers centre',
+    'minute maid park',
+    'globe life field',
+    'chase field',
+    'american family field',
+    'loandepot park',
+    'loan depot park',
+    'marlins park',
+])
+
+def is_domed_park(venue_name: str) -> bool:
+    return venue_name.lower().strip() in DOMED_PARKS
+
+
+# ── Live league averages (updated from DB weekly by computeLeagueAverages.py) ─
+
+def load_mlb_league_averages(conn) -> None:
+    """
+    Pull the most recent MLB league averages from the league_averages table
+    and update the global LEAGUE_AVG dict.  Falls back to hardcoded defaults
+    if the table is empty or the query fails.
+    """
+    key_map = {
+        'era':            'era',
+        'k_per_9':        'k_per_9',
+        'bb_per_9':       'bb_per_9',
+        'hr_per_9':       'hr_per_9',
+        'whip':           'whip',
+        'ba':             'ba',
+        'hits_per_game':  'hits_per_game',
+        'rbi_per_game':   'rbi_per_game',
+        'hr_per_game':    'hr_per_game',
+        'game_total':     'game_total',
+    }
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT DISTINCT ON (stat_name) stat_name, stat_value
+                   FROM league_averages
+                   WHERE sport = 'MLB'
+                   ORDER BY stat_name, computed_date DESC"""
+            )
+            for stat_name, stat_value in cur.fetchall():
+                if stat_name in key_map:
+                    LEAGUE_AVG[key_map[stat_name]] = float(stat_value)
+        log.info('[league_averages] LEAGUE_AVG dict updated from DB')
+    except Exception as e:
+        log.warning(f'[league_averages] Using hardcoded defaults: {e}')
+
+
 # ── Core helpers ────────────────────────────────────────────────────────────────
 
 def get_db():
@@ -2546,6 +2602,7 @@ def main():
     log.info('═══════════════════════════════════════════════════')
 
     conn = get_db()
+    load_mlb_league_averages(conn)
 
     # ── Props-only shortcut ──────────────────────────────────────────────────
     if args.props_only:
@@ -2610,6 +2667,11 @@ def main():
     for game in games:
         vname = game.get('venue_name', '')
         if vname in weather_cache:
+            continue
+        # Skip weather for domed/retractable-roof parks — always climate-controlled
+        if is_domed_park(vname):
+            log.info(f'  {vname}: domed/retractable roof — weather skipped')
+            weather_cache[vname] = {}
             continue
         coords = get_venue_coords(vname)
         if coords:

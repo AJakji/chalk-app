@@ -48,7 +48,7 @@ log = logging.getLogger(__name__)
 # ── Config ─────────────────────────────────────────────────────────────────────
 
 DATABASE_URL       = os.getenv('DATABASE_URL', '')
-BALLDONTLIE_API_KEY = os.getenv('BALLDONTLIE_API_KEY', '')
+BALLDONTLIE_API_KEY = os.getenv('BALLDONTLIE_API_KEY', '').strip()
 BASE_URL           = 'https://api.balldontlie.io/v1'
 
 # BallDontLie season numbering: 2023-24 = 2023, 2024-25 = 2024, 2025-26 = 2025

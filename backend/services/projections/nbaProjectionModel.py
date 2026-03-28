@@ -50,7 +50,7 @@ log = logging.getLogger(__name__)
 
 DATABASE_URL   = os.getenv('DATABASE_URL', '')
 BDL_BASE       = 'https://api.balldontlie.io/v1'
-BDL_KEY        = os.getenv('BALLDONTLIE_API_KEY', '')
+BDL_KEY        = os.getenv('BALLDONTLIE_API_KEY', '').strip()
 ODDS_API_KEY   = os.getenv('ODDS_API_KEY', '')
 ODDS_BASE      = 'https://api.the-odds-api.com/v4'
 CURRENT_SEASON = '2025-26'
@@ -548,6 +548,56 @@ def get_rest_days(conn, player_id: int, game_date: str) -> int:
     return 2
 
 
+def get_team_situation_b2b_factor(conn, team_abbr: str) -> float:
+    """
+    Returns team-specific B2B scoring factor from team_situation_splits.
+    Ratio = avg pts_scored on B2B (split_type='rest_0') /
+            avg pts_scored with 2+ rest days (split_type='rest_2').
+    Falls back to 0.94 (league-average B2B penalty) if no data.
+    Clamps to [0.87, 0.99].
+    """
+    try:
+        with conn.cursor() as cur:
+            # split_type values stored by populateTeamData.py:
+            #   'rest_0' = back-to-back, 'rest_1' = 1 rest day, 'rest_2' = 2+ rest days
+            cur.execute(
+                """SELECT split_type, pts_scored
+                   FROM team_situation_splits
+                   WHERE team_name ILIKE %s
+                     AND sport = 'NBA'
+                     AND split_type IN ('rest_0', 'rest_2')""",
+                (f'%{team_abbr}%',)
+            )
+            rows = {r[0]: float(r[1]) for r in cur.fetchall() if r[1] is not None}
+            b2b  = rows.get('rest_0')
+            rest = rows.get('rest_2')
+            if b2b and rest and rest > 0:
+                return clamp(b2b / rest, 0.87, 0.99)
+    except Exception:
+        pass
+    return 0.94  # league-average B2B penalty fallback
+
+
+def get_team_rest_days(conn, team_abbr: str, game_date: str) -> int:
+    """Days since this team's last game. Returns 2 if no prior game found."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT MAX(game_date) FROM team_game_logs
+                   WHERE team_name ILIKE %s AND sport = 'NBA' AND game_date < %s""",
+                (f'%{team_abbr}%', game_date)
+            )
+            row = cur.fetchone()
+            if row and row[0]:
+                import datetime as _dt
+                last    = row[0] if hasattr(row[0], 'days') else _dt.date.fromisoformat(str(row[0]))
+                current = _dt.date.fromisoformat(game_date)
+                return (current - last).days
+    except Exception:
+        pass
+    return 2
+
+
 def get_home_away_split(conn, player_id: int, stat: str, is_home: bool) -> float:
     """Average stat across last 20 home or away games. Returns 0 if insufficient data."""
     side_filter = "home_away = 'home'" if is_home else "home_away = 'away'"
@@ -1007,6 +1057,17 @@ def project_team_props(
     combined_def_f = (home_def_f + away_def_f) / 2
     proj_total = total_base * pace_f * combined_def_f
 
+    # B2B adjustment from team_situation_splits — team-specific penalty
+    home_rest = get_team_rest_days(conn, home_team, game_date)
+    away_rest = get_team_rest_days(conn, away_team, game_date)
+    home_b2b  = home_rest <= 1
+    away_b2b  = away_rest <= 1
+    home_b2b_f = get_team_situation_b2b_factor(conn, home_team) if home_b2b else 1.0
+    away_b2b_f = get_team_situation_b2b_factor(conn, away_team) if away_b2b else 1.0
+    # Average the two team factors: if neither is on B2B both are 1.0 → no change
+    b2b_total_f = (home_b2b_f + away_b2b_f) / 2 if (home_b2b or away_b2b) else 1.0
+    proj_total *= b2b_total_f
+
     # Normal CDF cover probability (std_dev 12.5 for totals)
     std_dev_total  = 12.5
     over_prob      = 1.0 - normal_cdf(0.5 / std_dev_total)
@@ -1081,6 +1142,11 @@ def project_team_props(
                 'pace_f':        round(pace_f, 3),
                 'home_def_f':    round(home_def_f, 3),
                 'away_def_f':    round(away_def_f, 3),
+                'home_b2b':      home_b2b,
+                'away_b2b':      away_b2b,
+                'home_b2b_f':    round(home_b2b_f, 3),
+                'away_b2b_f':    round(away_b2b_f, 3),
+                'b2b_total_f':   round(b2b_total_f, 3),
                 'std_dev':       std_dev_total,
             },
         },
@@ -1450,11 +1516,12 @@ def main() -> None:
 
     # ── Step 0: Load league averages ────────────────────────────────────────
     load_league_averages(conn)
+    log.info("BDL key: present=%s len=%d", bool(BDL_KEY), len(BDL_KEY))
 
     # ── Step 1: Tonight's schedule ──────────────────────────────────────────
     games = get_todays_games(game_date)
     if not games:
-        log.info("No NBA games found for %s", game_date)
+        log.info("No NBA games found for %s — check BDL key or off-day", game_date)
         conn.close()
         return
     log.info("Found %d games", len(games))

@@ -119,6 +119,126 @@ def get_db():
     return conn
 
 
+# ── Live league averages (updated from DB weekly by computeLeagueAverages.py) ─
+
+def load_nhl_league_averages(conn) -> None:
+    """
+    Pull the most recent NHL league averages from the DB and update the
+    global LEAGUE dict.  Falls back to hardcoded defaults if the table is
+    empty or the query fails.
+    """
+    key_map = {
+        'goals_pg':      'goals_pg',
+        'sog_pg':        'sog_pg',
+        'toi_pg':        'toi_pg',
+        'sv_pct':        'sv_pct',
+        'goals_pg_team': 'team_goals_pg',
+    }
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT DISTINCT ON (stat_name) stat_name, stat_value
+                   FROM league_averages
+                   WHERE sport = 'NHL'
+                   ORDER BY stat_name, computed_date DESC"""
+            )
+            for stat_name, stat_value in cur.fetchall():
+                if stat_name not in key_map:
+                    continue
+                v = float(stat_value)
+                if stat_name == 'goals_pg':
+                    LEAGUE['goals_pg'] = v
+                elif stat_name == 'sog_pg':
+                    LEAGUE['sog_pg'] = v
+                    LEAGUE['sog_per_min'] = round(v / 18.0, 4)
+                elif stat_name == 'toi_pg':
+                    LEAGUE['toi_pg'] = v
+                elif stat_name == 'sv_pct':
+                    LEAGUE['sv_pct'] = v
+                    LEAGUE['sh_pct'] = round(1.0 - v, 4)
+                    LEAGUE['shooting_pct'] = round(1.0 - v, 4)
+                elif stat_name == 'goals_pg_team':
+                    LEAGUE['team_goals_pg'] = round(v, 3)
+                    LEAGUE['team_ga_pg']    = round(v, 3)
+                    LEAGUE['nhl_total']     = round(v * 2.0, 2)
+                    LEAGUE['ga_pg']         = round(v, 3)
+        log.info('[league_averages] LEAGUE dict updated from DB')
+    except Exception as e:
+        log.warning(f'[league_averages] Using hardcoded defaults: {e}')
+
+
+# ── Position-based opponent defensive matchup (192 rows in position_defense_ratings) ──
+
+def get_nhl_position_def_factors(conn, opp_team: str, pos_code: str) -> dict:
+    """
+    Returns per-position defensive adjustment factors for goals, assists, and SOG
+    based on how many each team allows to that position this season.
+
+    Position code mapping (NHL API → DB):
+      'C'  → 'C'     'L'/'LW' → 'LW'     'R'/'RW' → 'RW'     'D' → 'D'
+
+    DB columns (per computePositionDefense.py NHL mapping):
+      pts_allowed  = goals allowed per game
+      reb_allowed  = assists allowed per game
+      ast_allowed  = SOG allowed per game
+
+    Returns dict with keys: goals_def_f, assists_def_f, sog_def_f (all default 1.0).
+    """
+    pos_map = {'C': 'C', 'L': 'LW', 'LW': 'LW', 'R': 'RW', 'RW': 'RW', 'D': 'D'}
+    db_pos  = pos_map.get(pos_code.upper() if pos_code else '', 'ALL')
+
+    result = {'goals_def_f': 1.0, 'assists_def_f': 1.0, 'sog_def_f': 1.0}
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            for pos_lookup in (db_pos, 'ALL'):
+                cur.execute(
+                    """SELECT pts_allowed, reb_allowed, ast_allowed
+                       FROM position_defense_ratings
+                       WHERE team_name ILIKE %s AND position = %s AND sport = 'NHL'
+                       ORDER BY updated_at DESC LIMIT 1""",
+                    (f'%{opp_team}%', pos_lookup)
+                )
+                row = cur.fetchone()
+                if row and row['pts_allowed'] is not None:
+                    lg_goals   = LEAGUE['goals_pg']    or 0.30
+                    lg_assists = LEAGUE['assists_pg']  or 0.50
+                    lg_sog     = LEAGUE['sog_pg']      or 2.80
+
+                    if lg_goals > 0 and row['pts_allowed'] is not None:
+                        result['goals_def_f']   = cap(float(row['pts_allowed'])  / lg_goals,   0.75, 1.30)
+                    if lg_assists > 0 and row['reb_allowed'] is not None:
+                        result['assists_def_f'] = cap(float(row['reb_allowed'])  / lg_assists, 0.75, 1.30)
+                    if lg_sog > 0 and row['ast_allowed'] is not None:
+                        result['sog_def_f']     = cap(float(row['ast_allowed'])  / lg_sog,     0.80, 1.25)
+                    break  # found data — don't fall through to ALL
+    except Exception as e:
+        log.debug(f'[position_def_ratings] {opp_team} {pos_code}: {e}')
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+
+    return result
+
+
+# ── Penalty kill quality factor ────────────────────────────────────────────────
+
+def get_pk_quality_factor(opp_team_logs: list) -> float:
+    """
+    Approximate opponent penalty kill quality from their overall goals-against
+    trend. A tight defensive team (low GA) has a better PK — applied as a
+    modest downward multiplier on PP goals and PP assists.
+    Returns factor in [0.88, 1.15] — applied to pp_goals and pp_assists only.
+    """
+    ga_l20 = rolling_avg(opp_team_logs, 'points_allowed', 20) or LEAGUE['team_ga_pg']
+    if ga_l20 <= 0 or LEAGUE['team_ga_pg'] <= 0:
+        return 1.0
+    ratio = ga_l20 / LEAGUE['team_ga_pg']
+    # 50% weight: a team 10% above league GA → only 5% more PP goals allowed
+    pk_f  = 1.0 + (ratio - 1.0) * 0.50
+    return cap(pk_f, 0.88, 1.15)
+
+
 # ── Utility helpers ───────────────────────────────────────────────────────────
 
 def safe(val, default: float = 0.0) -> float:
@@ -1670,6 +1790,7 @@ def main():
     log.info('═══════════════════════════════════════════════════')
 
     conn = get_db()
+    load_nhl_league_averages(conn)
 
     # ── Props-only shortcut ──────────────────────────────────────────────────
     if args.props_only:
@@ -1780,6 +1901,9 @@ def main():
 
             gs_f = game_script_factor_from_odds(home_ml, away_ml, side == 'home')
 
+            # PK quality factor — computed once per team side (not per player)
+            pk_quality_f = get_pk_quality_factor(opp_tl)
+
             for player in all_skaters:
                 pid   = player.get('id')
                 pname = (
@@ -1797,6 +1921,9 @@ def main():
                 rest_days = get_rest_days(conn, pid, game_date)
                 is_b2b    = rest_days <= 1
 
+                # Position-based opponent defensive matchup (Fix: use position_defense_ratings)
+                def_factors = get_nhl_position_def_factors(conn, opp_abbr, pos)
+
                 # Step 5: TOI (FIRST — feeds everything)
                 toi_proj, toi_f = project_toi(logs, side, is_b2b, injury_ctx)
                 pp_toi_proj = toi_f.get('proj_pp_toi', 0.0)
@@ -1812,6 +1939,11 @@ def main():
                 sog_proj, sog_f = project_shots_on_goal(
                     logs, opp_tl, side, toi_proj, pp_toi_proj, is_b2b, gs_f
                 )
+                # Apply position-specific defensive matchup adjustment
+                if def_factors['sog_def_f'] != 1.0:
+                    sog_proj = round(sog_proj * def_factors['sog_def_f'], 3)
+                    sog_f['pos_def_sog_f'] = round(def_factors['sog_def_f'], 3)
+
                 pp_toi_l10 = get_avg_pp_toi(logs, 10)
                 conf_sog = compute_confidence(
                     'shots_on_goal',
@@ -1835,6 +1967,14 @@ def main():
                     logs, opp_goalie_logs, opp_tl, side,
                     toi_proj, opp_is_backup, is_b2b
                 )
+                # Apply position-specific def matchup + PK quality (PP portion)
+                if def_factors['goals_def_f'] != 1.0:
+                    g_proj = round(g_proj * def_factors['goals_def_f'], 3)
+                    g_f['pos_def_goals_f'] = round(def_factors['goals_def_f'], 3)
+                if pk_quality_f != 1.0:
+                    g_proj = round(g_proj * pk_quality_f, 3)
+                    g_f['pk_quality_f'] = round(pk_quality_f, 3)
+
                 conf_g = compute_confidence(
                     'goals',
                     edge_pct=(g_proj - LEAGUE['goals_pg']) / LEAGUE['goals_pg'],
@@ -1856,6 +1996,14 @@ def main():
                     logs, opp_tl, own_tl, side, toi_proj, is_b2b,
                     injury_ctx, opp_goalie_logs
                 )
+                # Apply position-specific def matchup + PK quality (PP portion)
+                if def_factors['assists_def_f'] != 1.0:
+                    a_proj = round(a_proj * def_factors['assists_def_f'], 3)
+                    a_f['pos_def_assists_f'] = round(def_factors['assists_def_f'], 3)
+                if pk_quality_f != 1.0:
+                    a_proj = round(a_proj * pk_quality_f, 3)
+                    a_f['pk_quality_f'] = round(pk_quality_f, 3)
+
                 conf_a = compute_confidence(
                     'assists',
                     edge_pct=(a_proj - LEAGUE['assists_pg']) / LEAGUE['assists_pg'],
