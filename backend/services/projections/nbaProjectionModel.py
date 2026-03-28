@@ -1388,15 +1388,16 @@ def upsert_team_props(conn, home_team: str, away_team: str, game_date: str, team
             cur.execute(
                 """INSERT INTO team_projections
                      (team_name, opponent, sport, game_date, prop_type,
-                      proj_total, spread_projection, spread_cover_probability,
+                      proj_value, proj_total, spread_projection, spread_cover_probability,
                       moneyline_projection, win_probability,
                       confidence_score, factors_json, created_at, updated_at)
                    VALUES
                      (%s, %s, 'NBA', %s, 'game',
-                      %s, %s, %s, %s, %s,
+                      %s, %s, %s, %s, %s, %s,
                       %s, %s, NOW(), NOW())
                    ON CONFLICT (team_name, game_date, prop_type)
                    DO UPDATE SET
+                     proj_value               = EXCLUDED.proj_value,
                      proj_total               = EXCLUDED.proj_total,
                      spread_projection        = EXCLUDED.spread_projection,
                      spread_cover_probability = EXCLUDED.spread_cover_probability,
@@ -1407,6 +1408,7 @@ def upsert_team_props(conn, home_team: str, away_team: str, game_date: str, team
                      updated_at               = NOW()""",
                 (
                     team, opponent, game_date,
+                    round(float(proj_total), 1),
                     round(float(proj_total), 1),
                     round(float(spread_proj), 2),
                     round(float(cover_prob), 3),
