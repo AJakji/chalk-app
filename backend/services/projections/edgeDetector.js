@@ -21,8 +21,9 @@
 
 require('dotenv').config({ path: require('path').join(__dirname, '../../.env') });
 
-const db  = require('../../db');
-const bdl = require('../ballDontLie');
+const db   = require('../../db');
+const bdl  = require('../ballDontLie');
+const espn = require('../espn');
 
 const BASE_URL     = 'https://api.the-odds-api.com/v4';
 const ODDS_API_KEY = process.env.ODDS_API_KEY;
@@ -1395,8 +1396,9 @@ async function buildNightlyRoster(gameDate) {
   const questionableCount = Object.values(injuryMap).filter(i => i.status.includes('questionable') || i.status.includes('gtd')).length;
   console.log(`  ✅ nightly_roster: ${inserted} players inserted (${outCount} OUT, ${questionableCount} questionable)`);
 
-  // Build NHL roster for tonight's games
+  // Build NHL and MLB rosters for tonight's games
   await buildNHLRoster(today);
+  await buildMLBRoster(today);
 }
 
 /**
@@ -1500,6 +1502,155 @@ async function buildNHLRoster(gameDate) {
   }
 
   console.log(`  ✅ NHL nightly_roster: ${totalInserted} players inserted across ${teams.size} teams`);
+
+  // Cross-reference ESPN NHL injuries to downgrade GTD/questionable players.
+  // Active roster = healthy enough to dress, but GTD players may still be listed.
+  // IR players already absent from active roster so no false positives here.
+  try {
+    const espnInjuries = await espn.getInjuries('NHL');
+    let gtdCount = 0;
+    for (const inj of espnInjuries) {
+      const s = (inj.status || '').toLowerCase();
+      const isGTD = s.includes('questionable') || s.includes('doubtful') || s.includes('day-to-day') || s.includes('gtd');
+      if (!isGTD) continue;
+      // Set is_confirmed_playing = null (questionable) for this player
+      const lastName = (inj.playerName || '').split(' ').pop();
+      if (!lastName) continue;
+      const result = await db.query(
+        `UPDATE nightly_roster
+         SET is_confirmed_playing = NULL, injury_status = $1
+         WHERE game_date = $2 AND sport = 'NHL'
+           AND player_name ILIKE $3
+           AND is_confirmed_playing = true`,
+        [inj.status, today, `%${lastName}%`]
+      );
+      if (result.rowCount > 0) gtdCount++;
+    }
+    if (gtdCount > 0) console.log(`  📋 NHL ESPN: ${gtdCount} players downgraded to questionable`);
+  } catch (e) {
+    console.log(`  [WARN] ESPN NHL injury cross-reference failed: ${e.message}`);
+  }
+}
+
+/**
+ * Populate nightly_roster for MLB:
+ *  1. Get tonight's games from MLB Stats API
+ *  2. Fetch each team's active 26-man roster
+ *  3. Cross-reference ESPN MLB injuries to mark OUT / questionable
+ *  4. Insert all players into nightly_roster
+ */
+async function buildMLBRoster(gameDate) {
+  const today = gameDate || getTodayET();
+  console.log(`\n⚾ Building MLB nightly_roster for ${today}...`);
+
+  // Convert YYYY-MM-DD to MM/DD/YYYY for MLB Stats API
+  const [y, m, d] = today.split('-');
+  const mlbDate = `${m}/${d}/${y}`;
+
+  let games = [];
+  try {
+    const res = await fetch(
+      `https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=${mlbDate}&hydrate=team`,
+      { signal: AbortSignal.timeout(10000) }
+    );
+    const json = await res.json();
+    games = (json?.dates || []).flatMap(dg => dg.games || []);
+  } catch (e) {
+    console.log(`  [WARN] MLB schedule fetch failed: ${e.message}`);
+    return;
+  }
+
+  if (games.length === 0) {
+    console.log('  No MLB games today.');
+    return;
+  }
+
+  const teamMap = new Map(); // teamId → abbreviation
+  for (const g of games) {
+    const ht = g.teams?.home?.team;
+    const at = g.teams?.away?.team;
+    if (ht?.id) teamMap.set(ht.id, ht.abbreviation || String(ht.id));
+    if (at?.id) teamMap.set(at.id, at.abbreviation || String(at.id));
+  }
+  console.log(`  ${games.length} MLB games — ${teamMap.size} teams`);
+
+  // Fetch ESPN MLB injuries → normalized name → status
+  const injuryMap = {};
+  try {
+    const espnInjuries = await espn.getInjuries('MLB');
+    for (const inj of espnInjuries) {
+      const key = (inj.playerName || '').toLowerCase().replace(/[^a-z ]/g, '').trim();
+      if (key) injuryMap[key] = (inj.status || '').toLowerCase();
+    }
+    console.log(`  ESPN MLB injuries loaded: ${Object.keys(injuryMap).length} players`);
+  } catch (e) {
+    console.log(`  [WARN] ESPN MLB injuries failed: ${e.message}`);
+  }
+
+  // Delete today's existing MLB roster entries before rebuild
+  await db.query(
+    `DELETE FROM nightly_roster WHERE game_date = $1 AND sport = 'MLB'`,
+    [today]
+  );
+
+  let totalInserted = 0;
+
+  for (const [teamId, teamAbbr] of teamMap.entries()) {
+    let roster = [];
+    try {
+      const res = await fetch(
+        `https://statsapi.mlb.com/api/v1/teams/${teamId}/roster?rosterType=active`,
+        { signal: AbortSignal.timeout(8000) }
+      );
+      const json = await res.json();
+      roster = json?.roster || [];
+    } catch (e) {
+      console.log(`  [WARN] MLB roster fetch failed for ${teamAbbr}: ${e.message}`);
+      continue;
+    }
+
+    for (const player of roster) {
+      const pid      = player.person?.id;
+      const fullName = player.person?.fullName || '';
+      const position = player.position?.abbreviation || '';
+      if (!pid) continue;
+
+      const nameKey    = fullName.toLowerCase().replace(/[^a-z ]/g, '').trim();
+      const statusRaw  = injuryMap[nameKey] || '';
+
+      let isPlaying    = true;
+      let injuryStatus = null;
+
+      if (statusRaw) {
+        injuryStatus = statusRaw;
+        if (['out', 'il', '10-day', '15-day', '60-day', 'suspended'].some(s => statusRaw.includes(s))
+            && !statusRaw.includes('questionable')) {
+          isPlaying = false;
+        } else if (statusRaw.includes('questionable') || statusRaw.includes('day-to-day') || statusRaw.includes('dtd')) {
+          isPlaying = null; // GTD — lower confidence but don't skip
+        }
+      }
+
+      try {
+        await db.query(
+          `INSERT INTO nightly_roster
+             (player_id, player_name, team, sport, game_date, position,
+              is_confirmed_playing, injury_status)
+           VALUES ($1, $2, $3, 'MLB', $4, $5, $6, $7)
+           ON CONFLICT (player_id, game_date, sport) DO UPDATE SET
+             is_confirmed_playing = EXCLUDED.is_confirmed_playing,
+             position             = EXCLUDED.position,
+             injury_status        = EXCLUDED.injury_status`,
+          [pid, fullName, teamAbbr, today, position, isPlaying, injuryStatus]
+        );
+        totalInserted++;
+      } catch { /* skip individual insert errors */ }
+    }
+  }
+
+  const outCount = Object.values(injuryMap).filter(s => s.includes('out')).length;
+  const qtCount  = Object.values(injuryMap).filter(s => s.includes('questionable') || s.includes('day-to-day')).length;
+  console.log(`  ✅ MLB nightly_roster: ${totalInserted} players inserted (ESPN: ${outCount} OUT, ${qtCount} questionable)`);
 }
 
 // ── Teammate injury cascading for assist props ──────────────────────────────────
@@ -1892,6 +2043,14 @@ async function detectEdgesForSport(sport, gameDate) {
         try { return JSON.parse(typeof proj.factors_json === 'string' ? proj.factors_json : JSON.stringify(proj.factors_json || {}))?.context?.games_used ?? null; } catch { return null; }
       })();
 
+      // ── Injury gate (same as NBA path) ──────────────────────────────────────
+      const playingStatus = await isPlayerConfirmedPlaying(proj.player_name, sport, today);
+      if (playingStatus === false) {
+        console.log(`  SKIP (confirmed OUT): ${proj.player_name} [${sport}]`);
+        continue;
+      }
+      const isQuestionable = playingStatus === 'questionable';
+
       for (const [marketKey, lineData] of Object.entries(marketData)) {
         // Look up the row whose prop_type matches this market (new per-prop-row schema).
         // Fallback: try legacy named column for backwards compatibility.
@@ -1925,7 +2084,7 @@ async function detectEdgesForSport(sport, gameDate) {
           edge,
           sport,
           gamesPlayedThisSeason: sampleSize,
-          isQuestionable:        false,
+          isQuestionable,
           weatherDataAvailable:  sport === 'MLB' ? factors?.weather_available !== false : true,
           backupGoalieConfirmed: sport === 'NHL' ? (factors?.backup_goalie_detected || false) : false,
           goalieUnconfirmed:     sport === 'NHL' ? (factors?.goalie_unconfirmed     || false) : false,
@@ -2011,5 +2170,6 @@ module.exports = {
   getTodaysEdges,
   collectPropsLines,
   buildNightlyRoster,
+  buildMLBRoster,
   normalizePlayerName,
 };

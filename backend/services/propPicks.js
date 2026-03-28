@@ -1,5 +1,5 @@
-// Chalk prop picks engine — powered by Claude + SportsData.io projections + The Odds API
-// Flow: fetch today's games → fetch player projections → fetch prop lines → send to Claude → store
+// Chalk prop picks engine — powered by Claude + internal Chalk model projections + The Odds API
+// Flow: fetch today's edges from DB → fetch prop lines → enrich with last-5 stats → send to Claude → store
 
 const Anthropic = require('@anthropic-ai/sdk');
 const db = require('../db');
@@ -78,8 +78,8 @@ Respond with ONLY a JSON object in this EXACT format — no markdown, no text ou
 }`;
 
 /**
- * Generate player prop picks using SportsData.io projections + The Odds API prop lines.
- * Called daily at 10am alongside game picks generation.
+ * Generate player prop picks using Chalk internal model projections + The Odds API prop lines.
+ * Called daily at 10:30am after edgeDetector.detectEdges() populates player_props_history.
  */
 async function generatePropPicks() {
   const today = new Date().toISOString().split('T')[0];
@@ -92,7 +92,7 @@ async function generatePropPicks() {
     return [];
   }
 
-  // Fetch player projections from SportsData.io
+  // Fetch player projections from our internal Chalk model (player_props_history + chalk_projections)
   const projections = await fetchProjections(today);
 
   const userContent = buildPromptContent(propLines, projections, today);
@@ -171,45 +171,107 @@ async function fetchPropLines() {
 
 async function fetchProjections(date) {
   try {
-    const apiKey = process.env.SPORTSDATA_NBA_KEY || process.env.SPORTSDATA_KEY;
-    if (!apiKey) return {};
-
-    const sdDate = date.replace(/-/g, '/');
-    const res = await fetch(
-      `https://api.sportsdata.io/v3/nba/projections/json/PlayerGameProjectionStatsByDate/${sdDate}?key=${apiKey}`
+    // Read today's scored edges from player_props_history (populated by edgeDetector)
+    // joined with chalk_projections for game context and factors
+    const { rows } = await db.query(
+      `SELECT
+         pph.player_id, pph.player_name, pph.team, pph.sport, pph.prop_type,
+         pph.chalk_projection, pph.prop_line, pph.chalk_edge, pph.confidence,
+         pph.dk_odds, pph.fd_odds, pph.mgm_odds, pph.bet365_odds,
+         cp.opponent, cp.home_away, cp.position, cp.factors_json,
+         nr.injury_status
+       FROM player_props_history pph
+       LEFT JOIN chalk_projections cp
+         ON cp.player_id = pph.player_id
+         AND cp.game_date = pph.game_date
+         AND cp.prop_type = pph.prop_type
+       LEFT JOIN nightly_roster nr
+         ON nr.player_id = pph.player_id
+         AND nr.game_date = pph.game_date
+         AND nr.sport = pph.sport
+       WHERE pph.game_date = $1
+         AND pph.chalk_edge IS NOT NULL
+         AND pph.confidence >= 62
+       ORDER BY pph.confidence DESC, ABS(pph.chalk_edge) DESC
+       LIMIT 80`,
+      [date]
     );
-    if (!res.ok) return {};
-    const data = await res.json();
 
-    // Index by player name for easy lookup
+    if (rows.length === 0) {
+      console.log('  No edges in DB yet — edgeDetector may not have run');
+      return {};
+    }
+
+    // Enrich top players with last-5 game logs from player_game_logs
+    const uniqueIds = [...new Set(rows.map(r => r.player_id).filter(Boolean))].slice(0, 30);
+    const recentStats = {};
+    for (const pid of uniqueIds) {
+      try {
+        const sport = rows.find(r => r.player_id === pid)?.sport || 'NBA';
+        const statCols = sport === 'NHL'
+          ? 'game_date, opponent, points AS goals, three_made AS assists, fg_made AS sog, plus_minus, minutes AS toi'
+          : sport === 'MLB'
+          ? 'game_date, opponent, fg_made AS hits, three_made AS hr, rebounds AS rbi, assists AS pitcher_k, minutes AS ip'
+          : 'game_date, opponent, points, rebounds, assists, three_made, steals, blocks, minutes';
+        const { rows: statRows } = await db.query(
+          `SELECT ${statCols}
+           FROM player_game_logs
+           WHERE player_id = $1 AND sport = $2 AND minutes >= 5
+           ORDER BY game_date DESC LIMIT 5`,
+          [pid, sport]
+        );
+        if (statRows.length) {
+          const name = rows.find(r => r.player_id === pid)?.player_name;
+          if (name) recentStats[name] = statRows;
+        }
+      } catch {}
+    }
+
+    // Build index: player_name → { team, sport, props: { propType → {...} }, last5, injuryStatus }
     const index = {};
-    for (const p of data) {
-      const name = `${p.FirstName} ${p.LastName}`;
-      index[name] = {
-        points: p.Points,
-        rebounds: p.Rebounds,
-        assists: p.Assists,
-        threes: p.ThreePointersMade,
-        steals: p.Steals,
-        blocks: p.BlockedShots,
-        minutes: p.Minutes,
-        team: p.Team,
-        position: p.Position,
+    for (const row of rows) {
+      if (!index[row.player_name]) {
+        index[row.player_name] = {
+          team:         row.team,
+          sport:        row.sport,
+          opponent:     row.opponent,
+          homeAway:     row.home_away,
+          position:     row.position,
+          injuryStatus: row.injury_status || 'Active',
+          props:        {},
+          last5:        recentStats[row.player_name] || [],
+        };
+      }
+      index[row.player_name].props[row.prop_type] = {
+        projection: parseFloat(row.chalk_projection),
+        line:       parseFloat(row.prop_line),
+        edge:       parseFloat(row.chalk_edge),
+        direction:  row.chalk_edge > 0 ? 'over' : 'under',
+        confidence: row.confidence,
+        odds: {
+          draftkings: row.dk_odds    || 'N/A',
+          fanduel:    row.fd_odds    || 'N/A',
+          betmgm:     row.mgm_odds   || 'N/A',
+          bet365:     row.bet365_odds || 'N/A',
+        },
       };
     }
+
+    console.log(`  Loaded ${Object.keys(index).length} players from Chalk model (${rows.length} prop rows)`);
     return index;
   } catch (err) {
-    console.warn('Failed to fetch projections:', err.message);
+    console.warn('Failed to fetch internal projections:', err.message);
     return {};
   }
 }
 
 function buildPromptContent(propLines, projections, today) {
-  const projSummary = Object.keys(projections).length > 0
-    ? `PLAYER PROJECTIONS FROM SPORTSDATA.IO (use exact numbers):\n${JSON.stringify(projections, null, 2)}\n\n---\n\n`
-    : '';
+  const hasProj = Object.keys(projections).length > 0;
+  const projSummary = hasProj
+    ? `CHALK INTERNAL MODEL DATA (our own projections — use these numbers as the statistical baseline):\n${JSON.stringify(projections, null, 2)}\n\n---\n\n`
+    : 'NOTE: No internal model projections available — rely on prop lines and recent form only.\n\n---\n\n';
 
-  return `${projSummary}Today is ${today}. Here are today's player prop betting lines. Find the biggest edges where projections significantly differ from the actual lines. Generate 5-8 prop picks in Chalky's voice:\n\n${JSON.stringify(propLines, null, 2)}`;
+  return `${projSummary}Today is ${today}. Below are today's player prop betting lines from The Odds API. Cross-reference the Chalk model projections above to find the 5–8 biggest edges. For each pick, use the actual projection, line, edge, last-5 stats, and injury status from the model data above. Generate 5-8 prop picks in Chalky's voice:\n\n${JSON.stringify(propLines, null, 2)}`;
 }
 
 async function storePropPicks(props) {
