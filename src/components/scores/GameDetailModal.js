@@ -2746,23 +2746,6 @@ const preStyles = StyleSheet.create({
   leaderAvatarFallback:  { width: 36, height: 36, borderRadius: 18, backgroundColor: colors.surfaceAlt, alignItems: 'center', justifyContent: 'center' },
   leaderAvatarInitials:  { fontSize: 11, fontWeight: '700', color: colors.grey },
 
-  // Team selector
-  teamSelector:         { flexDirection: 'row', marginHorizontal: spacing.md, marginVertical: 12, backgroundColor: colors.surface, borderRadius: 12, borderWidth: 1, borderColor: colors.border, overflow: 'hidden' },
-  teamBtn:              { flex: 1, paddingVertical: 14, paddingHorizontal: 12, alignItems: 'center', backgroundColor: colors.surface },
-  teamBtnActive:        { backgroundColor: colors.surfaceAlt, borderBottomWidth: 2, borderBottomColor: colors.green },
-  teamBtnAbbr:          { fontSize: 18, fontWeight: '800', color: colors.offWhite, letterSpacing: 1 },
-  teamBtnName:          { fontSize: 11, color: colors.grey, marginTop: 3, letterSpacing: 0.3 },
-  teamBtnNameActive:    { color: colors.green },
-  teamSelectorDivider:  { width: 1, backgroundColor: colors.border, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 12 },
-  vsText:               { fontSize: 10, color: colors.grey, fontWeight: '700', letterSpacing: 2 },
-
-  // MLB stat filter
-  mlbFilter:            { flexDirection: 'row', marginHorizontal: spacing.md, marginBottom: 12, backgroundColor: colors.surface, borderRadius: 8, borderWidth: 1, borderColor: colors.border, padding: 3 },
-  mlbFilterBtn:         { flex: 1, paddingVertical: 8, alignItems: 'center', borderRadius: 6 },
-  mlbFilterBtnActive:   { backgroundColor: colors.surfaceAlt },
-  mlbFilterText:        { fontSize: 13, color: colors.grey, fontWeight: '500' },
-  mlbFilterTextActive:  { color: colors.offWhite, fontWeight: '600' },
-
   // Chalky's Take card
   chalkyTakeCard:  { backgroundColor: '#0D2A1A', borderRadius: radius.md, borderLeftWidth: 3, borderLeftColor: colors.green, borderWidth: 1, borderColor: colors.green + '33', padding: spacing.md, gap: spacing.sm },
   chalkyTakeLabel: { fontSize: 10, fontWeight: '800', color: colors.green, textTransform: 'uppercase', letterSpacing: 1 },
@@ -4668,6 +4651,22 @@ const styles = StyleSheet.create({
   },
 
   // Empty / loading states
+  // Team selector (box score tabs)
+  teamSelector:        { flexDirection: 'row', marginHorizontal: spacing.md, marginVertical: 12, backgroundColor: colors.surface, borderRadius: 12, borderWidth: 1, borderColor: colors.border, overflow: 'hidden' },
+  teamBtn:             { flex: 1, paddingVertical: 14, paddingHorizontal: 12, alignItems: 'center', backgroundColor: colors.surface },
+  teamBtnActive:       { backgroundColor: colors.surfaceAlt, borderBottomWidth: 2, borderBottomColor: colors.green },
+  teamBtnAbbr:         { fontSize: 18, fontWeight: '800', color: colors.offWhite, letterSpacing: 1 },
+  teamBtnName:         { fontSize: 11, color: colors.grey, marginTop: 3, letterSpacing: 0.3 },
+  teamBtnNameActive:   { color: colors.green },
+  teamSelectorDivider: { width: 1, backgroundColor: colors.border, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 12 },
+  vsText:              { fontSize: 10, color: colors.grey, fontWeight: '700', letterSpacing: 2 },
+  // MLB stat filter
+  mlbFilter:           { flexDirection: 'row', marginHorizontal: spacing.md, marginBottom: 12, backgroundColor: colors.surface, borderRadius: 8, borderWidth: 1, borderColor: colors.border, padding: 3 },
+  mlbFilterBtn:        { flex: 1, paddingVertical: 8, alignItems: 'center', borderRadius: 6 },
+  mlbFilterBtnActive:  { backgroundColor: colors.surfaceAlt },
+  mlbFilterText:       { fontSize: 13, color: colors.grey, fontWeight: '500' },
+  mlbFilterTextActive: { color: colors.offWhite, fontWeight: '600' },
+
   emptyState: {
     paddingTop: 60,
     alignItems: 'center',
