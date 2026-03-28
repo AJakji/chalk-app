@@ -2267,7 +2267,7 @@ function OddsMarketTable({ title, rows, awayAbbr, homeAbbr, bestAway, bestHome, 
 }
 
 function OddsTab({ game, oddsData, loading }) {
-  const { chalkPick, awayTeam, homeTeam } = game;
+  const { awayTeam, homeTeam } = game;
 
   if (loading) {
     return (
@@ -2293,16 +2293,6 @@ function OddsTab({ game, oddsData, loading }) {
 
   return (
     <ScrollView showsVerticalScrollIndicator={false} style={{ paddingHorizontal: spacing.md }}>
-
-      {/* Chalky pick banner if available */}
-      {chalkPick?.pick && (
-        <View style={preStyles.section}>
-          <View style={preStyles.pickSummary}>
-            <Text style={preStyles.pickSummaryLabel}>🎯 Chalky's Pick</Text>
-            <Text style={preStyles.pickSummaryValue}>{chalkPick.pick}</Text>
-          </View>
-        </View>
-      )}
 
       {hasRealOdds ? (
         <>

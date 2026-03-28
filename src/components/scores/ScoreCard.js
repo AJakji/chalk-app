@@ -20,28 +20,6 @@ function LivePulse() {
   );
 }
 
-function ChalkPickBanner({ pick }) {
-  if (!pick) return null;
-  const isWinning = pick.result === 'winning' || pick.result === 'win';
-  const isLosing = pick.result === 'losing' || pick.result === 'loss';
-  return (
-    <View style={[
-      styles.chalkBanner,
-      isWinning && styles.chalkBannerWin,
-      isLosing && styles.chalkBannerLoss,
-    ]}>
-      <Text style={[
-        styles.chalkBannerText,
-        isWinning && { color: colors.green },
-        isLosing && { color: colors.red },
-      ]}>
-        🎯 Chalky: {pick.pick}
-        {isWinning ? ' · Winning' : isLosing ? ' · Losing' : ''}
-      </Text>
-    </View>
-  );
-}
-
 // Flashing score — flashes green background when score changes during a live game
 function FlashScore({ score, isLive, style }) {
   const flash = useRef(new Animated.Value(0)).current;
@@ -172,9 +150,6 @@ export default function ScoreCard({ game, onPress }) {
           <Text style={styles.liveClockText}>{clock}</Text>
         )}
 
-        {/* Chalk pick banner */}
-        <ChalkPickBanner pick={chalkPick} />
-
         {/* Tap hint */}
         {(game.boxScore || isLive) && (
           <Text style={styles.tapHint}>Box score & stats →</Text>
@@ -303,24 +278,6 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     marginTop: 4,
     marginBottom: spacing.xs,
-  },
-  chalkBanner: {
-    marginTop: spacing.xs,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 6,
-    borderRadius: radius.sm,
-    backgroundColor: colors.surfaceAlt,
-  },
-  chalkBannerWin: {
-    backgroundColor: colors.green + '18',
-  },
-  chalkBannerLoss: {
-    backgroundColor: colors.red + '18',
-  },
-  chalkBannerText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: colors.grey,
   },
   tapHint: {
     fontSize: 11,
