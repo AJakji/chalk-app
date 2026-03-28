@@ -440,7 +440,7 @@ function BoxScoreTab({ game, boxScore, loading, onPlayerPress }) {
   return (
     <View>
       <View style={{ paddingHorizontal: spacing.md }}>
-        <Text style={styles.sectionLabel}>Line Score</Text>
+
         <LineScore
           quarters={boxScore.quarters}
           awayAbbr={game.awayTeam.abbr}
@@ -1107,7 +1107,7 @@ function MLBBoxScoreTab({ game, boxScore, loading, onPlayerPress }) {
   return (
     <View>
       <View style={{ paddingHorizontal: spacing.md }}>
-        <Text style={styles.sectionLabel}>Line Score</Text>
+
         <MLBInningLineScore
           innings={boxScore.innings || []}
           awayAbbr={game.awayTeam.abbr}
@@ -2747,19 +2747,19 @@ const preStyles = StyleSheet.create({
   leaderAvatarInitials:  { fontSize: 11, fontWeight: '700', color: colors.grey },
 
   // Team selector
-  teamSelector:         { flexDirection: 'row', marginHorizontal: spacing.md, marginVertical: 12, backgroundColor: '#0f0f0f', borderRadius: 12, borderWidth: 1, borderColor: colors.border, overflow: 'hidden' },
-  teamBtn:              { flex: 1, paddingVertical: 14, paddingHorizontal: 12, alignItems: 'center', backgroundColor: '#0f0f0f' },
-  teamBtnActive:        { backgroundColor: '#141414', borderBottomWidth: 2, borderBottomColor: colors.green },
+  teamSelector:         { flexDirection: 'row', marginHorizontal: spacing.md, marginVertical: 12, backgroundColor: colors.surface, borderRadius: 12, borderWidth: 1, borderColor: colors.border, overflow: 'hidden' },
+  teamBtn:              { flex: 1, paddingVertical: 14, paddingHorizontal: 12, alignItems: 'center', backgroundColor: colors.surface },
+  teamBtnActive:        { backgroundColor: colors.surfaceAlt, borderBottomWidth: 2, borderBottomColor: colors.green },
   teamBtnAbbr:          { fontSize: 18, fontWeight: '800', color: colors.offWhite, letterSpacing: 1 },
   teamBtnName:          { fontSize: 11, color: colors.grey, marginTop: 3, letterSpacing: 0.3 },
   teamBtnNameActive:    { color: colors.green },
   teamSelectorDivider:  { width: 1, backgroundColor: colors.border, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 12 },
-  vsText:               { fontSize: 10, color: '#3a3a3a', fontWeight: '700', letterSpacing: 2 },
+  vsText:               { fontSize: 10, color: colors.grey, fontWeight: '700', letterSpacing: 2 },
 
   // MLB stat filter
-  mlbFilter:            { flexDirection: 'row', marginHorizontal: spacing.md, marginBottom: 12, backgroundColor: '#0f0f0f', borderRadius: 8, borderWidth: 1, borderColor: colors.border, padding: 3 },
+  mlbFilter:            { flexDirection: 'row', marginHorizontal: spacing.md, marginBottom: 12, backgroundColor: colors.surface, borderRadius: 8, borderWidth: 1, borderColor: colors.border, padding: 3 },
   mlbFilterBtn:         { flex: 1, paddingVertical: 8, alignItems: 'center', borderRadius: 6 },
-  mlbFilterBtnActive:   { backgroundColor: '#141414' },
+  mlbFilterBtnActive:   { backgroundColor: colors.surfaceAlt },
   mlbFilterText:        { fontSize: 13, color: colors.grey, fontWeight: '500' },
   mlbFilterTextActive:  { color: colors.offWhite, fontWeight: '600' },
 
@@ -2984,7 +2984,7 @@ function NHLBoxScoreTab({ game, boxScore, loading, onPlayerPress }) {
   return (
     <View>
       <View style={{ paddingHorizontal: spacing.md, paddingTop: spacing.sm }}>
-        <Text style={styles.sectionLabel}>Line Score</Text>
+
         <NHLPeriodLineScore
           periods={boxScore.periods}
           awayAbbr={awayAbbr}
