@@ -120,7 +120,7 @@ export default function WelcomeScreen({ navigation }) {
         <Animated.Text
           style={[s.tagline, { opacity: tagOpacity, transform: [{ translateY: tagY }] }]}
         >
-          Welcome to the Algorithm
+          You found the edge.
         </Animated.Text>
       </View>
 

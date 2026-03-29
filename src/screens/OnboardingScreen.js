@@ -83,8 +83,8 @@ const SLIDES = [
   {
     id: 's1',
     icon: null, // uses chalky image
-    title: 'The Edge Has a Name',
-    subtitle: 'AI-powered picks across NBA, MLB, NHL, and the World Cup. Built on real data, not vibes.',
+    title: 'You found the edge.',
+    subtitle: 'AI-powered picks across NBA, MLB, NHL and the World Cup. Real projections. Real lines. Every day at 10 AM.',
     content: null,
   },
   {

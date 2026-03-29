@@ -98,7 +98,7 @@ export default function PaywallModal({ visible, onClose }) {
 
               <Text style={styles.headline}>Unlock Chalky Pro</Text>
               <Text style={styles.subheadline}>
-                Get the full edge. Every pick, every tool, no limits.
+                You found the edge. Now use it.
               </Text>
 
               {/* Feature list */}

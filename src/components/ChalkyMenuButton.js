@@ -375,7 +375,7 @@ export default function ChalkyMenuButton() {
             {/* Header */}
             <View style={styles.drawerHeader}>
               <ChalkyLogo size={28} />
-              <Text style={styles.drawerTagline}>The edge has a name.</Text>
+              <Text style={styles.drawerTagline}>You found the edge.</Text>
             </View>
 
             <View style={styles.drawerDivider} />
