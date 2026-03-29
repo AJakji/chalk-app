@@ -154,22 +154,22 @@ const MOCK_PICKS = [
 
 // GET /api/picks
 // Returns today's picks ordered by confidence DESC.
-// Optional: ?sport=NBA  → only that sport (for league tabs)
-// Optional: ?limit=5    → cap results (default 5)
+// Optional: ?sport=NBA  → only that sport (for league tabs), default LIMIT 5
+// No sport param → all sports (Chalky's Picks tab), default LIMIT 7
+// Optional: ?limit=N    → override the default
 // Optional: ?date=YYYY-MM-DD → specific date (defaults to today)
-// No sport param → all sports (for Chalky's Picks tab)
 router.get('/', async (req, res) => {
   if (false) { // mock mode disabled in production
     let mock = [...MOCK_PICKS].sort((a, b) => b.confidence - a.confidence);
     if (req.query.sport) mock = mock.filter(p => p.league === req.query.sport);
-    const limit = parseInt(req.query.limit || '5', 10);
+    const limit = parseInt(req.query.limit || (req.query.sport ? '5' : '7'), 10);
     return res.json({ picks: mock.slice(0, limit) });
   }
 
   try {
     const date  = req.query.date  || new Date().toISOString().split('T')[0];
-    const limit = parseInt(req.query.limit || '5', 10);
     const sport = req.query.sport || null;
+    const limit = parseInt(req.query.limit || (sport ? '5' : '7'), 10);
 
     let query, params;
     if (sport) {
@@ -204,7 +204,7 @@ router.get('/counts', async (req, res) => {
         WHERE pick_date = $1
         GROUP BY league
         UNION ALL
-       SELECT 'CHALKY' AS sport, LEAST(COUNT(*), 5) AS total
+       SELECT 'CHALKY' AS sport, LEAST(COUNT(*), 7) AS total
          FROM picks
         WHERE pick_date = $1`,
       [date]
@@ -267,7 +267,7 @@ router.get('/counts/recent', async (req, res) => {
         WHERE pick_date = (SELECT MAX(pick_date) FROM picks)
         GROUP BY league
         UNION ALL
-       SELECT 'CHALKY' AS sport, LEAST(COUNT(*), 5) AS total
+       SELECT 'CHALKY' AS sport, LEAST(COUNT(*), 7) AS total
          FROM picks
         WHERE pick_date = (SELECT MAX(pick_date) FROM picks)`
     );
@@ -284,15 +284,15 @@ router.get('/counts/recent', async (req, res) => {
 // Returns picks from the most recent date that has any picks.
 // Used as a fallback when today has 0 picks (pipeline still running or failed).
 // Optional: ?sport=NBA → most recent picks for that sport only
-// Optional: ?limit=5
+// No sport → Chalky's Picks, default LIMIT 7
 router.get('/recent', async (req, res) => {
   if (false) { // mock mode disabled in production
-    return res.json({ picks: MOCK_PICKS.slice(0, 5) });
+    return res.json({ picks: MOCK_PICKS.slice(0, 7) });
   }
 
   try {
-    const limit = parseInt(req.query.limit || '5', 10);
     const sport = req.query.sport || null;
+    const limit = parseInt(req.query.limit || (sport ? '5' : '7'), 10);
 
     let rows;
     if (sport) {

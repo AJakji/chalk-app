@@ -23,8 +23,7 @@ const TABS = ["Chalky's Picks", 'NBA', 'MLB', 'NHL', 'Soccer', 'WNBA'];
 // Display-only labels — internal values stay the same so data filters still work
 const TAB_LABELS = { Soccer: 'World Cup' };
 
-// Free users see picks 1-2 unlocked; picks 3+ are blurred with a Pro lock overlay
-const FREE_PICK_LIMIT = 2;
+// Chalky's Picks: first 2 free, picks 3-7 locked. League tabs: all locked.
 
 function LockedPickWrapper({ children, onUnlock }) {
   return (
@@ -73,7 +72,7 @@ function ChalkysPicksHeader({ date, totalCount, highConfCount }) {
       <View style={styles.chalkysAvatarRow}>
         <Image source={CHALKY_PNG} style={styles.chalkysAvatar} resizeMode="contain" />
         <View style={styles.chalkysHeaderText}>
-          <Text style={styles.chalkysTitle}>Today's Best 5</Text>
+          <Text style={styles.chalkysTitle}>Today's Best 7</Text>
           <Text style={styles.chalkysDate}>{date}</Text>
         </View>
       </View>
@@ -238,22 +237,37 @@ export default function PicksScreen() {
             ) : null
           }
           renderItem={({ item, index }) => {
-            const isLocked = !isPro && index >= FREE_PICK_LIMIT;
+            const isChalkyTab = activeTab === "Chalky's Picks";
+            // Chalky's Picks: first 2 free. League tabs: all locked for non-Pro.
+            const isFree = isChalkyTab && index < 2;
+            const isLocked = !isPro && !isFree;
             const card = item.pickCategory === 'prop' ? (
               <PropPickCard
                 pick={item}
                 onPress={isLocked ? openPaywall : setSelectedPick}
                 isTopPick={item.id === topPickId}
+                isFree={isFree}
               />
             ) : (
               <PickCard
                 pick={item}
                 onPress={isLocked ? openPaywall : setSelectedPick}
                 isTopPick={item.id === topPickId}
+                isFree={isFree}
               />
             );
             return (
               <StaggeredItem index={index}>
+                {!isPro && isChalkyTab && index === 2 && (
+                  <View style={styles.lockedDivider}>
+                    <View style={styles.lockedLine} />
+                    <View style={styles.lockedPill}>
+                      <Ionicons name="lock-closed" size={10} color="#FFD700" />
+                      <Text style={styles.lockedPillText}>5 more picks with Chalky Pro</Text>
+                    </View>
+                    <View style={styles.lockedLine} />
+                  </View>
+                )}
                 <View>
                   <Text style={styles.pickRank}>#{index + 1}</Text>
                   {isLocked ? (
@@ -277,7 +291,7 @@ export default function PicksScreen() {
               </Text>
               <Text style={styles.emptyText}>
                 {activeTab === "Chalky's Picks" && new Date().getUTCHours() < 11
-                  ? 'Picks drop at 7 AM ET.'
+                  ? 'Chalky drops 7 picks every morning at 7 AM ET. First 2 are always free.'
                   : 'Day off.'}
               </Text>
             </View>
@@ -426,6 +440,35 @@ const styles = StyleSheet.create({
   emptyText: { fontSize: 13, color: colors.grey, textAlign: 'center', marginTop: 4 },
   retryBtn: { marginTop: 16, paddingHorizontal: 24, paddingVertical: 10, borderRadius: 20, backgroundColor: colors.green },
   retryText: { fontSize: 14, fontWeight: '700', color: colors.background },
+  // Divider between free picks and locked picks in Chalky's Picks tab
+  lockedDivider: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginVertical: 12,
+    paddingHorizontal: 16,
+  },
+  lockedLine: {
+    flex: 1,
+    height: 1,
+    backgroundColor: '#1e1e1e',
+  },
+  lockedPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#141414',
+    borderWidth: 1,
+    borderColor: '#FFD700',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 100,
+    marginHorizontal: 12,
+  },
+  lockedPillText: {
+    color: '#FFD700',
+    fontSize: 11,
+    fontWeight: '600',
+  },
 });
 
 const locked = StyleSheet.create({

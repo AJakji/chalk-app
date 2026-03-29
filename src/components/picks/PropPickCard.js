@@ -127,7 +127,7 @@ function BetButton({ book, label, odds, line, affiliateUrl }) {
 
 // ── Main component ────────────────────────────────────────────────────────────
 
-export default function PropPickCard({ pick, onPress, isTopPick }) {
+export default function PropPickCard({ pick, onPress, isTopPick, isFree }) {
   const scale = useRef(new Animated.Value(1)).current;
   const [showInfo, setShowInfo] = useState(false);
 
@@ -163,6 +163,12 @@ export default function PropPickCard({ pick, onPress, isTopPick }) {
         isTopPick && styles.topPickCard,
         { transform: [{ scale }] },
       ]}>
+
+        {isFree && (
+          <View style={styles.freeBadge}>
+            <Text style={styles.freeBadgeText}>FREE</Text>
+          </View>
+        )}
 
         {/* ── Header: league · PLAYER PROP · confidence% ─────────────────── */}
         <View style={styles.header}>
@@ -557,5 +563,21 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: colors.grey,
     fontStyle: 'italic',
+  },
+  freeBadge: {
+    position: 'absolute',
+    top: 12,
+    right: 12,
+    backgroundColor: '#00E87A',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+    zIndex: 1,
+  },
+  freeBadgeText: {
+    color: '#080808',
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 1,
   },
 });

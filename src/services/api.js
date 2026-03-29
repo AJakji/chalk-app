@@ -262,7 +262,7 @@ export async function fetchPicksForTab(tab, date) {
   const isChalky  = tab === "Chalky's Picks";
 
   const buildUrl = (d) => isChalky
-    ? `${API_URL}/api/picks?date=${d}&limit=5`
+    ? `${API_URL}/api/picks?date=${d}&limit=7`
     : `${API_URL}/api/picks?date=${d}&sport=${encodeURIComponent(tab)}&limit=5`;
 
   const res = await fetch(buildUrl(dateParam));
@@ -274,7 +274,7 @@ export async function fetchPicksForTab(tab, date) {
   try {
     const fallbackRes = await fetch(
       isChalky
-        ? `${API_URL}/api/picks/recent?limit=5`
+        ? `${API_URL}/api/picks/recent?limit=7`
         : `${API_URL}/api/picks/recent?limit=5&sport=${encodeURIComponent(tab)}`
     );
     if (!fallbackRes.ok) return [];

@@ -90,7 +90,7 @@ function ConfidenceBar({ confidence, onInfoPress }) {
   );
 }
 
-export default function PickCard({ pick, onPress, isTopPick }) {
+export default function PickCard({ pick, onPress, isTopPick, isFree }) {
   const leagueColor = LEAGUE_COLORS[pick.league] || colors.grey;
   const getLogo = useTeamLogos();
   const scale = useRef(new Animated.Value(1)).current;
@@ -127,6 +127,12 @@ export default function PickCard({ pick, onPress, isTopPick }) {
           { transform: [{ scale }] },
         ]}
       >
+        {isFree && (
+          <View style={styles.freeBadge}>
+            <Text style={styles.freeBadgeText}>FREE</Text>
+          </View>
+        )}
+
         {/* Header row */}
         <View style={styles.header}>
           <View style={[styles.leagueBadge, { backgroundColor: leagueColor }]}>
@@ -424,4 +430,20 @@ const styles = StyleSheet.create({
   medConf: { color: '#FFA500' },
   lowConf: { color: '#888888' },
   edgeValue: { fontSize: 15, fontWeight: '800' },
+  freeBadge: {
+    position: 'absolute',
+    top: 12,
+    right: 12,
+    backgroundColor: '#00E87A',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+    zIndex: 1,
+  },
+  freeBadgeText: {
+    color: '#080808',
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 1,
+  },
 });
