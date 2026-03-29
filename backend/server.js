@@ -75,6 +75,7 @@ app.use('/api/players',  require('./routes/players'));
 app.use('/api/weather',  weatherRouter);
 app.use('/api/nhl/goalies', goalieRouter);
 app.use('/api/reports',   require('./routes/reports'));
+app.use('/api/ufc',       require('./routes/ufc'));
 
 // Health check — Railway and monitoring tools hit this
 app.get('/health', (req, res) => {
@@ -427,6 +428,24 @@ if (process.env.MOCK_MODE !== 'true') {
   cron.schedule('0 3 * * 1', async () => {
     console.log('\n⏰ [Mon 3:00 AM] Computing league averages…');
     await runPipeline('League Averages', () => runPythonScript('computeLeagueAverages.py'));
+  }, { timezone: 'America/New_York' });
+
+  // ── UFC: Tuesday 3:00 AM ET — Collect upcoming event + fighter data ──────────
+  cron.schedule('0 3 * * 2', async () => {
+    console.log('\n⏰ [Tue 3:00 AM] UFC data collector…');
+    await runPipeline('UFC Data Collector', () => runPythonScript('ufcDataCollector.py'));
+  }, { timezone: 'America/New_York' });
+
+  // ── UFC: Tuesday 4:00 AM ET — Run projection model ───────────────────────────
+  cron.schedule('0 4 * * 2', async () => {
+    console.log('\n⏰ [Tue 4:00 AM] UFC projection model…');
+    await runPipeline('UFC Projection Model', () => runPythonScript('ufcProjectionModel.py'));
+  }, { timezone: 'America/New_York' });
+
+  // ── UFC: Saturday 9:00 AM ET — Refresh model with fight-day odds ─────────────
+  cron.schedule('0 9 * * 6', async () => {
+    console.log('\n⏰ [Sat 9:00 AM] UFC fight-day model refresh…');
+    await runPipeline('UFC Fight Day Model', () => runPythonScript('ufcProjectionModel.py'));
   }, { timezone: 'America/New_York' });
 
   // ── 9:00 AM ET — Write player prop lines to DB (all sports) ─────────────────
