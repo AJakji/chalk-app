@@ -826,7 +826,9 @@ def project_goals(logs: list, opp_goalie_logs: list, opp_team_logs: list,
         backup_flag = False
 
     opp_goalie_f = ((1 - LEAGUE['sv_pct']) / (1 - opp_sv)) if (1 - opp_sv) > 0 else 1.0
-    opp_goalie_f = cap(opp_goalie_f, 0.60, 1.60)
+    # Tightened from [0.60, 1.60] — no single goalie should swing goals by ±40-60%.
+    # [0.70, 1.40] still allows meaningful differentiation for elite vs backup goalies.
+    opp_goalie_f = cap(opp_goalie_f, 0.70, 1.40)
 
     # 3. Opponent goals allowed factor
     opp_ga_l10 = rolling_avg(opp_team_logs, 'points_allowed', 10) or LEAGUE['team_ga_pg']
@@ -950,7 +952,10 @@ def project_assists(logs: list, opp_team_logs: list, own_team_logs: list,
     # 8. B2B
     b2b_f = 0.94 if is_b2b else 1.00
 
-    proj = base * pp_ast_f * toi_f * linemate_f * opp_ga_f * \
+    # opp_ga_f removed from assist projection — linemate_f already captures team offensive
+    # strength (team GF/game). Applying opponent GA on top creates a double-boost when
+    # the team is good AND the opponent is weak. linemate_f is the right lever here.
+    proj = base * pp_ast_f * toi_f * linemate_f * \
            injury_f * passing_lane_f * ha_f * b2b_f
 
     factors = {
@@ -1289,12 +1294,15 @@ def project_total(home_tl: list, away_tl: list,
     proj_home = home_base * away_goalie_f
     proj_away = away_base * home_goalie_f
 
-    # Combined defence factor
+    # Combined defence factor removed — double-counting with goalie_f.
+    # goalie_f already adjusts for opponent defensive strength (sv% reflects how well
+    # the team defends + how good the goalie is). Applying a second team-GA factor
+    # on top punishes good defensive teams twice.
+    # Record for visibility in factors dict below.
     home_ga_l10 = rolling_avg(home_tl, 'points_allowed', 10) or LEAGUE['team_ga_pg']
     away_ga_l10 = rolling_avg(away_tl, 'points_allowed', 10) or LEAGUE['team_ga_pg']
     combined_def_f = cap(((home_ga_l10 + away_ga_l10) / 2) / LEAGUE['team_ga_pg'], 0.80, 1.25)
-    proj_home *= combined_def_f
-    proj_away *= combined_def_f
+    # proj_home and proj_away NOT multiplied by combined_def_f (removed — double-count)
 
     # B2B factors
     if home_b2b:
@@ -1562,9 +1570,11 @@ def calculate_confidence(edge: float, prop_type: str, sport: str, sample_size: i
     min_edge = MIN_EDGES.get(prop_type, 1.0)
     if abs(edge) < min_edge:
         return None  # Skip this pick
-    base = 62
+    # 50 = minimum edge exactly met (coin flip + barely qualifies).
+    # 87 = exceptional edge (4× minimum). Linear mapping across that range.
+    base = 50
     edge_ratio = abs(edge) / min_edge
-    edge_bonus = min(20, int((edge_ratio - 1) * 10))
+    edge_bonus = min(37, int((edge_ratio - 1) * 12.33))
     if sample_size >= 20:
         sample_bonus = 5
     elif sample_size >= 10:
@@ -1729,10 +1739,12 @@ def upsert_player_projection(conn, player_id: int, player_name: str,
     line = get_market_line(conn, player_name, prop_type, game_date)
     if line is not None:
         edge = round(proj_value - line, 2)
-        # Use universal confidence formula — returns None if edge too small (skip pick)
         conf_score = calculate_confidence(edge, prop_type, 'NHL', confidence)
+        # IMPORTANT: do NOT skip — store every projection regardless of edge size.
+        # The edge detector is the final filter. Returning here means this player
+        # disappears from the pipeline even if lines shift later in the day.
         if conf_score is None:
-            return  # edge below threshold — skip this projection
+            conf_score = confidence  # below edge threshold — store with base confidence
         stored_factors = {**factors, 'market_line': line, 'edge': edge}
     else:
         conf_score = confidence  # use passed-in base confidence until line posts
@@ -1960,8 +1972,9 @@ def main():
                     continue
 
                 logs = get_skater_logs(conn, pid)
-                if len(logs) < 3:
-                    continue
+                # Do not skip sparse players — projection functions fall back to
+                # league averages when logs are empty or short. Still run them;
+                # the edge detector decides if there's a pick worth making.
 
                 rest_days = get_rest_days(conn, pid, game_date)
                 is_b2b    = rest_days <= 1

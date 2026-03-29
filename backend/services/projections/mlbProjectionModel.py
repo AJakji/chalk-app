@@ -953,14 +953,17 @@ def platoon_slg_f(splits: dict, sp_hand: str, season_slg: float) -> float:
 
 
 def platoon_hr_f(splits: dict, sp_hand: str, season_hr_rate: float) -> float:
-    """vs_rhp_hr_rate or vs_lhp_hr_rate / season_hr_rate. Cap 0.50-2.00."""
+    """vs_rhp_hr_rate or vs_lhp_hr_rate / season_hr_rate. Cap 0.60-1.70."""
+    # Tightened from [0.50, 2.00] — a 4x swing from platoon alone is too noisy,
+    # especially when split sample sizes are small. [0.60, 1.70] still captures
+    # genuine lefty/righty power splits without overfitting to small samples.
     if not splits or season_hr_rate <= 0:
         return 1.0
     key = 'vs_lhp_hr_rate' if sp_hand == 'L' else 'vs_rhp_hr_rate'
     split_val = splits.get(key)
     if not split_val or float(split_val) <= 0:
         return 1.0
-    return max(0.50, min(2.00, float(split_val) / season_hr_rate))
+    return max(0.60, min(1.70, float(split_val) / season_hr_rate))
 
 
 def day_night_f(splits: dict, is_day_game: bool, season_avg: float) -> float:
@@ -1487,7 +1490,10 @@ def project_home_runs(
         base = LEAGUE_AVG['hr_per_game']
 
     iso       = compute_iso(batter_logs, 20) if batter_logs else LEAGUE_AVG['iso']
-    iso_f     = max(0.40, min(2.50, iso / LEAGUE_AVG['iso']))
+    # iso_f skipped when base comes from player logs — same fix as total_bases projection.
+    # Player logs already embed their power (HR rate IS their ISO in practice).
+    # iso_f only applies when falling back to league-average base.
+    iso_f     = 1.0 if batter_logs else max(0.40, min(2.50, iso / LEAGUE_AVG['iso']))
     szn_hr_r  = compute_season_hr_rate(batter_logs) if batter_logs else 0.034
     pt_hr_f   = platoon_hr_f(splits, sp_hand, szn_hr_r)
     sp_hr9_f_ = sp_hr9_factor(sp_logs)
@@ -2250,9 +2256,11 @@ def calculate_confidence(edge: float, prop_type: str, sport: str, sample_size: i
     min_edge = MIN_EDGES.get(prop_type, 1.0)
     if abs(edge) < min_edge:
         return None  # Skip this pick
-    base = 62
+    # 50 = minimum edge exactly met (coin flip + barely qualifies).
+    # 87 = exceptional edge (4× minimum). Linear mapping across that range.
+    base = 50
     edge_ratio = abs(edge) / min_edge
-    edge_bonus = min(20, int((edge_ratio - 1) * 10))
+    edge_bonus = min(37, int((edge_ratio - 1) * 12.33))
     if sample_size >= 20:
         sample_bonus = 5
     elif sample_size >= 10:
@@ -2354,11 +2362,15 @@ def get_market_line(conn, player_name: str, prop_type: str, game_date) -> float 
     # Remap model-internal names to DB-stored names
     clean_type = MLB_PROP_TYPE_MAP.get(clean_type, clean_type)
 
-    # Match on last name since name formats can differ
-    last_name = player_name.split()[-1] if player_name else ''
+    if not player_name:
+        return None
+
+    last_name = player_name.split()[-1]
 
     try:
         with conn.cursor() as cur:
+            # Primary: exact full-name match (case-insensitive) — avoids surname collisions
+            # (e.g., multiple 'Martinez' or 'Garcia' players in the same game)
             cur.execute(
                 """SELECT prop_line
                    FROM player_props_history
@@ -2366,11 +2378,26 @@ def get_market_line(conn, player_name: str, prop_type: str, game_date) -> float 
                      AND prop_type = %s
                      AND game_date = %s
                    ORDER BY created_at DESC LIMIT 1""",
-                (f'%{last_name}%', clean_type, str(game_date))
+                (player_name, clean_type, str(game_date))
             )
             row = cur.fetchone()
             if row and row[0] is not None:
                 return float(row[0])
+
+            # Fallback: last-name only, but only when it uniquely identifies one player
+            if len(last_name) > 4:
+                cur.execute(
+                    """SELECT prop_line, COUNT(*) OVER () AS name_count
+                       FROM player_props_history
+                       WHERE player_name ILIKE %s
+                         AND prop_type = %s
+                         AND game_date = %s
+                       ORDER BY created_at DESC LIMIT 1""",
+                    (f'%{last_name}%', clean_type, str(game_date))
+                )
+                row = cur.fetchone()
+                if row and row[0] is not None and row[1] == 1:
+                    return float(row[0])
     except Exception:
         conn.rollback()
     return None
@@ -2421,10 +2448,12 @@ def upsert_player_projection(
                 edge = round(proj_value - line, 2)
                 merged['market_line'] = line
                 merged['edge'] = edge
-                # Use universal confidence formula — returns None if edge too small
                 conf_score = calculate_confidence(edge, db_prop_type, 'MLB', confidence)
+                # IMPORTANT: do NOT skip — store every projection regardless of edge size.
+                # The edge detector is the final filter. Skipping here drops the player
+                # from the pipeline entirely.
                 if conf_score is None:
-                    continue  # edge below threshold — skip this projection
+                    conf_score = confidence  # below edge threshold — store with base confidence
             else:
                 conf_score = confidence  # use base confidence until line posts
 

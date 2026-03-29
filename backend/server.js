@@ -898,6 +898,67 @@ async function recoverMissedPipeline() {
   }
 }
 
+// ── Admin: pipeline status ────────────────────────────────────────────────────
+// GET /api/admin/status?secret=ADMIN_SECRET
+// Shows exactly what data the pipeline has for today: projections, edges, picks by source.
+app.get('/api/admin/status', async (req, res) => {
+  if (req.query.secret !== process.env.ADMIN_SECRET) {
+    return res.status(403).json({ error: 'Unauthorized' });
+  }
+  try {
+    const today = new Date().toISOString().split('T')[0];
+
+    // chalk_projections: how many rows per sport written by Python models
+    const projRows = await db.query(`
+      SELECT sport, prop_type, COUNT(*) as cnt
+      FROM chalk_projections
+      WHERE created_at >= NOW() - INTERVAL '24 hours'
+      GROUP BY sport, prop_type
+      ORDER BY sport, prop_type
+    `);
+
+    // player_props_history edges written by edge detector
+    const edgeRows = await db.query(`
+      SELECT sport, prop_type, COUNT(*) as cnt,
+             ROUND(AVG(chalk_edge)::numeric, 3) as avg_edge,
+             ROUND(AVG(confidence)::numeric, 1) as avg_confidence
+      FROM player_props_history
+      WHERE date = $1
+      GROUP BY sport, prop_type
+      ORDER BY sport, prop_type
+    `, [today]);
+
+    // picks stored today, broken down by source
+    const pickRows = await db.query(`
+      SELECT pick_source, pick_category, league, COUNT(*) as cnt
+      FROM picks
+      WHERE pick_date = CURRENT_DATE
+      GROUP BY pick_source, pick_category, league
+      ORDER BY pick_source, league
+    `);
+
+    // all picks today with key fields for inspection
+    const allPicks = await db.query(`
+      SELECT id, league, pick_type, pick_category, pick_source,
+             player_name, pick_value, confidence, proj_value, prop_line, chalk_edge,
+             away_team, home_team, created_at
+      FROM picks
+      WHERE pick_date = CURRENT_DATE
+      ORDER BY pick_source, confidence DESC
+    `);
+
+    res.json({
+      date: today,
+      projections: projRows.rows,
+      edges: edgeRows.rows,
+      pick_counts_by_source: pickRows.rows,
+      picks: allPicks.rows,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── Start ────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`\n🎯 Chalk API running on port ${PORT}`);

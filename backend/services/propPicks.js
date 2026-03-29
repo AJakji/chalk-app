@@ -303,8 +303,8 @@ async function storePropPicks(props) {
           (league, sport_key, pick_type, pick_category,
            player_name, player_team, player_position,
            away_team, home_team, game_time, game_id, matchup_text,
-           pick_value, confidence, short_reason, analysis, odds_data)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+           pick_value, confidence, short_reason, analysis, odds_data, pick_source)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
          ON CONFLICT (game_id, pick_type, COALESCE(player_name, '')) DO NOTHING`,
         [
           prop.league,
@@ -324,6 +324,7 @@ async function storePropPicks(props) {
           prop.shortReason,
           JSON.stringify(prop.analysis || {}),
           JSON.stringify(prop.odds || {}),
+          'ai_prop',
         ]
       );
     } catch (err) {

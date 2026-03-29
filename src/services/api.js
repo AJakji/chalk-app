@@ -387,6 +387,8 @@ function normalizePick(row) {
     prop_line:      row.prop_line       ?? null,
     chalk_edge:     row.chalk_edge      ?? row.edge ?? null,
     confidence_score: row.confidence_score ?? row.confidence ?? null,
+    // Source tag: 'chalk_model' = backed by projection model, 'ai_game' = AI only, 'ai_prop' = AI prop
+    pick_source:    row.pick_source     ?? 'ai_game',
   };
 }
 

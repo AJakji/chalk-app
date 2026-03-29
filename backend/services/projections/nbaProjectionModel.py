@@ -158,9 +158,11 @@ def calculate_confidence(edge: float, prop_type: str, sport: str, sample_size: i
     min_edge = MIN_EDGES.get(prop_type, 1.0)
     if abs(edge) < min_edge:
         return None  # Skip this pick
-    base = 62
+    # 50 = minimum edge exactly met (coin flip + barely qualifies).
+    # 87 = exceptional edge (4× minimum). Linear mapping across that range.
+    base = 50
     edge_ratio = abs(edge) / min_edge
-    edge_bonus = min(20, int((edge_ratio - 1) * 10))
+    edge_bonus = min(37, int((edge_ratio - 1) * 12.33))
     if sample_size >= 20:
         sample_bonus = 5
     elif sample_size >= 10:
@@ -740,10 +742,15 @@ def project_player(
 
     # Usage approximation — normalized so league-average player ≈ 1.0.
     # Denominator min * 0.38 gives ~1.0 for a typical starter (8 FGA, 2.5 FTA, 25 min).
-    # High-usage stars (15 FGA, 6 FTA, 35 min) get ~1.30-1.35.
-    # min * 0.20 was wrong: produced 2.0+ for all starters, everyone hit the 1.45 ceiling.
+    # IMPORTANT: The weighted base (L5/L10/L20/season) already embeds a player's usage
+    # patterns — their actual historical scoring reflects how much the ball comes to them.
+    # Applying usage_approx directly as a multiplier double-counts usage for stars.
+    # Fix: only adjust ±a small amount based on deviation from league-average (1.0).
+    # The injury boost (usage_boost from out players) still applies in full — that's
+    # a genuine change from baseline and should move the projection.
     usage_approx = (fga_season + 0.44 * fta_season) / max(min_season * 0.38, 1)
-    usage_f = clamp(usage_approx + usage_boost, 0.70, 1.45)
+    usage_deviation = usage_approx - 1.0
+    usage_f = clamp(1.0 + usage_deviation * 0.20 + usage_boost, 0.93, 1.20)
 
     # Archetype
     archetype = classify_archetype(
@@ -850,15 +857,15 @@ def project_player(
     l5_reb   = rolling_avg(logs, 'rebounds', 5)
     l10_reb  = rolling_avg(logs, 'rebounds', 10)
 
-    # Big man bonus
-    big_bonus = 1.08 if archetype == TRUE_BIG else 1.00
+    # Big man bonus removed — weighted base already reflects a big's rebounding role
+    # (their L5/L10/season averages ARE their rebounding output, which is already high
+    # because they're a big). A 1.08× on top was double-counting position.
 
     proj_reb = (base_reb
                 * pos_def_reb
                 * pace_f
                 * rest_f
                 * ha_reb_f
-                * big_bonus
                 * total_f
                 * game_script_f)
 
@@ -873,7 +880,6 @@ def project_player(
         'pace_f':      round(pace_f, 3),
         'rest_f':      round(rest_f, 3),
         'home_away_f': round(ha_reb_f, 3),
-        'big_bonus':   round(big_bonus, 3),
         'total_f':     round(total_f, 3),
         'game_script_f': round(game_script_f, 3),
         'archetype':   archetype,
@@ -886,15 +892,14 @@ def project_player(
     l5_ast   = rolling_avg(logs, 'assists', 5)
     l10_ast  = rolling_avg(logs, 'assists', 10)
 
-    # Playmaker bonus
-    pg_bonus = 1.08 if archetype == TRUE_PLAYMAKER else 1.00
+    # Playmaker bonus removed — same reason as big_bonus for rebounds.
+    # A true playmaker's base already reflects 7+ apg; 1.08× double-counts their role.
 
     proj_ast = (base_ast
                 * pos_def_ast
                 * pace_f
                 * rest_f
                 * ha_ast_f
-                * pg_bonus
                 * total_f)
 
     conf_ast = calculate_confidence(0.0, 'assists', 'NBA', len(logs)) or 62
@@ -908,7 +913,6 @@ def project_player(
         'pace_f':      round(pace_f, 3),
         'rest_f':      round(rest_f, 3),
         'home_away_f': round(ha_ast_f, 3),
-        'pg_bonus':    round(pg_bonus, 3),
         'total_f':     round(total_f, 3),
         'archetype':   archetype,
     }
@@ -920,14 +924,12 @@ def project_player(
     l5_3pm   = rolling_avg(logs, 'three_made', 5)
     l10_3pm  = rolling_avg(logs, 'three_made', 10)
 
-    # 3-and-D archetype bonus
-    threes_bonus = 1.10 if archetype == THREE_AND_D else 1.00
+    # 3-and-D archetype bonus removed — base already reflects their actual 3PM averages.
 
     proj_3pm = (base_3pm
                 * pos_def_3pm
                 * pace_f
                 * rest_f
-                * threes_bonus
                 * total_f)
 
     # Three-point volume check: project at least fg3a * avg_pct if base is very low
@@ -946,7 +948,7 @@ def project_player(
         'pos_def_f':   round(pos_def_3pm, 3),
         'pace_f':      round(pace_f, 3),
         'rest_f':      round(rest_f, 3),
-        'threes_bonus': round(threes_bonus, 3),
+
         'total_f':     round(total_f, 3),
         'archetype':   archetype,
         'special_weighting': 'L5×0.50 + L10×0.25 + L20×0.15 + season×0.10',
@@ -1317,10 +1319,13 @@ def upsert_player_projections(conn, proj: PlayerProjection) -> int:
             line = get_market_line(conn, proj.player_name, prop_type, proj.game_date)
             if line is not None:
                 edge_val = round(raw_proj - line, 2)
-                # Use universal confidence formula — returns None if edge too small
+                # Use universal confidence formula — returns None if edge too small.
+                # IMPORTANT: do NOT skip — store every projection so the edge detector
+                # can process it. Skipping here means the edge detector never sees this
+                # player, even if lines move later in the day.
                 conf_score = calculate_confidence(edge_val, prop_type, 'NBA', len(proj.props))
                 if conf_score is None:
-                    continue  # edge too small — skip
+                    conf_score = raw_conf  # below edge threshold — store with base confidence
                 factors = {**factors, 'market_line': line, 'edge': edge_val}
             else:
                 edge_val   = 0.0   # placeholder until lines post at 9 AM

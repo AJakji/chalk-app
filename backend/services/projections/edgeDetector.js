@@ -586,9 +586,12 @@ function calculateConfidence(edge, propType, sport, sampleSize = 10) {
   }
   const minEdge = MIN_EDGES[propType] || 1.0
   if (Math.abs(edge) < minEdge) return null
-  const base = 62
+  // 50 = minimum edge exactly met (barely qualifies — no real advantage over a coin flip).
+  // 87 = exceptional edge (4× minimum threshold). Linear mapping across that range.
+  // Picks below minimum edge are filtered before reaching this function (return null above).
+  const base = 50
   const edgeRatio = Math.abs(edge) / minEdge
-  const edgeBonus = Math.min(20, Math.floor((edgeRatio - 1) * 10))
+  const edgeBonus = Math.min(37, Math.floor((edgeRatio - 1) * 12.33))
   let sampleBonus = 0
   if (sampleSize >= 20) sampleBonus = 5
   else if (sampleSize >= 10) sampleBonus = 3

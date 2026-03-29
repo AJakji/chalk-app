@@ -657,8 +657,8 @@ async function storeModelPicks(picks, headshotMap = {}) {
           (league, sport_key, pick_type, pick_category,
            away_team, home_team, game_time, game_id,
            pick_value, confidence, short_reason, analysis, odds_data,
-           player_name, player_team, matchup_text, headshot_url)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+           player_name, player_team, matchup_text, headshot_url, pick_source)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
          ON CONFLICT (game_id, pick_type, COALESCE(player_name, '')) DO NOTHING`,
         [
           pick.league || 'NBA',
@@ -678,6 +678,7 @@ async function storeModelPicks(picks, headshotMap = {}) {
           pick.playerTeam,
           pick.matchupText,
           headshotUrl,
+          'chalk_model',
         ]
       );
     } catch (err) {
@@ -841,8 +842,8 @@ async function storePicks(picks) {
       await db.query(
         `INSERT INTO picks
           (league, sport_key, pick_type, pick_category, away_team, home_team, game_time, game_id,
-           pick_value, confidence, short_reason, analysis, odds_data)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+           pick_value, confidence, short_reason, analysis, odds_data, pick_source)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
          ON CONFLICT (game_id, pick_type, COALESCE(player_name, '')) DO NOTHING`,
         [
           pick.league,
@@ -858,6 +859,7 @@ async function storePicks(picks) {
           pick.shortReason,
           JSON.stringify(pick.analysis),   // full object: { summary, sections, keyStats, trends }
           JSON.stringify(pick.odds),
+          'ai_game',
         ]
       );
     } catch (err) {
