@@ -773,7 +773,7 @@ async function storeTeamBetPick({
           pick_value, confidence, short_reason, analysis, key_stats, odds_data,
           pick_date, pick_category)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, CURRENT_DATE, 'game')
-       ON CONFLICT (game_id, pick_type) DO UPDATE SET
+       ON CONFLICT (game_id, pick_type, COALESCE(player_name, '')) DO UPDATE SET
          pick_value   = EXCLUDED.pick_value,
          confidence   = EXCLUDED.confidence,
          short_reason = EXCLUDED.short_reason,
@@ -1913,7 +1913,9 @@ async function getTodaysEdges(gameDate, sport = null) {
       `SELECT pph.*, cp.opponent, cp.home_away, cp.factors_json
        FROM player_props_history pph
        LEFT JOIN chalk_projections cp
-         ON cp.player_id = pph.player_id AND cp.game_date = pph.game_date
+         ON cp.player_id = pph.player_id
+         AND cp.game_date = pph.game_date
+         AND cp.prop_type = pph.prop_type
        WHERE pph.game_date = $1
          ${sportClause}
          AND pph.chalk_edge IS NOT NULL
@@ -2056,7 +2058,7 @@ async function detectEdgesForSport(sport, gameDate) {
             confidence,
           });
         } catch (err) {
-          console.error(`  [storeEdge] Failed for ${edgeObj.playerName} ${propType}: ${err.message}`);
+          console.error(`  [storeEdge] Failed for ${edgeObj.playerName} ${propTypeInternal}: ${err.message}`);
         }
       }
     }

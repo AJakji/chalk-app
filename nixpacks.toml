@@ -1,0 +1,15 @@
+# Nixpacks build config for Railway
+# Tells Railway to install Python + pip alongside Node.js,
+# then pip-install every package the projection scripts need.
+
+[phases.setup]
+nixPkgs = ['nodejs_20', 'python311', 'python311Packages.pip']
+
+[phases.install]
+cmds = [
+  'npm ci --prefix backend',
+  'pip install psycopg2-binary requests python-dotenv MLB-StatsAPI beautifulsoup4 lxml'
+]
+
+[start]
+cmd = 'node backend/server.js'

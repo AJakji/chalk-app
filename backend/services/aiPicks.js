@@ -623,6 +623,18 @@ ${JSON.stringify(edgesForClaude, null, 2)}`;
 async function storeModelPicks(picks, headshotMap = {}) {
   for (const pick of picks) {
     try {
+      // Validate required NOT NULL fields before attempting INSERT
+      const missing = [];
+      if (!pick.league)      missing.push('league');
+      if (!pick.pick)        missing.push('pick');
+      if (!pick.confidence)  missing.push('confidence');
+      if (!pick.playerName)  missing.push('playerName');
+      if (pick.awayTeam === undefined && pick.homeTeam === undefined) missing.push('awayTeam/homeTeam');
+      if (missing.length > 0) {
+        console.error(`[storeModelPicks] Skipping pick — missing required fields: ${missing.join(', ')}`, JSON.stringify(pick).slice(0, 200));
+        continue;
+      }
+
       // Build a stable unique key: player + prop type + date
       // Include propType so the same player can have multiple picks (e.g. points + PRA)
       const propSlug = (pick.propType || pick.pick || '').replace(/\s+/g, '_').toLowerCase();
@@ -781,6 +793,22 @@ async function generatePicks() {
 async function storePicks(picks) {
   for (const pick of picks) {
     try {
+      // Validate required NOT NULL fields before attempting INSERT
+      const missing = [];
+      if (!pick.league)      missing.push('league');
+      if (!pick.sportKey)    missing.push('sportKey');
+      if (!pick.pickType)    missing.push('pickType');
+      if (!pick.awayTeam)    missing.push('awayTeam');
+      if (!pick.homeTeam)    missing.push('homeTeam');
+      if (!pick.gameTime)    missing.push('gameTime');
+      if (!pick.pick)        missing.push('pick');
+      if (!pick.confidence)  missing.push('confidence');
+      if (!pick.shortReason) missing.push('shortReason');
+      if (missing.length > 0) {
+        console.error(`[storePicks] Skipping pick — missing required fields: ${missing.join(', ')}`, JSON.stringify(pick).slice(0, 200));
+        continue;
+      }
+
       await db.query(
         `INSERT INTO picks
           (league, sport_key, pick_type, pick_category, away_team, home_team, game_time, game_id,
