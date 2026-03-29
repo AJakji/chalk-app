@@ -205,7 +205,7 @@ export default function OnboardingScreen({ onComplete }) {
           />
         </TouchableOpacity>
 
-        <Text style={styles.legal}>18+ only. Bet responsibly.</Text>
+        <Text style={styles.legal}>Not financial advice. Bet responsibly.</Text>
       </View>
     </SafeAreaView>
   );

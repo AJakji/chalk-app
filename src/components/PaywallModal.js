@@ -138,7 +138,7 @@ export default function PaywallModal({ visible, onClose }) {
               </Text>
 
               <Text style={styles.legalNote}>
-                Cancel anytime. 18+ only. Bet responsibly.
+                Not financial advice. Bet responsibly.
               </Text>
             </ScrollView>
           </SafeAreaView>

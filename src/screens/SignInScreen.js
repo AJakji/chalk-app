@@ -214,7 +214,7 @@ export default function SignInScreen({ navigation }) {
 
           {/* Footer */}
           <Text style={s.footer}>
-            By continuing you agree to our Terms of Service · 18+ · Bet responsibly
+            Not financial advice. Bet responsibly.
           </Text>
         </ScrollView>
       </KeyboardAvoidingView>

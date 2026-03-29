@@ -144,7 +144,7 @@ export default function WelcomeScreen({ navigation }) {
           <Text style={s.signInBtnText}>Sign In</Text>
         </TouchableOpacity>
 
-        <Text style={s.legal}>18+ only. Bet responsibly.</Text>
+        <Text style={s.legal}>Not financial advice. Bet responsibly.</Text>
       </Animated.View>
     </SafeAreaView>
   );
