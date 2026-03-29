@@ -101,6 +101,130 @@ app.get('/api/version', (req, res) => {
 // These run fine on Railway with no special networking required.
 // On Railway, all crons run correctly in production.
 
+// ── UFC Odds ──────────────────────────────────────────────────────────────────
+// Token overlap score 0-1 between two name strings.
+function nameSimilarity(a, b) {
+  if (!a || !b) return 0;
+  const tokA = a.toLowerCase().replace(/[^a-z\s]/g, '').split(/\s+/).filter(Boolean);
+  const tokB = b.toLowerCase().replace(/[^a-z\s]/g, '').split(/\s+/).filter(Boolean);
+  const matches = tokA.filter(t => tokB.includes(t)).length;
+  return matches / Math.max(tokA.length, tokB.length);
+}
+
+/**
+ * Pull UFC/MMA fight moneylines from The Odds API and write them into
+ * ufc_upcoming_fights.fighter_a_moneyline / fighter_b_moneyline.
+ * Uses fuzzy name matching (token overlap) to link Odds API fighter names
+ * to the ufcstats names already in the DB.
+ */
+async function fetchAndStoreUFCOdds() {
+  const apiKey = process.env.ODDS_API_KEY;
+  if (!apiKey) {
+    console.log('[UFC Odds] ODDS_API_KEY not set — skipping');
+    return;
+  }
+
+  try {
+    const url = new URL('https://api.the-odds-api.com/v4/sports/mma_mixed_martial_arts/odds');
+    url.searchParams.set('apiKey',      apiKey);
+    url.searchParams.set('regions',     'us');
+    url.searchParams.set('markets',     'h2h');
+    url.searchParams.set('oddsFormat',  'american');
+    url.searchParams.set('bookmakers',  'draftkings,fanduel,betmgm,bet365');
+
+    const res = await fetch(url.toString(), { signal: AbortSignal.timeout(15000) });
+    const remaining = res.headers.get('x-requests-remaining');
+    if (remaining) console.log(`[UFC Odds] Credits remaining: ${remaining}`);
+
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      console.warn(`[UFC Odds] API error ${res.status}:`, body.message || '');
+      return;
+    }
+
+    const events = await res.json();
+    if (!Array.isArray(events) || events.length === 0) {
+      console.log('[UFC Odds] No MMA events returned from Odds API');
+      return;
+    }
+    console.log(`[UFC Odds] ${events.length} MMA events from Odds API`);
+
+    // Load all upcoming fights once
+    const { rows: fights } = await db.query(`
+      SELECT id, fighter_a_name, fighter_b_name
+      FROM ufc_upcoming_fights
+      WHERE fight_date >= CURRENT_DATE
+    `);
+
+    if (fights.length === 0) {
+      console.log('[UFC Odds] No upcoming fights in DB to match against');
+      return;
+    }
+
+    let updated = 0;
+
+    for (const event of events) {
+      const apiA = event.home_team;
+      const apiB = event.away_team;
+      if (!apiA || !apiB) continue;
+
+      // Extract moneylines — prefer DraftKings, fall back to first bookmaker
+      let mlA = null, mlB = null;
+      const bm = event.bookmakers?.find(b => b.key === 'draftkings')
+              || event.bookmakers?.find(b => b.key === 'fanduel')
+              || event.bookmakers?.[0];
+      if (bm) {
+        const h2h = bm.markets?.find(m => m.key === 'h2h');
+        if (h2h) {
+          mlA = h2h.outcomes?.find(o => o.name === apiA)?.price ?? null;
+          mlB = h2h.outcomes?.find(o => o.name === apiB)?.price ?? null;
+        }
+      }
+      if (mlA === null || mlB === null) continue;
+
+      // Find the best matching fight row in our DB
+      let bestFight = null, bestScore = 0;
+      for (const fight of fights) {
+        // Try both orientations (apiA↔fighter_a and apiA↔fighter_b)
+        const scoreAA = nameSimilarity(apiA, fight.fighter_a_name);
+        const scoreBB = nameSimilarity(apiB, fight.fighter_b_name);
+        const scoreAB = nameSimilarity(apiA, fight.fighter_b_name);
+        const scoreBA = nameSimilarity(apiB, fight.fighter_a_name);
+        const scoreNormal  = (scoreAA + scoreBB) / 2;
+        const scoreFlipped = (scoreAB + scoreBA) / 2;
+        const score = Math.max(scoreNormal, scoreFlipped);
+        if (score > bestScore && score >= 0.6) {
+          bestScore = score;
+          bestFight = { ...fight, flipped: scoreFlipped > scoreNormal };
+        }
+      }
+
+      if (!bestFight) {
+        console.log(`[UFC Odds] No DB match for: ${apiA} vs ${apiB} (best score ${bestScore.toFixed(2)})`);
+        continue;
+      }
+
+      // If flipped, apiA maps to fighter_b in DB and apiB maps to fighter_a
+      const finalMlA = bestFight.flipped ? mlB : mlA;
+      const finalMlB = bestFight.flipped ? mlA : mlB;
+
+      await db.query(`
+        UPDATE ufc_upcoming_fights
+        SET fighter_a_moneyline = $1,
+            fighter_b_moneyline = $2
+        WHERE id = $3
+      `, [finalMlA, finalMlB, bestFight.id]);
+
+      console.log(`[UFC Odds] ✅ ${bestFight.fighter_a_name} (${finalMlA}) vs ${bestFight.fighter_b_name} (${finalMlB})`);
+      updated++;
+    }
+
+    console.log(`[UFC Odds] Done — ${updated} fights updated with moneylines`);
+  } catch (err) {
+    console.error('[UFC Odds] Unexpected error:', err.message);
+  }
+}
+
 function runPythonScript(scriptName, args = []) {
   return new Promise((resolve, reject) => {
     const scriptPath = path.join(__dirname, 'services/projections', scriptName);
@@ -436,10 +560,22 @@ if (process.env.MOCK_MODE !== 'true') {
     await runPipeline('UFC Data Collector', () => runPythonScript('ufcDataCollector.py'));
   }, { timezone: 'America/New_York' });
 
+  // ── UFC: Tuesday 3:30 AM ET — Pull moneylines from Odds API ──────────────────
+  cron.schedule('30 3 * * 2', async () => {
+    console.log('\n⏰ [Tue 3:30 AM] UFC odds fetch…');
+    await fetchAndStoreUFCOdds();
+  }, { timezone: 'America/New_York' });
+
   // ── UFC: Tuesday 4:00 AM ET — Run projection model ───────────────────────────
   cron.schedule('0 4 * * 2', async () => {
     console.log('\n⏰ [Tue 4:00 AM] UFC projection model…');
     await runPipeline('UFC Projection Model', () => runPythonScript('ufcProjectionModel.py'));
+  }, { timezone: 'America/New_York' });
+
+  // ── UFC: Saturday 8:00 AM ET — Refresh odds before fight-day model run ────────
+  cron.schedule('0 8 * * 6', async () => {
+    console.log('\n⏰ [Sat 8:00 AM] UFC fight-day odds refresh…');
+    await fetchAndStoreUFCOdds();
   }, { timezone: 'America/New_York' });
 
   // ── UFC: Saturday 9:00 AM ET — Refresh model with fight-day odds ─────────────

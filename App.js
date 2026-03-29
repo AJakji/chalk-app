@@ -14,6 +14,7 @@ import PicksScreen from './src/screens/PicksScreen';
 import ScoresScreen from './src/screens/ScoresScreen';
 import ResearchScreen from './src/screens/ResearchScreen';
 import PlayersScreen from './src/screens/PlayersScreen';
+import UFCScreen from './src/screens/UFCScreen';
 import OnboardingScreen, { ONBOARDING_SEEN_KEY } from './src/screens/OnboardingScreen';
 import WelcomeScreen from './src/screens/WelcomeScreen';
 import SignInScreen from './src/screens/SignInScreen';
@@ -23,7 +24,7 @@ import PaywallModal from './src/components/PaywallModal';
 import { colors } from './src/theme';
 import { navigationRef } from './src/navigationRef';
 
-const CLERK_PUBLISHABLE_KEY = 'pk_test_cXVhbGl0eS1wZXJjaC0zOC5jbGVyay5hY2NvdW50cy5kZXYk';
+const CLERK_PUBLISHABLE_KEY = 'pk_live_Y2xlcmsuY2hhbGt5cGlja3MuY29tJA';
 
 const tokenCache = {
   async getToken(key) {
@@ -69,6 +70,7 @@ const PicksTab    = () => <FadeScreen><PicksScreen /></FadeScreen>;
 const ResearchTab = () => <FadeScreen><ResearchScreen /></FadeScreen>;
 const ScoresTab   = () => <FadeScreen><ScoresScreen /></FadeScreen>;
 const PlayersTab  = ({ navigation }) => <FadeScreen><PlayersScreen navigation={navigation} /></FadeScreen>;
+const UFCTab      = () => <FadeScreen><UFCScreen /></FadeScreen>;
 
 // ── Tab icons ──────────────────────────────────────────────────────────────────
 
@@ -110,6 +112,17 @@ function PlayersIcon({ color, size }) {
     <View style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }}>
       <View style={{ width: headR * 2, height: headR * 2, borderRadius: headR, borderWidth: 2, borderColor: color, marginBottom: 3 }} />
       <View style={{ width: bodyW, height: bodyH, borderTopLeftRadius: bodyW / 2, borderTopRightRadius: bodyW / 2, borderWidth: 2, borderColor: color, borderBottomWidth: 0 }} />
+    </View>
+  );
+}
+
+function UFCIcon({ color, size }) {
+  // Octagon shape via two rotated squares
+  const sq = size * 0.48;
+  return (
+    <View style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }}>
+      <View style={{ width: sq, height: sq, borderWidth: 2.5, borderColor: color, borderRadius: 4, transform: [{ rotate: '22.5deg' }], position: 'absolute' }} />
+      <View style={{ width: sq, height: sq, borderWidth: 2.5, borderColor: color, borderRadius: 4, transform: [{ rotate: '67.5deg' }], position: 'absolute' }} />
     </View>
   );
 }
@@ -183,6 +196,11 @@ function MainTabs() {
           name="Players"
           component={PlayersTab}
           options={{ tabBarIcon: ({ focused }) => <TabIcon IconComponent={PlayersIcon} focused={focused} activeColor={colors.green} /> }}
+        />
+        <Tab.Screen
+          name="UFC"
+          component={UFCTab}
+          options={{ tabBarIcon: ({ focused }) => <TabIcon IconComponent={UFCIcon} focused={focused} activeColor='#E8000A' />, tabBarActiveTintColor: '#E8000A' }}
         />
       </Tab.Navigator>
       <PaywallModal visible={visible} onClose={closePaywall} />
