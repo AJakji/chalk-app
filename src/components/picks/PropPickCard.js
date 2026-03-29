@@ -1,5 +1,6 @@
 import React, { useRef, useEffect, useState } from 'react';
-import { View, Text, Image, Pressable, Animated, StyleSheet, Linking } from 'react-native';
+import { View, Text, Image, Pressable, Animated, StyleSheet, Linking, TouchableOpacity } from 'react-native';
+import { BlurView } from 'expo-blur';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, spacing, radius } from '../../theme';
 import { AFFILIATE_LINKS } from '../../config';
@@ -127,7 +128,7 @@ function BetButton({ book, label, odds, line, affiliateUrl }) {
 
 // ── Main component ────────────────────────────────────────────────────────────
 
-export default function PropPickCard({ pick, onPress, isTopPick, isFree }) {
+export default function PropPickCard({ pick, onPress, isTopPick, isLocked, onLockedPress }) {
   const scale = useRef(new Animated.Value(1)).current;
   const [showInfo, setShowInfo] = useState(false);
 
@@ -156,6 +157,41 @@ export default function PropPickCard({ pick, onPress, isTopPick, isFree }) {
   // Bar color
   const barColor = pick.confidence >= 80 ? colors.green : pick.confidence >= 65 ? '#FFB800' : colors.red;
 
+  // Derive a readable prop category for the FOMO header
+  const propCategory = pick.pickType
+    ? pick.pickType.charAt(0).toUpperCase() + pick.pickType.slice(1) + ' Prop'
+    : 'Player Prop';
+
+  if (isLocked) {
+    return (
+      <TouchableOpacity onPress={onLockedPress} activeOpacity={0.9}>
+        <Animated.View style={[styles.card, isTopPick && styles.topPickCard, styles.lockedCard, { transform: [{ scale }] }]}>
+          {/* Visible header — player name + prop type creates FOMO */}
+          <View style={styles.lockedHeader}>
+            <Text style={styles.lockedPlayerName} numberOfLines={1}>{pick.playerName}</Text>
+            <View style={styles.lockedMeta}>
+              <Text style={styles.lockedPropType}>{propCategory}</Text>
+              <View style={styles.lockedLeagueBadge}>
+                <Text style={styles.lockedLeagueText}>{emoji} {pick.league}</Text>
+              </View>
+            </View>
+          </View>
+
+          {/* Blur covers everything below the header */}
+          <BlurView intensity={22} tint="dark" style={styles.blurOverlay}>
+            <View style={styles.lockContainer}>
+              <View style={styles.lockIconCircle}>
+                <Ionicons name="lock-closed" size={20} color="#FFD700" />
+              </View>
+              <Text style={styles.lockTitle}>Chalky Pro</Text>
+              <Text style={styles.lockSubtext}>Tap to unlock all picks</Text>
+            </View>
+          </BlurView>
+        </Animated.View>
+      </TouchableOpacity>
+    );
+  }
+
   return (
     <Pressable onPress={() => onPress(pick)} onPressIn={handlePressIn} onPressOut={handlePressOut}>
       <Animated.View style={[
@@ -163,12 +199,6 @@ export default function PropPickCard({ pick, onPress, isTopPick, isFree }) {
         isTopPick && styles.topPickCard,
         { transform: [{ scale }] },
       ]}>
-
-        {isFree && (
-          <View style={styles.freeBadge}>
-            <Text style={styles.freeBadgeText}>FREE</Text>
-          </View>
-        )}
 
         {/* ── Header: league · PLAYER PROP · confidence% ─────────────────── */}
         <View style={styles.header}>
@@ -564,20 +594,79 @@ const styles = StyleSheet.create({
     color: colors.grey,
     fontStyle: 'italic',
   },
-  freeBadge: {
-    position: 'absolute',
-    top: 12,
-    right: 12,
-    backgroundColor: '#00E87A',
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 6,
-    zIndex: 1,
+  // Locked FOMO state
+  lockedCard: {
+    minHeight: 160,
+    overflow: 'hidden',
   },
-  freeBadgeText: {
-    color: '#080808',
-    fontSize: 10,
+  lockedHeader: {
+    gap: 4,
+    paddingBottom: 4,
+  },
+  lockedPlayerName: {
+    fontSize: 17,
     fontWeight: '800',
-    letterSpacing: 1,
+    color: colors.offWhite,
+    letterSpacing: -0.3,
+  },
+  lockedMeta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  lockedPropType: {
+    fontSize: 12,
+    color: colors.grey,
+    fontWeight: '600',
+  },
+  lockedLeagueBadge: {
+    backgroundColor: colors.surface,
+    borderRadius: 4,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  lockedLeagueText: {
+    fontSize: 11,
+    color: colors.grey,
+    fontWeight: '600',
+  },
+  blurOverlay: {
+    position: 'absolute',
+    top: 60,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    borderBottomLeftRadius: 16,
+    borderBottomRightRadius: 16,
+    overflow: 'hidden',
+  },
+  lockContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+  },
+  lockIconCircle: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255,215,0,0.15)',
+    borderWidth: 1,
+    borderColor: '#FFD700',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 4,
+  },
+  lockTitle: {
+    color: '#FFD700',
+    fontSize: 14,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+  },
+  lockSubtext: {
+    color: '#888888',
+    fontSize: 12,
   },
 });

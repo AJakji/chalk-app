@@ -103,7 +103,7 @@ export default function PaywallModal({ visible, onClose }) {
 
               {/* Feature list */}
               <View style={styles.featureList}>
-                <CheckRow text="All 5 of Chalky's top daily picks — including his best bets" />
+                <CheckRow text="All 7 of Chalky's top daily picks — including his best bets" />
                 <CheckRow text="Unlimited questions in the Research tab" />
                 <CheckRow text="Deep stats, injury intel, and line movement alerts" />
               </View>
@@ -133,8 +133,10 @@ export default function PaywallModal({ visible, onClose }) {
                 <Text style={styles.ctaText}>Start Chalky Pro</Text>
               </TouchableOpacity>
 
-              <Text style={styles.freeTierNote}>
-                Free plan: top 2 picks per day, limited research queries
+              <Text style={styles.socialNote}>
+                Not ready?{' '}
+                <Text style={styles.socialHandle}>Follow @chalkyapp</Text>
+                {' '}on Instagram, TikTok, and X for free daily picks.
               </Text>
 
               <Text style={styles.legalNote}>
@@ -332,11 +334,16 @@ const styles = StyleSheet.create({
     color: colors.background,
     letterSpacing: 0.2,
   },
-  freeTierNote: {
-    fontSize: 12,
-    color: colors.grey,
+  socialNote: {
+    fontSize: 13,
+    color: '#888888',
     textAlign: 'center',
-    marginTop: -4,
+    marginTop: 4,
+    lineHeight: 20,
+  },
+  socialHandle: {
+    color: '#00E87A',
+    fontWeight: '600',
   },
   legalNote: {
     fontSize: 11,

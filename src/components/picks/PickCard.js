@@ -1,5 +1,6 @@
 import React, { useRef, useEffect, useState } from 'react';
-import { View, Text, Image, Pressable, Animated, StyleSheet } from 'react-native';
+import { View, Text, Image, Pressable, Animated, StyleSheet, TouchableOpacity } from 'react-native';
+import { BlurView } from 'expo-blur';
 import { Ionicons } from '@expo/vector-icons';
 import ConfidenceInfoModal from './ConfidenceInfoModal';
 import { colors, typography, spacing, radius } from '../../theme';
@@ -90,7 +91,7 @@ function ConfidenceBar({ confidence, onInfoPress }) {
   );
 }
 
-export default function PickCard({ pick, onPress, isTopPick, isFree }) {
+export default function PickCard({ pick, onPress, isTopPick, isLocked, onLockedPress }) {
   const leagueColor = LEAGUE_COLORS[pick.league] || colors.grey;
   const getLogo = useTeamLogos();
   const scale = useRef(new Animated.Value(1)).current;
@@ -114,6 +115,43 @@ export default function PickCard({ pick, onPress, isTopPick, isFree }) {
     }).start();
   };
 
+  if (isLocked) {
+    return (
+      <TouchableOpacity onPress={onLockedPress} activeOpacity={0.9}>
+        <Animated.View style={[styles.card, isTopPick && styles.topPickCard, styles.lockedCard, { transform: [{ scale }] }]}>
+          {/* Visible header — player/matchup info creates FOMO */}
+          <View style={styles.header}>
+            <View style={[styles.leagueBadge, { backgroundColor: leagueColor }]}>
+              <Text style={styles.leagueText}>{pick.league}</Text>
+            </View>
+            <View style={styles.gamePickBadge}>
+              <Text style={styles.gamePickBadgeText}>GAME PICK</Text>
+            </View>
+            <Text style={styles.gameTime}>{pick.gameTime}</Text>
+          </View>
+          <View style={styles.matchupRow}>
+            <TeamLogo uri={getLogo(pick.awayTeam, pick.league)} abbr={pick.awayTeam} size={22} />
+            <Text style={styles.matchupTeam} numberOfLines={1}>{pick.awayTeam}</Text>
+            <Text style={styles.atSign}>@</Text>
+            <TeamLogo uri={getLogo(pick.homeTeam, pick.league)} abbr={pick.homeTeam} size={22} />
+            <Text style={styles.matchupTeam} numberOfLines={1}>{pick.homeTeam}</Text>
+          </View>
+
+          {/* Blur covers everything below the header */}
+          <BlurView intensity={22} tint="dark" style={styles.blurOverlay}>
+            <View style={styles.lockContainer}>
+              <View style={styles.lockIconCircle}>
+                <Ionicons name="lock-closed" size={20} color="#FFD700" />
+              </View>
+              <Text style={styles.lockTitle}>Chalky Pro</Text>
+              <Text style={styles.lockSubtext}>Tap to unlock all picks</Text>
+            </View>
+          </BlurView>
+        </Animated.View>
+      </TouchableOpacity>
+    );
+  }
+
   return (
     <Pressable
       onPress={() => onPress(pick)}
@@ -127,12 +165,6 @@ export default function PickCard({ pick, onPress, isTopPick, isFree }) {
           { transform: [{ scale }] },
         ]}
       >
-        {isFree && (
-          <View style={styles.freeBadge}>
-            <Text style={styles.freeBadgeText}>FREE</Text>
-          </View>
-        )}
-
         {/* Header row */}
         <View style={styles.header}>
           <View style={[styles.leagueBadge, { backgroundColor: leagueColor }]}>
@@ -430,20 +462,46 @@ const styles = StyleSheet.create({
   medConf: { color: '#FFA500' },
   lowConf: { color: '#888888' },
   edgeValue: { fontSize: 15, fontWeight: '800' },
-  freeBadge: {
-    position: 'absolute',
-    top: 12,
-    right: 12,
-    backgroundColor: '#00E87A',
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 6,
-    zIndex: 1,
+  // Locked FOMO state
+  lockedCard: {
+    minHeight: 160,
+    overflow: 'hidden',
   },
-  freeBadgeText: {
-    color: '#080808',
-    fontSize: 10,
-    fontWeight: '800',
-    letterSpacing: 1,
+  blurOverlay: {
+    position: 'absolute',
+    top: 60,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    borderBottomLeftRadius: 16,
+    borderBottomRightRadius: 16,
+    overflow: 'hidden',
+  },
+  lockContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+  },
+  lockIconCircle: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255,215,0,0.15)',
+    borderWidth: 1,
+    borderColor: '#FFD700',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 4,
+  },
+  lockTitle: {
+    color: '#FFD700',
+    fontSize: 14,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+  },
+  lockSubtext: {
+    color: '#888888',
+    fontSize: 12,
   },
 });

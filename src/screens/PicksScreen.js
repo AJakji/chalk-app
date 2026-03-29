@@ -23,7 +23,7 @@ const TABS = ["Chalky's Picks", 'NBA', 'MLB', 'NHL', 'Soccer', 'WNBA'];
 // Display-only labels — internal values stay the same so data filters still work
 const TAB_LABELS = { Soccer: 'World Cup' };
 
-// Chalky's Picks: first 2 free, picks 3-7 locked. League tabs: all locked.
+// All picks are locked for non-Pro users on every tab.
 
 function LockedPickWrapper({ children, onUnlock }) {
   return (
@@ -237,44 +237,29 @@ export default function PicksScreen() {
             ) : null
           }
           renderItem={({ item, index }) => {
-            const isChalkyTab = activeTab === "Chalky's Picks";
-            // Chalky's Picks: first 2 free. League tabs: all locked for non-Pro.
-            const isFree = isChalkyTab && index < 2;
-            const isLocked = !isPro && !isFree;
+            const isLocked = !isPro;
             const card = item.pickCategory === 'prop' ? (
               <PropPickCard
                 pick={item}
                 onPress={isLocked ? openPaywall : setSelectedPick}
                 isTopPick={item.id === topPickId}
-                isFree={isFree}
+                isLocked={isLocked}
+                onLockedPress={openPaywall}
               />
             ) : (
               <PickCard
                 pick={item}
                 onPress={isLocked ? openPaywall : setSelectedPick}
                 isTopPick={item.id === topPickId}
-                isFree={isFree}
+                isLocked={isLocked}
+                onLockedPress={openPaywall}
               />
             );
             return (
               <StaggeredItem index={index}>
-                {!isPro && isChalkyTab && index === 2 && (
-                  <View style={styles.lockedDivider}>
-                    <View style={styles.lockedLine} />
-                    <View style={styles.lockedPill}>
-                      <Ionicons name="lock-closed" size={10} color="#FFD700" />
-                      <Text style={styles.lockedPillText}>5 more picks with Chalky Pro</Text>
-                    </View>
-                    <View style={styles.lockedLine} />
-                  </View>
-                )}
                 <View>
                   <Text style={styles.pickRank}>#{index + 1}</Text>
-                  {isLocked ? (
-                    <LockedPickWrapper onUnlock={openPaywall}>
-                      {card}
-                    </LockedPickWrapper>
-                  ) : card}
+                  {card}
                 </View>
               </StaggeredItem>
             );
@@ -285,13 +270,13 @@ export default function PicksScreen() {
               <Text style={styles.emptyTitle}>
                 {activeTab === "Chalky's Picks"
                   ? new Date().getUTCHours() < 11
-                    ? 'Analyzing today\'s slate.'
+                    ? 'Picks drop at 7 AM.'
                     : 'No picks today.'
                   : `No ${TAB_LABELS[activeTab] || activeTab} picks today.`}
               </Text>
               <Text style={styles.emptyText}>
                 {activeTab === "Chalky's Picks" && new Date().getUTCHours() < 11
-                  ? 'Chalky drops 7 picks every morning at 7 AM ET. First 2 are always free.'
+                  ? 'Follow @chalkyapp on Instagram for free daily picks. Pro unlocks everything inside the app.'
                   : 'Day off.'}
               </Text>
             </View>
@@ -440,35 +425,6 @@ const styles = StyleSheet.create({
   emptyText: { fontSize: 13, color: colors.grey, textAlign: 'center', marginTop: 4 },
   retryBtn: { marginTop: 16, paddingHorizontal: 24, paddingVertical: 10, borderRadius: 20, backgroundColor: colors.green },
   retryText: { fontSize: 14, fontWeight: '700', color: colors.background },
-  // Divider between free picks and locked picks in Chalky's Picks tab
-  lockedDivider: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginVertical: 12,
-    paddingHorizontal: 16,
-  },
-  lockedLine: {
-    flex: 1,
-    height: 1,
-    backgroundColor: '#1e1e1e',
-  },
-  lockedPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: '#141414',
-    borderWidth: 1,
-    borderColor: '#FFD700',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 100,
-    marginHorizontal: 12,
-  },
-  lockedPillText: {
-    color: '#FFD700',
-    fontSize: 11,
-    fontWeight: '600',
-  },
 });
 
 const locked = StyleSheet.create({
