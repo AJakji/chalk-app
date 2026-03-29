@@ -1,5 +1,5 @@
 /**
- * SignInScreen — "Welcome Back" sign in screen.
+ * CreateAccountScreen — sign up with Apple, Google, or email.
  */
 import React, { useState, useRef } from 'react';
 import {
@@ -14,17 +14,24 @@ import {
   ActivityIndicator,
   ScrollView,
   Animated,
+  LayoutAnimation,
+  UIManager,
 } from 'react-native';
-import { useSignIn, useOAuth } from '@clerk/clerk-expo';
+import { useSignUp, useOAuth } from '@clerk/clerk-expo';
 import * as WebBrowser from 'expo-web-browser';
 import * as Linking from 'expo-linking';
 import { Ionicons } from '@expo/vector-icons';
 
 WebBrowser.maybeCompleteAuthSession();
 
-// ── Shared input ──────────────────────────────────────────────────────────────
+if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
+  UIManager.setLayoutAnimationEnabledExperimental(true);
+}
+
+// ── Shared input component ────────────────────────────────────────────────────
 
 function FormInput({ placeholder, value, onChangeText, secureTextEntry, keyboardType, autoCapitalize, showToggle, showing, onToggle }) {
+  const [focused, setFocused] = useState(false);
   const borderAnim = useRef(new Animated.Value(0)).current;
   const border = borderAnim.interpolate({ inputRange: [0, 1], outputRange: ['#1e1e1e', '#00E87A'] });
 
@@ -40,12 +47,14 @@ function FormInput({ placeholder, value, onChangeText, secureTextEntry, keyboard
         keyboardType={keyboardType || 'default'}
         autoCapitalize={autoCapitalize ?? 'none'}
         autoCorrect={false}
-        onFocus={() =>
-          Animated.timing(borderAnim, { toValue: 1, duration: 180, useNativeDriver: false }).start()
-        }
-        onBlur={() =>
-          Animated.timing(borderAnim, { toValue: 0, duration: 180, useNativeDriver: false }).start()
-        }
+        onFocus={() => {
+          setFocused(true);
+          Animated.timing(borderAnim, { toValue: 1, duration: 180, useNativeDriver: false }).start();
+        }}
+        onBlur={() => {
+          setFocused(false);
+          Animated.timing(borderAnim, { toValue: 0, duration: 180, useNativeDriver: false }).start();
+        }}
       />
       {showToggle && (
         <TouchableOpacity onPress={onToggle} style={fi.eye} activeOpacity={0.6}>
@@ -65,7 +74,13 @@ const fi = StyleSheet.create({
     borderRadius: 12,
     marginBottom: 12,
   },
-  input: { flex: 1, paddingVertical: 15, paddingHorizontal: 18, color: '#F5F5F0', fontSize: 15 },
+  input: {
+    flex: 1,
+    paddingVertical: 15,
+    paddingHorizontal: 18,
+    color: '#F5F5F0',
+    fontSize: 15,
+  },
   eye: { paddingHorizontal: 14, paddingVertical: 15 },
 });
 
@@ -97,30 +112,35 @@ function useGoogle() {
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
-export default function SignInScreen({ navigation }) {
-  const { signIn, setActive, isLoaded } = useSignIn();
+export default function CreateAccountScreen({ navigation }) {
+  const { signUp, setActive, isLoaded } = useSignUp();
   const handleApple  = useApple();
   const handleGoogle = useGoogle();
 
-  const [email, setEmail]     = useState('');
-  const [password, setPassword] = useState('');
-  const [showPw, setShowPw]   = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [error, setError]     = useState('');
+  const [showEmailForm, setShowEmailForm] = useState(false);
+  const [firstName, setFirstName]     = useState('');
+  const [lastName, setLastName]       = useState('');
+  const [email, setEmail]             = useState('');
+  const [password, setPassword]       = useState('');
+  const [showPw, setShowPw]           = useState(false);
+  const [loading, setLoading]         = useState(false);
+  const [error, setError]             = useState('');
+
+  const revealEmailForm = () => {
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setShowEmailForm(true);
+  };
 
   const handleSubmit = async () => {
     if (!isLoaded) return;
     setLoading(true);
     setError('');
     try {
-      const result = await signIn.create({ identifier: email, password });
-      if (result.status === 'complete') {
-        await setActive({ session: result.createdSessionId });
-      } else {
-        setError('Sign in incomplete. Please try again.');
-      }
+      await signUp.create({ firstName, lastName, emailAddress: email, password });
+      await signUp.prepareEmailAddressVerification({ strategy: 'email_code' });
+      navigation.navigate('VerifyEmail', { email, signUpRef: signUp, setActive });
     } catch (e) {
-      setError(e.errors?.[0]?.longMessage || e.errors?.[0]?.message || 'Invalid credentials.');
+      setError(e.errors?.[0]?.longMessage || e.errors?.[0]?.message || 'Something went wrong.');
     } finally {
       setLoading(false);
     }
@@ -140,8 +160,8 @@ export default function SignInScreen({ navigation }) {
           </TouchableOpacity>
 
           {/* Headline */}
-          <Text style={s.headline}>Welcome Back</Text>
-          <Text style={s.sub}>Sign in to your account.</Text>
+          <Text style={s.headline}>Create Account</Text>
+          <Text style={s.sub}>Join Chalky. Free to start.</Text>
 
           {/* Social buttons */}
           <View style={s.socialRow}>
@@ -162,59 +182,44 @@ export default function SignInScreen({ navigation }) {
             <View style={s.divLine} />
           </View>
 
-          {/* Email form */}
-          <View style={s.form}>
-            <FormInput
-              placeholder="Email"
-              value={email}
-              onChangeText={setEmail}
-              keyboardType="email-address"
-            />
-            <FormInput
-              placeholder="Password"
-              value={password}
-              onChangeText={setPassword}
-              secureTextEntry
-              showToggle
-              showing={showPw}
-              onToggle={() => setShowPw(v => !v)}
-            />
-
-            {/* Forgot password */}
-            <TouchableOpacity style={s.forgotBtn} activeOpacity={0.6}>
-              <Text style={s.forgotTxt}>Forgot password?</Text>
+          {/* Email form reveal or CTA */}
+          {!showEmailForm ? (
+            <TouchableOpacity onPress={revealEmailForm} style={s.emailRevealBtn} activeOpacity={0.7}>
+              <Text style={s.emailRevealText}>Continue with Email</Text>
             </TouchableOpacity>
-          </View>
+          ) : (
+            <>
+              <FormInput placeholder="First Name" value={firstName} onChangeText={setFirstName} autoCapitalize="words" />
+              <FormInput placeholder="Last Name"  value={lastName}  onChangeText={setLastName}  autoCapitalize="words" />
+              <FormInput placeholder="Email"      value={email}     onChangeText={setEmail}     keyboardType="email-address" />
+              <FormInput
+                placeholder="Password"
+                value={password}
+                onChangeText={setPassword}
+                secureTextEntry
+                showToggle
+                showing={showPw}
+                onToggle={() => setShowPw(v => !v)}
+              />
 
-          {error ? <Text style={s.error}>{error}</Text> : null}
+              {error ? <Text style={s.error}>{error}</Text> : null}
 
-          {/* CTA */}
-          <TouchableOpacity
-            style={[s.ctaBtn, loading && s.ctaDisabled]}
-            onPress={handleSubmit}
-            disabled={loading}
-            activeOpacity={0.85}
-          >
-            {loading
-              ? <ActivityIndicator color="#080808" size="small" />
-              : <Text style={s.ctaTxt}>Sign In</Text>}
-          </TouchableOpacity>
-
-          {/* Create account link */}
-          <TouchableOpacity
-            style={s.createLink}
-            onPress={() => navigation.navigate('CreateAccount')}
-            activeOpacity={0.7}
-          >
-            <Text style={s.createLinkTxt}>
-              Don't have an account?{' '}
-              <Text style={s.createLinkGreen}>Create one</Text>
-            </Text>
-          </TouchableOpacity>
+              <TouchableOpacity
+                style={[s.ctaBtn, loading && s.ctaDisabled]}
+                onPress={handleSubmit}
+                disabled={loading}
+                activeOpacity={0.85}
+              >
+                {loading
+                  ? <ActivityIndicator color="#080808" size="small" />
+                  : <Text style={s.ctaTxt}>Create Account</Text>}
+              </TouchableOpacity>
+            </>
+          )}
 
           {/* Footer */}
           <Text style={s.footer}>
-            By continuing you agree to our Terms of Service · 18+ · Bet responsibly
+            By continuing you agree to our Terms of Service and Privacy Policy
           </Text>
         </ScrollView>
       </KeyboardAvoidingView>
@@ -288,17 +293,19 @@ const s = StyleSheet.create({
   divLine:  { flex: 1, height: 1, backgroundColor: '#1e1e1e' },
   divOr:    { color: '#444444', fontSize: 12, marginHorizontal: 12, fontWeight: '500' },
 
-  // Form
-  form: { paddingHorizontal: 28 },
+  // Email reveal
+  emailRevealBtn: { alignItems: 'center', paddingVertical: 8 },
+  emailRevealText: { fontSize: 14, color: '#555555' },
 
-  forgotBtn: { alignItems: 'flex-end', marginTop: -4, marginBottom: 20 },
-  forgotTxt: { fontSize: 12, color: '#555555' },
+  // Form wrapper
+  formWrap: { paddingHorizontal: 28 },
 
   // Error
   error: {
     color: '#FF4444',
     fontSize: 12,
     marginHorizontal: 28,
+    marginTop: -6,
     marginBottom: 8,
     lineHeight: 18,
   },
@@ -310,14 +317,10 @@ const s = StyleSheet.create({
     paddingVertical: 16,
     marginHorizontal: 28,
     alignItems: 'center',
+    marginTop: 8,
   },
   ctaDisabled: { opacity: 0.6 },
-  ctaTxt: { fontSize: 15, fontWeight: '700', color: '#080808', letterSpacing: 0.3 },
-
-  // Create account link
-  createLink: { alignItems: 'center', marginTop: 16 },
-  createLinkTxt: { fontSize: 13, color: '#555555' },
-  createLinkGreen: { color: '#00E87A' },
+  ctaTxt: { fontSize: 15, fontWeight: '700', color: '#080808' },
 
   footer: {
     fontSize: 11,
