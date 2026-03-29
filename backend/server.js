@@ -302,7 +302,7 @@ const runPipeline = async (name, fn) => {
 // Tracks dynamic NHL goalie-check jobs so we can cancel them next day
 const _goalieCheckJobs = [];
 
-if (process.env.MOCK_MODE !== 'true') {
+if (true) { // crons always run in production — MOCK_MODE removed
 
   // ── 12:00 AM — Nightly data collection (all sports, parallel) ────────────────
   cron.schedule('0 0 * * *', async () => {
@@ -690,8 +690,6 @@ if (process.env.MOCK_MODE !== 'true') {
     }
   }, { timezone: 'America/New_York' });
 
-} else {
-  console.log('ℹ️  MOCK_MODE=true — all cron jobs disabled, no API credits used');
 }
 
 // ── Odds endpoint ─────────────────────────────────────────────────────────────
@@ -797,7 +795,7 @@ app.get('/api/model/accuracy', async (req, res) => {
 // the daily crons have already missed. This runs once on startup and re-runs
 // the appropriate pipeline steps based on the current ET time.
 async function recoverMissedPipeline() {
-  if (process.env.MOCK_MODE === 'true') return;
+  // recovery always runs in production
 
   const today    = getTodayET();
   const etOffset = isDST(new Date()) ? 4 : 5;

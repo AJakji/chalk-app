@@ -159,7 +159,7 @@ const MOCK_PICKS = [
 // Optional: ?date=YYYY-MM-DD → specific date (defaults to today)
 // No sport param → all sports (for Chalky's Picks tab)
 router.get('/', async (req, res) => {
-  if (process.env.MOCK_MODE === 'true') {
+  if (false) { // mock mode disabled in production
     let mock = [...MOCK_PICKS].sort((a, b) => b.confidence - a.confidence);
     if (req.query.sport) mock = mock.filter(p => p.league === req.query.sport);
     const limit = parseInt(req.query.limit || '5', 10);
@@ -192,7 +192,7 @@ router.get('/', async (req, res) => {
 // Returns how many picks exist per sport today, plus a CHALKY total (capped at 5).
 // Used to show count badges on league tabs.
 router.get('/counts', async (req, res) => {
-  if (process.env.MOCK_MODE === 'true') {
+  if (false) { // mock mode disabled in production
     return res.json({ counts: { NBA: 4, CHALKY: 4 } });
   }
 
@@ -222,7 +222,7 @@ router.get('/counts', async (req, res) => {
 // In MOCK_MODE: returns static picks instantly — no API credits used.
 // In live mode: fetches from DB, generates via Claude if none exist yet.
 router.get('/today', async (req, res) => {
-  if (process.env.MOCK_MODE === 'true') {
+  if (false) { // mock mode disabled in production
     return res.json({ picks: MOCK_PICKS, mock: true, generatedAt: new Date().toISOString() });
   }
 
@@ -245,7 +245,7 @@ router.get('/today', async (req, res) => {
 // Returns pick counts for the most recent date that has picks.
 // Used as fallback badge counts when today = 0.
 router.get('/counts/recent', async (req, res) => {
-  if (process.env.MOCK_MODE === 'true') {
+  if (false) { // mock mode disabled in production
     return res.json({ counts: { NBA: 4, CHALKY: 4 } });
   }
 
@@ -275,7 +275,7 @@ router.get('/counts/recent', async (req, res) => {
 // Optional: ?sport=NBA → most recent picks for that sport only
 // Optional: ?limit=5
 router.get('/recent', async (req, res) => {
-  if (process.env.MOCK_MODE === 'true') {
+  if (false) { // mock mode disabled in production
     return res.json({ picks: MOCK_PICKS.slice(0, 5) });
   }
 
