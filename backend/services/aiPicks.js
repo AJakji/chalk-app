@@ -647,7 +647,7 @@ async function storeModelPicks(picks, headshotMap = {}) {
            pick_value, confidence, short_reason, analysis, odds_data,
            player_name, player_team, matchup_text, headshot_url)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
-         ON CONFLICT (game_id, pick_type) DO NOTHING`,
+         ON CONFLICT (game_id, pick_type, COALESCE(player_name, '')) DO NOTHING`,
         [
           pick.league || 'NBA',
           pick.sportKey || 'basketball_nba',
@@ -786,7 +786,7 @@ async function storePicks(picks) {
           (league, sport_key, pick_type, pick_category, away_team, home_team, game_time, game_id,
            pick_value, confidence, short_reason, analysis, odds_data)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-         ON CONFLICT (game_id, pick_type) DO NOTHING`,
+         ON CONFLICT (game_id, pick_type, COALESCE(player_name, '')) DO NOTHING`,
         [
           pick.league,
           pick.sportKey,
