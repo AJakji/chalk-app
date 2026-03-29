@@ -173,7 +173,6 @@ export default function CreateAccountScreen({ navigation }) {
 
           {/* Headline */}
           <Text style={s.headline}>Create Account</Text>
-          <Text style={s.sub}>Join Chalky. Free to start.</Text>
 
           {/* Social buttons */}
           <Text style={s.continueWith}>Continue with</Text>
