@@ -320,121 +320,119 @@ const _goalieCheckJobs = [];
 
 if (true) { // crons always run in production — MOCK_MODE removed
 
-  // ── 12:00 AM — Nightly data collection (all sports, parallel) ────────────────
+  // ── 12:00 AM ET (4:00 UTC) — Nightly data collection (all sports, parallel) ──
+  // Team log builders run in the same pass so derived stats have fresh team pace data.
   cron.schedule('0 0 * * *', async () => {
-    console.log('\n⏰ [12:00 AM] Nightly data collection (NBA + MLB + NHL + arsenal)…');
+    console.log('\n⏰ [12:00 AM ET] Nightly data collection (NBA + MLB + NHL + arsenal + team logs)…');
     await Promise.allSettled([
-      runPipeline('NBA Data Collector',          () => runPythonScript('nbaDataCollector.py')),
-      runPipeline('MLB Data Collector',          () => runPythonScript('mlbDataCollector.py')),
-      runPipeline('NHL Data Collector',          () => runPythonScript('nhlDataCollector.py')),
-      runPipeline('MLB Pitcher Arsenal',         () => runPythonScript('mlbPitcherArsenalCollector.py')),
+      runPipeline('NBA Data Collector',   () => runPythonScript('nbaDataCollector.py')),
+      runPipeline('MLB Data Collector',   () => runPythonScript('mlbDataCollector.py')),
+      runPipeline('NHL Data Collector',   () => runPythonScript('nhlDataCollector.py')),
+      runPipeline('MLB Pitcher Arsenal',  () => runPythonScript('mlbPitcherArsenalCollector.py')),
+      runPipeline('NBA Team Data',        () => runPythonScript('populateTeamData.py')),
+      runPipeline('NHL Team Data',        () => runPythonScript('nhlTeamCollector.py')),
     ]);
   }, { timezone: 'America/New_York' });
 
-  // ── 12:30 AM — Derived stats (BABIP, ISO, TS%, usage rate) ───────────────────
-  // ── 12:15 AM — Build team_game_logs from player_game_logs ────────────────────
-  // populateTeamData.py aggregates player logs → team totals (pace, pts scored/allowed).
-  // Runs after the 12:00 AM data collector so player_game_logs has tonight's new games.
-  // The projection model reads team pace from team_game_logs; without this it defaults to
-  // league average pace for every game (picks still generate, but lose the pace factor).
-  cron.schedule('15 0 * * *', async () => {
-    console.log('\n⏰ [12:15 AM] Building team game logs from player data…');
-    await Promise.all([
-      runPipeline('NBA Team Data', () => runPythonScript('populateTeamData.py')),
-      runPipeline('NHL Team Data', () => runPythonScript('nhlTeamCollector.py')),
-    ]);
-  }, { timezone: 'America/New_York' });
-
+  // ── 12:30 AM ET (4:30 UTC) — Derived stats (BABIP, ISO, TS%, usage rate) ─────
   cron.schedule('30 0 * * *', async () => {
-    console.log('\n⏰ [12:30 AM] Computing derived stats…');
+    console.log('\n⏰ [12:30 AM ET] Computing derived stats…');
     await runPipeline('Derived Stats', () => runPythonScript('computeDerivedStats.py'));
   }, { timezone: 'America/New_York' });
 
-  // ── 1:00 AM — Position defense ratings ───────────────────────────────────────
+  // ── 1:00 AM ET (5:00 UTC) — Position defense ratings ─────────────────────────
   cron.schedule('0 1 * * *', async () => {
-    console.log('\n⏰ [1:00 AM] Computing position defense ratings…');
+    console.log('\n⏰ [1:00 AM ET] Computing position defense ratings…');
     await runPipeline('Position Defense', () => runPythonScript('computePositionDefense.py'));
   }, { timezone: 'America/New_York' });
 
-  // ── 1:15 AM — MLB bullpen usage ───────────────────────────────────────────────
+  // ── 1:15 AM ET (5:15 UTC) — MLB sub-collectors (all in parallel) ─────────────
   cron.schedule('15 1 * * *', async () => {
-    console.log('\n⏰ [1:15 AM] MLB Bullpen Usage Collector…');
-    await runPipeline('MLB Bullpen Usage', () => runPythonScript('mlbBullpenCollector.py'));
-  }, { timezone: 'America/New_York' });
-
-  // ── 1:30 AM — MLB pitcher-batter career matchups ──────────────────────────────
-  cron.schedule('30 1 * * *', async () => {
-    console.log('\n⏰ [1:30 AM] MLB Matchup Collector…');
-    await runPipeline('MLB Matchup Collector', () => runPythonScript('mlbMatchupCollector.py'));
-  }, { timezone: 'America/New_York' });
-
-  // ── 1:45 AM — MLB batter splits (day/night, count, RISP) ─────────────────────
-  cron.schedule('45 1 * * *', async () => {
-    console.log('\n⏰ [1:45 AM] MLB Splits Collector…');
-    await runPipeline('MLB Splits Collector', () => runPythonScript('mlbSplitsCollector.py'));
-  }, { timezone: 'America/New_York' });
-
-  // ── 1:50 AM — MLB umpire assignments ─────────────────────────────────────────
-  cron.schedule('50 1 * * *', async () => {
-    console.log('\n⏰ [1:50 AM] MLB Umpire Collector…');
-    await runPipeline('MLB Umpire Collector', () => runPythonScript('mlbUmpireCollector.py'));
-  }, { timezone: 'America/New_York' });
-
-  // ── Every Monday 2:00 AM — Statcast (weekly Baseball Savant update) ───────────
-  cron.schedule('0 2 * * 1', async () => {
-    console.log('\n⏰ [Mon 2:00 AM] Statcast Collector (Baseball Savant)…');
-    await runPipeline('Statcast Collector', () => runPythonScript('statcastCollector.py'));
-  }, { timezone: 'America/New_York' });
-
-  // ── 4:00 AM — Odds lines + roster + NHL goalie scheduling ────────────────────
-  // Must complete before 4:30 AM projection models read the odds.
-  cron.schedule('0 4 * * *', async () => {
-    console.log('\n⏰ [4:00 AM] Odds + roster + NHL goalie scheduling…');
-
-    // Weather and props/roster can run in parallel
+    console.log('\n⏰ [1:15 AM ET] MLB sub-collectors (bullpen + matchup + splits + umpire)…');
     await Promise.allSettled([
-      runPipeline('Venue Weather',    () => fetchAllVenueWeather()),
-      runPipeline('Nightly Roster',   () => buildNightlyRoster()),
-      runPipeline('Odds / Prop Lines', () => collectPropsLines()),
+      runPipeline('MLB Bullpen Usage',    () => runPythonScript('mlbBullpenCollector.py')),
+      runPipeline('MLB Matchup Collector',() => runPythonScript('mlbMatchupCollector.py')),
+      runPipeline('MLB Splits Collector', () => runPythonScript('mlbSplitsCollector.py')),
+      runPipeline('MLB Umpire Collector', () => runPythonScript('mlbUmpireCollector.py')),
+    ]);
+  }, { timezone: 'America/New_York' });
+
+  // ── Every Monday 2:00 AM ET (6:00 UTC) — Weekly collectors ───────────────────
+  // Statcast updates Baseball Savant data; league averages keep LEAGUE_AVG current.
+  cron.schedule('0 2 * * 1', async () => {
+    console.log('\n⏰ [Mon 2:00 AM ET] Weekly collectors (Statcast + league averages)…');
+    await Promise.allSettled([
+      runPipeline('Statcast Collector', () => runPythonScript('statcastCollector.py')),
+      runPipeline('League Averages',    () => runPythonScript('computeLeagueAverages.py')),
+    ]);
+  }, { timezone: 'America/New_York' });
+
+  // ── UFC: Tuesday 3:00 AM ET — Collect upcoming event + fighter data ───────────
+  cron.schedule('0 3 * * 2', async () => {
+    console.log('\n⏰ [Tue 3:00 AM ET] UFC data collector…');
+    await runPipeline('UFC Data Collector', () => runPythonScript('ufcDataCollector.py'));
+  }, { timezone: 'America/New_York' });
+
+  // ── UFC: Tuesday 3:30 AM ET — Pull moneylines from Odds API ───────────────────
+  cron.schedule('30 3 * * 2', async () => {
+    console.log('\n⏰ [Tue 3:30 AM ET] UFC odds fetch…');
+    await fetchAndStoreUFCOdds();
+  }, { timezone: 'America/New_York' });
+
+  // ── UFC: Tuesday 4:00 AM ET — Run projection model ────────────────────────────
+  cron.schedule('0 4 * * 2', async () => {
+    console.log('\n⏰ [Tue 4:00 AM ET] UFC projection model…');
+    await runPipeline('UFC Projection Model', () => runPythonScript('ufcProjectionModel.py'));
+  }, { timezone: 'America/New_York' });
+
+  // ── UFC: Saturday 8:00 AM ET — Refresh odds before fight-day model run ─────────
+  cron.schedule('0 8 * * 6', async () => {
+    console.log('\n⏰ [Sat 8:00 AM ET] UFC fight-day odds refresh…');
+    await fetchAndStoreUFCOdds();
+  }, { timezone: 'America/New_York' });
+
+  // ── UFC: Saturday 9:00 AM ET — Refresh model with fight-day odds ──────────────
+  cron.schedule('0 9 * * 6', async () => {
+    console.log('\n⏰ [Sat 9:00 AM ET] UFC fight-day model refresh…');
+    await runPipeline('UFC Fight Day Model', () => runPythonScript('ufcProjectionModel.py'));
+  }, { timezone: 'America/New_York' });
+
+  // ── 4:00 AM ET (8:00 UTC) — Odds + ALL prop lines written to DB ──────────────
+  // Game lines, player prop lines, venue weather and roster all collected here.
+  // Player prop lines may be sparse at 4 AM; the 9:15 AM safety net re-fetches.
+  cron.schedule('0 4 * * *', async () => {
+    const today = getTodayET();
+    console.log(`\n⏰ [4:00 AM ET] Odds + prop lines + roster + weather (${today})…`);
+
+    await Promise.allSettled([
+      runPipeline('Venue Weather',     () => fetchAllVenueWeather()),
+      runPipeline('Nightly Roster',    () => buildNightlyRoster()),
+      runPipeline('Odds / Game Lines', () => collectPropsLines()),
     ]);
 
-    // Schedule goalie confirmation jobs 90 min before each puck drop
-    await runPipeline('NHL Goalie Scheduling', async () => {
-      _goalieCheckJobs.forEach(j => j.stop());
-      _goalieCheckJobs.length = 0;
-
-      const schedule = await getConfirmationSchedule();
-      for (const game of schedule) {
-        const checkAt = game.checkTime;
-        if (checkAt <= new Date()) continue;  // already past
-        const min  = checkAt.getMinutes();
-        const hour = checkAt.getHours();
-        const job  = cron.schedule(
-          `${min} ${hour} * * *`,
-          async () => {
-            console.log(`\n🏒 Goalie check: ${game.awayTeam} @ ${game.homeTeam}`);
-            await runGoalieConfirmation().catch(e => console.error('Goalie check failed:', e.message));
-          },
-          { timezone: 'America/New_York' }
-        );
-        _goalieCheckJobs.push(job);
-      }
-      console.log(`  Scheduled ${_goalieCheckJobs.length} NHL goalie checks`);
-    });
+    // Write player prop lines to DB (early attempt — sparse but worth capturing)
+    const { writePropLinesToDB } = require('./services/oddsService');
+    try {
+      await writePropLinesToDB('NBA', today);
+      await writePropLinesToDB('NHL', today);
+      await writePropLinesToDB('MLB', today);
+      console.log(`✅ [4:00 AM ET] Prop lines written for ${today}`);
+    } catch (err) {
+      console.error('[4:00 AM ET] writePropLinesToDB error:', err.message);
+    }
   }, { timezone: 'America/New_York' });
 
-  // ── 4:30 AM — All three projection models (parallel) ─────────────────────────
+  // ── 4:30 AM ET (8:30 UTC) — All three projection models (parallel) ────────────
   cron.schedule('30 4 * * *', async () => {
-    console.log('\n⏰ [4:30 AM] Running NBA + MLB + NHL projection models (parallel)…');
+    console.log('\n⏰ [4:30 AM ET] Running NBA + MLB + NHL projection models (parallel)…');
     await Promise.allSettled([
       runPipeline('NBA Projection Model', () => runPythonScript('nbaProjectionModel.py')),
       runPipeline('MLB Projection Model', () => runPythonScript('mlbProjectionModel.py')),
       runPipeline('NHL Projection Model', () => runPythonScript('nhlProjectionModel.py')),
     ]);
 
-    // ── Projection row count check (fail-loud before edge detection wastes time) ──
-    // If models wrote 0 rows the edge detector will find no edges and aiPicks will
-    // generate zero picks. Catch it here at 4:30 AM instead of 6:55 AM.
+    // Fail-loud check: if models wrote 0 rows the edge detector will find no edges.
+    // Catch it here at 4:30 AM instead of at the 6:45 AM verification alert.
     try {
       const db = require('./db');
       const today = getTodayET();
@@ -451,30 +449,28 @@ if (true) { // crons always run in production — MOCK_MODE removed
       const total   = rows.reduce((sum, r) => sum + parseInt(r.count), 0);
 
       if (total === 0) {
-        console.error(`\n🚨 [4:30 AM] ALERT: chalk_projections has ZERO rows for ${today}`);
+        console.error(`\n🚨 [4:30 AM ET] ALERT: chalk_projections has ZERO rows for ${today}`);
         console.error('  Possible causes:');
         console.error('  — BALLDONTLIE_API_KEY missing/invalid (NBA 401 → 0 players)');
         console.error('  — No games scheduled today');
-        console.error('  — Market line gate blocking all writes (pre-9 AM run)');
+        console.error('  — Market line gate blocking all writes');
         console.error('  Edge detection and aiPicks will produce zero picks unless resolved.');
       } else {
-        console.log(`✅ [4:30 AM] chalk_projections: ${total} rows for ${today}`);
+        console.log(`✅ [4:30 AM ET] chalk_projections: ${total} rows for ${today}`);
         rows.forEach(r => console.log(`   ${r.sport}: ${r.count} rows`));
-
-        // Warn if any sport that had games last run is now empty
         const missing = ['NBA', 'MLB', 'NHL'].filter(s => !bySport[s]);
         if (missing.length > 0) {
-          console.warn(`⚠️  [4:30 AM] Missing projections for: ${missing.join(', ')} — check those model logs`);
+          console.warn(`⚠️  [4:30 AM ET] Missing projections for: ${missing.join(', ')} — check those model logs`);
         }
       }
     } catch (err) {
-      console.error('[4:30 AM] Projection row count check failed:', err.message);
+      console.error('[4:30 AM ET] Projection row count check failed:', err.message);
     }
   }, { timezone: 'America/New_York' });
 
-  // ── 5:30 AM — Edge detection (all sports) ────────────────────────────────────
+  // ── 5:30 AM ET (9:30 UTC) — Edge detection (all sports) ──────────────────────
   cron.schedule('30 5 * * *', async () => {
-    console.log('\n⏰ [5:30 AM] Edge detection — NBA + MLB + NHL…');
+    console.log('\n⏰ [5:30 AM ET] Edge detection — NBA + MLB + NHL…');
     await Promise.allSettled([
       runPipeline('NBA Prop Edges',  () => detectEdges()),
       runPipeline('MLB Prop Edges',  () => detectEdgesForSport('MLB')),
@@ -485,11 +481,11 @@ if (true) { // crons always run in production — MOCK_MODE removed
     ]);
   }, { timezone: 'America/New_York' });
 
-  // ── 6:00 AM — Generate Chalky's picks via Claude (all sports) ────────────────
-  // Must finish by 7:00 AM. Typically 20–30 min for a full slate.
+  // ── 6:00 AM ET (10:00 UTC) — Generate Chalky's picks via Claude (all sports) ──
+  // Must finish by 6:45 AM. Typically 20–30 min for a full slate.
   cron.schedule('0 6 * * *', async () => {
     const startTime = new Date().toISOString();
-    console.log(`\n⏰ [6:00 AM] Generating Chalky's picks (all sports)…`);
+    console.log(`\n⏰ [6:00 AM ET] Generating Chalky's picks (all sports)…`);
     console.log(`🎯 aiPicks.js started: ${startTime}`);
 
     let totalCount = 0;
@@ -501,12 +497,12 @@ if (true) { // crons always run in production — MOCK_MODE removed
     });
 
     await Promise.allSettled([
-      runPipeline('Game Picks',      async () => {
+      runPipeline('Game Picks', async () => {
         const picks = await generatePicks();
         totalCount += picks.length;
         console.log(`  Game picks: ${picks.length}`);
       }),
-      runPipeline('Prop Picks',      async () => {
+      runPipeline('Prop Picks', async () => {
         const picks = await generatePropPicks();
         totalCount += picks.length;
         console.log(`  Prop picks: ${picks.length}`);
@@ -518,9 +514,10 @@ if (true) { // crons always run in production — MOCK_MODE removed
     console.log(`🎯 Total picks generated: ${totalCount}`);
   }, { timezone: 'America/New_York' });
 
-  // ── 6:55 AM — Pre-delivery verification: confirm picks are in DB ──────────────
-  cron.schedule('55 6 * * *', async () => {
-    console.log('\n⏰ [6:55 AM] Pre-delivery verification…');
+  // ── 6:45 AM ET (10:45 UTC) — Pre-delivery verification ───────────────────────
+  // Zero picks at this point = critical alert before users wake up.
+  cron.schedule('45 6 * * *', async () => {
+    console.log('\n⏰ [6:45 AM ET] Pre-delivery verification…');
     try {
       const db = require('./db');
       const today = getTodayET();
@@ -541,169 +538,96 @@ if (true) { // crons always run in production — MOCK_MODE removed
         console.error(`Date: ${today}`);
         console.error(`Time: ${new Date().toISOString()}`);
         console.error(`Check Railway logs immediately. Manual intervention required.`);
-        console.error(`  — Did 4:30 AM model run complete?`);
+        console.error(`  — Did 4:30 AM ET model run complete?`);
         console.error(`  — Did BDL API return games? (check BALLDONTLIE_API_KEY)`);
-        console.error(`  — Did 5:30 AM edge detection find edges?`);
-        console.error(`  — Did 6:00 AM aiPicks.js run without crash?`);
+        console.error(`  — Did 5:30 AM ET edge detection find edges?`);
+        console.error(`  — Did 6:00 AM ET aiPicks.js run without crash?`);
       } else {
-        console.log(`✅ 6:55 AM: ${totalPicks} picks live for ${today}:`);
+        console.log(`✅ [6:45 AM ET] ${totalPicks} picks live for ${today}:`);
         rows.forEach(row => console.log(`   ${row.league}: ${row.count} picks`));
       }
     } catch (err) {
-      console.error('🚨 6:55 AM verification failed:', err.message);
+      console.error('🚨 [6:45 AM ET] Verification failed:', err.message);
     }
   }, { timezone: 'America/New_York' });
 
-  // ── 8:00 AM — Grade yesterday's picks ────────────────────────────────────────
-  cron.schedule('0 8 * * *', async () => {
-    console.log('\n⏰ [8:00 AM] Grading yesterday\'s picks…');
-    await runPipeline('Pick Grader', async () => {
-      const r = await gradeYesterdaysPicks();
-      console.log(`  Grading complete: ${r.correctPicks}/${r.totalPicks} correct`);
+  // ── 7:00 AM ET (11:00 UTC) — Picks go live + NHL goalie confirmation ──────────
+  // Picks are now available to users. Schedule per-game goalie confirmation jobs
+  // (run 90 min before each puck drop) so starting goalies are confirmed before bets.
+  cron.schedule('0 7 * * *', async () => {
+    console.log('\n⏰ [7:00 AM ET] Picks live! Scheduling NHL goalie confirmations…');
+
+    await runPipeline('NHL Goalie Scheduling', async () => {
+      _goalieCheckJobs.forEach(j => j.stop());
+      _goalieCheckJobs.length = 0;
+
+      const schedule = await getConfirmationSchedule();
+      for (const game of schedule) {
+        const checkAt = game.checkTime;
+        if (checkAt <= new Date()) continue; // already past
+        const min  = checkAt.getMinutes();
+        const hour = checkAt.getHours();
+        const job  = cron.schedule(
+          `${min} ${hour} * * *`,
+          async () => {
+            console.log(`\n🏒 Goalie check: ${game.awayTeam} @ ${game.homeTeam}`);
+            await runGoalieConfirmation().catch(e => console.error('Goalie check failed:', e.message));
+          },
+          { timezone: 'America/New_York' }
+        );
+        _goalieCheckJobs.push(job);
+      }
+      console.log(`  Scheduled ${_goalieCheckJobs.length} NHL goalie checks`);
     });
   }, { timezone: 'America/New_York' });
 
-  // ── Every Monday 3:00 AM — Recompute league averages (all three sports) ──────
-  // Runs after Statcast (Mon 2 AM). Keeps LEAGUE_AVG constants current all season.
-  cron.schedule('0 3 * * 1', async () => {
-    console.log('\n⏰ [Mon 3:00 AM] Computing league averages…');
-    await runPipeline('League Averages', () => runPythonScript('computeLeagueAverages.py'));
-  }, { timezone: 'America/New_York' });
-
-  // ── UFC: Tuesday 3:00 AM ET — Collect upcoming event + fighter data ──────────
-  cron.schedule('0 3 * * 2', async () => {
-    console.log('\n⏰ [Tue 3:00 AM] UFC data collector…');
-    await runPipeline('UFC Data Collector', () => runPythonScript('ufcDataCollector.py'));
-  }, { timezone: 'America/New_York' });
-
-  // ── UFC: Tuesday 3:30 AM ET — Pull moneylines from Odds API ──────────────────
-  cron.schedule('30 3 * * 2', async () => {
-    console.log('\n⏰ [Tue 3:30 AM] UFC odds fetch…');
-    await fetchAndStoreUFCOdds();
-  }, { timezone: 'America/New_York' });
-
-  // ── UFC: Tuesday 4:00 AM ET — Run projection model ───────────────────────────
-  cron.schedule('0 4 * * 2', async () => {
-    console.log('\n⏰ [Tue 4:00 AM] UFC projection model…');
-    await runPipeline('UFC Projection Model', () => runPythonScript('ufcProjectionModel.py'));
-  }, { timezone: 'America/New_York' });
-
-  // ── UFC: Saturday 8:00 AM ET — Refresh odds before fight-day model run ────────
-  cron.schedule('0 8 * * 6', async () => {
-    console.log('\n⏰ [Sat 8:00 AM] UFC fight-day odds refresh…');
-    await fetchAndStoreUFCOdds();
-  }, { timezone: 'America/New_York' });
-
-  // ── UFC: Saturday 9:00 AM ET — Refresh model with fight-day odds ─────────────
-  cron.schedule('0 9 * * 6', async () => {
-    console.log('\n⏰ [Sat 9:00 AM] UFC fight-day model refresh…');
-    await runPipeline('UFC Fight Day Model', () => runPythonScript('ufcProjectionModel.py'));
-  }, { timezone: 'America/New_York' });
-
-  // ── 9:00 AM ET — Write player prop lines to DB (all sports) ─────────────────
-  // Runs after the 8 AM grader. Stores fresh lines for that night's games.
-  cron.schedule('0 9 * * *', async () => {
+  // ── 9:15 AM ET (13:15 UTC) — Safety net: re-fetch prop lines + props-only re-run
+  // Sportsbooks post most player prop lines by 9–10 AM ET. This pass re-fetches all
+  // lines, re-runs projections against them, re-runs edge detection, and appends any
+  // new player prop picks that weren't available at 6 AM.
+  cron.schedule('15 9 * * *', async () => {
     const today = getTodayET();
-    console.log(`\n⏰ [9:00 AM] Writing prop lines to DB for all sports (${today})…`);
+    console.log(`\n⏰ [9:15 AM ET] Safety net — re-fetch prop lines + props-only re-run (${today})…`);
+
+    // Step 1: refresh prop lines now that books have posted them
     const { writePropLinesToDB } = require('./services/oddsService');
     try {
       await writePropLinesToDB('NBA', today);
       await writePropLinesToDB('NHL', today);
       await writePropLinesToDB('MLB', today);
+      console.log(`✅ [9:15 AM ET] Prop lines refreshed`);
     } catch (err) {
-      console.error('[cron] writePropLinesToDB error:', err.message);
+      console.error('[9:15 AM ET] writePropLinesToDB error:', err.message);
     }
-  }, { timezone: 'America/New_York' });
 
-  // ── 9:15 AM ET — All sports player props run ─────────────────────────────────
-  // Sportsbooks post player prop lines between 9-10 AM ET.
-  // writePropLinesToDB (9 AM) has just filled player_props_history.
-  // NBA --props-only: re-runs full player projection with now-available lines.
-  // MLB --props-only: re-gates existing 4:30 AM projections against real lines.
-  // NHL --props-only: re-gates existing 4:30 AM projections against real lines.
-  cron.schedule('15 9 * * *', async () => {
-    console.log('\n⏰ [9:15 AM] All sports player props run (lines now posted)…');
+    // Step 2: re-run projection models (props-only) against fresh lines
     await Promise.allSettled([
-      runPipeline('NBA Player Props Run', () => runPythonScript('nbaProjectionModel.py', ['--props-only'])),
-      runPipeline('MLB Player Props Run', () => runPythonScript('mlbProjectionModel.py', ['--props-only'])),
-      runPipeline('NHL Player Props Run', () => runPythonScript('nhlProjectionModel.py', ['--props-only'])),
+      runPipeline('NBA Props-Only Model', () => runPythonScript('nbaProjectionModel.py', ['--props-only'])),
+      runPipeline('MLB Props-Only Model', () => runPythonScript('mlbProjectionModel.py', ['--props-only'])),
+      runPipeline('NHL Props-Only Model', () => runPythonScript('nhlProjectionModel.py', ['--props-only'])),
     ]);
-  }, { timezone: 'America/New_York' });
 
-  // ── 9:30 AM ET — All sports player prop edge detection ───────────────────────
-  // The 5:30 AM detectEdges() ran before player projections existed in chalk_projections.
-  // Now projections are written (9:15 AM run) — re-run edge detection for all sports
-  // to write chalk_edge + confidence to player_props_history before pick generation.
-  cron.schedule('30 9 * * *', async () => {
-    console.log('\n⏰ [9:30 AM] All sports player prop edge detection…');
+    // Step 3: re-run edge detection so new projections get confidence scores
     await Promise.allSettled([
-      runPipeline('NBA Player Prop Edges', () => detectEdges()),
-      runPipeline('MLB Player Prop Edges', () => detectEdgesForSport('MLB')),
-      runPipeline('NHL Player Prop Edges', () => detectEdgesForSport('NHL')),
+      runPipeline('NBA Prop Edges (safety)', () => detectEdges()),
+      runPipeline('MLB Prop Edges (safety)', () => detectEdgesForSport('MLB')),
+      runPipeline('NHL Prop Edges (safety)', () => detectEdgesForSport('NHL')),
     ]);
-  }, { timezone: 'America/New_York' });
 
-  // ── 9:45 AM ET — Generate Chalky's player prop picks ─────────────────────────
-  // The 6:00 AM aiPicks run found 0 model edges (player props not ready yet).
-  // Now that edges are written at 9:30 AM, generate Chalky's player prop picks.
-  // These are added on top of the team prop picks from the 6 AM run, giving the
-  // full slate of picks before the 10 AM delivery window.
-  cron.schedule('45 9 * * *', async () => {
-    console.log('\n⏰ [9:45 AM] Generating Chalky\'s player prop picks…');
-    await runPipeline('Chalky Player Prop Picks', async () => {
+    // Step 4: generate player prop picks from the newly-detected edges
+    await runPipeline('Player Prop Picks (safety)', async () => {
       const picks = await generateModelPicks();
-      console.log(`  Player prop picks generated: ${picks.length}`);
+      console.log(`  Player prop picks added: ${picks.length}`);
     });
   }, { timezone: 'America/New_York' });
 
-  // ── 10:15 AM ET — Daily failsafe: ensure picks exist before users wake up ─────
-  // If the overnight pipeline failed (server restart, API error, etc.) and the
-  // 9:45 AM run also produced nothing, this is the last safety net.
-  // It re-runs the full picks generator. Idempotent: ON CONFLICT DO NOTHING
-  // prevents duplicates, so running it when picks already exist is harmless.
-  cron.schedule('15 10 * * *', async () => {
-    const today = getTodayET();
-    console.log(`\n⏰ [10:15 AM] Daily failsafe check for ${today}…`);
-    try {
-      const db = require('./db');
-      const { rows } = await db.query(
-        `SELECT COUNT(*) as count FROM picks WHERE pick_date = $1`, [today]
-      );
-      const pickCount = parseInt(rows[0].count);
-
-      if (pickCount > 0) {
-        console.log(`✅ [10:15 AM] ${pickCount} picks already live for ${today} — no action needed`);
-        return;
-      }
-
-      console.log(`🚨 [10:15 AM] ZERO picks for ${today} — triggering emergency pick generation…`);
-
-      // Run models fresh (uses yesterday's game log data which is already in DB)
-      await Promise.allSettled([
-        runPipeline('Failsafe: NBA Model', () => runPythonScript('nbaProjectionModel.py')),
-        runPipeline('Failsafe: MLB Model', () => runPythonScript('mlbProjectionModel.py')),
-        runPipeline('Failsafe: NHL Model', () => runPythonScript('nhlProjectionModel.py')),
-      ]);
-
-      // Edge detection
-      await Promise.allSettled([
-        runPipeline('Failsafe: NBA Edges', () => detectEdges()),
-        runPipeline('Failsafe: MLB Edges', () => detectEdgesForSport('MLB')),
-        runPipeline('Failsafe: NHL Edges', () => detectEdgesForSport('NHL')),
-        runPipeline('Failsafe: NBA Teams', () => detectTeamBetEdges('NBA')),
-        runPipeline('Failsafe: MLB Teams', () => detectTeamBetEdges('MLB')),
-        runPipeline('Failsafe: NHL Teams', () => detectTeamBetEdges('NHL')),
-      ]);
-
-      // Pick generation
-      const modelPicks = await generateModelPicks().catch(() => []);
-      const [gamePicks, propPicks] = await Promise.allSettled([generatePicks(), generatePropPicks()]);
-
-      const total = modelPicks.length + (gamePicks.value?.length || 0) + (propPicks.value?.length || 0);
-      console.log(`✅ [10:15 AM] Failsafe complete — ${total} picks generated for ${today}`);
-    } catch (err) {
-      console.error('🚨 [10:15 AM] Failsafe failed:', err.message);
-    }
+  // ── 12:00 PM ET (16:00 UTC) — Grade yesterday's picks ────────────────────────
+  cron.schedule('0 12 * * *', async () => {
+    console.log('\n⏰ [12:00 PM ET] Grading yesterday\'s picks…');
+    await runPipeline('Pick Grader', async () => {
+      const r = await gradeYesterdaysPicks();
+      console.log(`  Grading complete: ${r.correctPicks}/${r.totalPicks} correct`);
+    });
   }, { timezone: 'America/New_York' });
 
 }

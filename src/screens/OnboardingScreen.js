@@ -84,7 +84,7 @@ const SLIDES = [
     id: 's1',
     icon: null, // uses chalky image
     title: 'You found the edge.',
-    subtitle: 'AI-powered picks across NBA, MLB, NHL and the World Cup. Real projections. Real lines. Every day at 10 AM.',
+    subtitle: 'AI-powered picks across NBA, MLB, NHL and the World Cup. Real projections. Real lines. Every day at 7 AM ET.',
     content: null,
   },
   {

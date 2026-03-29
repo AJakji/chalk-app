@@ -270,14 +270,14 @@ export default function PicksScreen() {
               <Image source={CHALKY_PNG} style={styles.emptyImage} resizeMode="contain" />
               <Text style={styles.emptyTitle}>
                 {activeTab === "Chalky's Picks"
-                  ? new Date().getHours() < 11
+                  ? new Date().getUTCHours() < 11
                     ? 'Analyzing today\'s slate.'
                     : 'No picks today.'
                   : `No ${TAB_LABELS[activeTab] || activeTab} picks today.`}
               </Text>
               <Text style={styles.emptyText}>
-                {activeTab === "Chalky's Picks" && new Date().getHours() < 11
-                  ? 'Check back after 11am ET.'
+                {activeTab === "Chalky's Picks" && new Date().getUTCHours() < 11
+                  ? 'Picks drop at 7 AM ET.'
                   : 'Day off.'}
               </Text>
             </View>
