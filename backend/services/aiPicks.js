@@ -693,10 +693,22 @@ async function storeModelPicks(picks, headshotMap = {}) {
 async function fetchAllGamesForPicks() {
   const leagues = ['NBA', 'MLB', 'NHL'];
   const results = [];
+  // Only include games that start within the next 36 hours — avoids confusing Claude
+  // with games from days ago or far-future games that have no real pick value today.
+  const now = Date.now();
+  const cutoffMs = 36 * 60 * 60 * 1000; // 36 hours in ms
+
   for (const league of leagues) {
     try {
       const games = await oddsService.fetchGameOdds(league);
       for (const g of (games || [])) {
+        // Filter: only games commencing within the next 36 hours
+        if (g.commence_time) {
+          const commenceMs = new Date(g.commence_time).getTime();
+          // Skip games that have already started more than 3 hours ago OR start > 36h from now
+          if (commenceMs < now - 3 * 60 * 60 * 1000) continue;  // already well underway
+          if (commenceMs > now + cutoffMs) continue;              // too far in the future
+        }
         const odds = {};
         for (const bm of (g.bookmakers || [])) {
           odds[bm.key] = {};
@@ -710,6 +722,7 @@ async function fetchAllGamesForPicks() {
       console.warn(`[generatePicks] Skipping ${league}: ${err.message}`);
     }
   }
+  console.log(`[fetchAllGamesForPicks] ${results.length} games within next 36h across NBA/MLB/NHL`);
   return results;
 }
 
@@ -793,6 +806,22 @@ async function generatePicks() {
 async function storePicks(picks) {
   for (const pick of picks) {
     try {
+      // Fill safe defaults for fields Claude sometimes omits
+      if (!pick.sportKey && pick.league) {
+        const leagueKeyMap = { NBA: 'basketball_nba', MLB: 'baseball_mlb', NHL: 'icehockey_nhl', NFL: 'americanfootball_nfl' };
+        pick.sportKey = leagueKeyMap[pick.league] || 'basketball_nba';
+      }
+      if (!pick.pickType)    pick.pickType  = 'Moneyline';
+      if (!pick.gameTime)    pick.gameTime  = 'Tonight';
+      if (!pick.awayTeam)    pick.awayTeam  = pick.homeTeam  || 'TBD';
+      if (!pick.homeTeam)    pick.homeTeam  = pick.awayTeam  || 'TBD';
+      if (!pick.shortReason) pick.shortReason = pick.pick || 'Model pick';
+      // Ensure a stable gameId so the dedup constraint works
+      if (!pick.gameId) {
+        const slug = `${(pick.awayTeam || '').replace(/\s+/g, '_')}_${(pick.homeTeam || '').replace(/\s+/g, '_')}_${new Date().toISOString().split('T')[0]}`;
+        pick.gameId = `game_${slug.toLowerCase()}`;
+      }
+
       // Validate required NOT NULL fields before attempting INSERT
       const missing = [];
       if (!pick.league)      missing.push('league');

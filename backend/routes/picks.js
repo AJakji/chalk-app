@@ -220,23 +220,34 @@ router.get('/counts', async (req, res) => {
 
 // GET /api/picks/today
 // In MOCK_MODE: returns static picks instantly — no API credits used.
-// In live mode: fetches from DB, generates via Claude if none exist yet.
+// In live mode: returns picks from DB immediately. If none exist yet, responds with
+// generating:true and fires the full pipeline in the background (Railway has a 30s
+// HTTP timeout — awaiting Claude synchronously would cause an empty response).
 router.get('/today', async (req, res) => {
   if (false) { // mock mode disabled in production
     return res.json({ picks: MOCK_PICKS, mock: true, generatedAt: new Date().toISOString() });
   }
 
   try {
-    let picks = await getTodaysPicks();
-    if (picks.length === 0) {
-      console.log('No picks for today yet — running full pipeline now...');
-      await generateModelPicks();
-      await Promise.allSettled([generatePicks(), generatePropPicks()]);
-      picks = await getTodaysPicks();
+    const picks = await getTodaysPicks();
+    if (picks.length > 0) {
+      return res.json({ picks, generatedAt: new Date().toISOString() });
     }
-    res.json({ picks, generatedAt: new Date().toISOString() });
+
+    // No picks yet — respond immediately so Railway doesn't time out,
+    // then generate in the background so they're ready for the next poll.
+    res.json({ picks: [], generating: true, generatedAt: new Date().toISOString() });
+
+    // Fire-and-forget: do NOT await — response is already sent above
+    console.log('[/picks/today] No picks found — triggering background generation…');
+    generateModelPicks()
+      .catch(e => console.error('[/picks/today] bg generateModelPicks error:', e.message));
+    Promise.allSettled([generatePicks(), generatePropPicks()])
+      .catch(() => {});
+
   } catch (err) {
     console.error('Error fetching today\'s picks:', err);
+    // Even on error, return empty array rather than 500 (client can retry)
     res.status(500).json({ error: 'Failed to load picks. Try again shortly.' });
   }
 });

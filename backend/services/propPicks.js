@@ -277,6 +277,27 @@ function buildPromptContent(propLines, projections, today) {
 async function storePropPicks(props) {
   for (const prop of props) {
     try {
+      // Fill safe defaults for fields Claude sometimes omits
+      const pickValue = prop.statLine || prop.pick || prop.playerName || 'Pick';
+      if (!prop.gameId) {
+        const playerSlug = (prop.playerName || 'player').replace(/\s+/g, '_').toLowerCase();
+        const today = new Date().toISOString().split('T')[0];
+        prop.gameId = `prop_${playerSlug}_${today}`;
+      }
+      if (!prop.shortReason) prop.shortReason = pickValue;
+      if (!prop.confidence)  prop.confidence  = 65;
+      if (!prop.awayTeam)    prop.awayTeam    = prop.homeTeam || 'TBD';
+      if (!prop.homeTeam)    prop.homeTeam    = prop.awayTeam || 'TBD';
+      if (!prop.gameTime)    prop.gameTime    = 'Tonight';
+      if (!prop.league)      prop.league      = 'NBA';
+      if (!prop.sportKey)    prop.sportKey    = 'basketball_nba';
+
+      // Skip if we still can't produce pick_value — would violate NOT NULL
+      if (!pickValue || !prop.playerName) {
+        console.error(`[storePropPicks] Skipping prop — missing playerName or statLine`);
+        continue;
+      }
+
       await db.query(
         `INSERT INTO picks
           (league, sport_key, pick_type, pick_category,
@@ -298,11 +319,11 @@ async function storePropPicks(props) {
           prop.gameTime,
           prop.gameId,
           prop.matchupText,
-          prop.statLine,
+          pickValue,
           prop.confidence,
           prop.shortReason,
-          JSON.stringify(prop.analysis),
-          JSON.stringify(prop.odds),
+          JSON.stringify(prop.analysis || {}),
+          JSON.stringify(prop.odds || {}),
         ]
       );
     } catch (err) {

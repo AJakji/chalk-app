@@ -29,13 +29,23 @@ const BASE_URL     = 'https://api.the-odds-api.com/v4';
 const ODDS_API_KEY = process.env.ODDS_API_KEY;
 const MODEL_VERSION = 'v1.0';
 
-// Returns today's date in ET (YYYY-MM-DD), correct on UTC servers
+// Returns today's date in ET (YYYY-MM-DD), correct on UTC servers (Railway).
+// Uses IANA timezone via toLocaleString — getTimezoneOffset() is always 0 on UTC servers.
 function getTodayET() {
   const d = new Date();
-  const jan = new Date(d.getFullYear(), 0, 1).getTimezoneOffset();
-  const jul = new Date(d.getFullYear(), 6, 1).getTimezoneOffset();
-  const isDST = d.getTimezoneOffset() < Math.max(jan, jul);
-  const etOffset = isDST ? 4 : 5;
+  let etOffset = 5; // EST default
+  try {
+    const etStr = d.toLocaleString('en-US', { timeZone: 'America/New_York', timeZoneName: 'short' });
+    etOffset = etStr.includes('EDT') ? 4 : 5;
+  } catch {
+    // Fallback: check DST range manually
+    const year = d.getUTCFullYear();
+    const marchFirst = new Date(Date.UTC(year, 2, 1));
+    const dstStart = new Date(Date.UTC(year, 2, (14 - marchFirst.getUTCDay()) % 7 + 1, 7));
+    const novFirst = new Date(Date.UTC(year, 10, 1));
+    const dstEnd = new Date(Date.UTC(year, 10, (7 - novFirst.getUTCDay()) % 7 + 1, 6));
+    if (d >= dstStart && d < dstEnd) etOffset = 4;
+  }
   const etNow = new Date(Date.now() - etOffset * 60 * 60 * 1000);
   return etNow.toISOString().split('T')[0];
 }

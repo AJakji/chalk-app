@@ -43,11 +43,27 @@ OPTIONAL_ENV.forEach(([key, impact]) => {
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Returns true if date is in US Daylight Saving Time (second Sun Mar → first Sun Nov)
+// Returns true if the given UTC Date is in US Daylight Saving Time.
+// Works correctly on UTC servers (Railway) where getTimezoneOffset() always returns 0.
+// Uses the IANA 'America/New_York' timezone to determine the correct offset.
 function isDST(d) {
-  const jan = new Date(d.getFullYear(), 0, 1).getTimezoneOffset();
-  const jul = new Date(d.getFullYear(), 6, 1).getTimezoneOffset();
-  return d.getTimezoneOffset() < Math.max(jan, jul);
+  try {
+    // Format the date in ET — if the offset part shows -04:00 it's EDT (DST); -05:00 is EST
+    const etStr = d.toLocaleString('en-US', { timeZone: 'America/New_York', timeZoneName: 'short' });
+    return etStr.includes('EDT');
+  } catch {
+    // Fallback: DST runs second Sunday of March → first Sunday of November
+    const year = d.getUTCFullYear();
+    // Second Sunday of March (start of DST)
+    const marchFirst = new Date(Date.UTC(year, 2, 1));
+    const marchFirstDay = marchFirst.getUTCDay(); // 0=Sun
+    const dstStart = new Date(Date.UTC(year, 2, (14 - marchFirstDay) % 7 + 1, 7)); // 2AM ET = 7AM UTC
+    // First Sunday of November (end of DST)
+    const novFirst = new Date(Date.UTC(year, 10, 1));
+    const novFirstDay = novFirst.getUTCDay();
+    const dstEnd = new Date(Date.UTC(year, 10, (7 - novFirstDay) % 7 + 1, 6)); // 2AM ET = 6AM UTC
+    return d >= dstStart && d < dstEnd;
+  }
 }
 
 // Returns today's date in ET (YYYY-MM-DD), works correctly on UTC servers
