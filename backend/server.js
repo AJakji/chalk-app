@@ -640,6 +640,56 @@ if (process.env.MOCK_MODE !== 'true') {
     });
   }, { timezone: 'America/New_York' });
 
+  // ── 10:15 AM ET — Daily failsafe: ensure picks exist before users wake up ─────
+  // If the overnight pipeline failed (server restart, API error, etc.) and the
+  // 9:45 AM run also produced nothing, this is the last safety net.
+  // It re-runs the full picks generator. Idempotent: ON CONFLICT DO NOTHING
+  // prevents duplicates, so running it when picks already exist is harmless.
+  cron.schedule('15 10 * * *', async () => {
+    const today = getTodayET();
+    console.log(`\n⏰ [10:15 AM] Daily failsafe check for ${today}…`);
+    try {
+      const db = require('./db');
+      const { rows } = await db.query(
+        `SELECT COUNT(*) as count FROM picks WHERE pick_date = $1`, [today]
+      );
+      const pickCount = parseInt(rows[0].count);
+
+      if (pickCount > 0) {
+        console.log(`✅ [10:15 AM] ${pickCount} picks already live for ${today} — no action needed`);
+        return;
+      }
+
+      console.log(`🚨 [10:15 AM] ZERO picks for ${today} — triggering emergency pick generation…`);
+
+      // Run models fresh (uses yesterday's game log data which is already in DB)
+      await Promise.allSettled([
+        runPipeline('Failsafe: NBA Model', () => runPythonScript('nbaProjectionModel.py')),
+        runPipeline('Failsafe: MLB Model', () => runPythonScript('mlbProjectionModel.py')),
+        runPipeline('Failsafe: NHL Model', () => runPythonScript('nhlProjectionModel.py')),
+      ]);
+
+      // Edge detection
+      await Promise.allSettled([
+        runPipeline('Failsafe: NBA Edges', () => detectEdges()),
+        runPipeline('Failsafe: MLB Edges', () => detectEdgesForSport('MLB')),
+        runPipeline('Failsafe: NHL Edges', () => detectEdgesForSport('NHL')),
+        runPipeline('Failsafe: NBA Teams', () => detectTeamBetEdges('NBA')),
+        runPipeline('Failsafe: MLB Teams', () => detectTeamBetEdges('MLB')),
+        runPipeline('Failsafe: NHL Teams', () => detectTeamBetEdges('NHL')),
+      ]);
+
+      // Pick generation
+      const modelPicks = await generateModelPicks().catch(() => []);
+      const [gamePicks, propPicks] = await Promise.allSettled([generatePicks(), generatePropPicks()]);
+
+      const total = modelPicks.length + (gamePicks.value?.length || 0) + (propPicks.value?.length || 0);
+      console.log(`✅ [10:15 AM] Failsafe complete — ${total} picks generated for ${today}`);
+    } catch (err) {
+      console.error('🚨 [10:15 AM] Failsafe failed:', err.message);
+    }
+  }, { timezone: 'America/New_York' });
+
 } else {
   console.log('ℹ️  MOCK_MODE=true — all cron jobs disabled, no API credits used');
 }

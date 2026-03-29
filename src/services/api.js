@@ -256,25 +256,55 @@ export async function fetchTodaysPicks() {
 // Fetch top 5 picks for a specific tab, independently ranked.
 // tab = "Chalky's Picks" → top 5 across all sports
 // tab = "NBA" / "NHL" / etc. → top 5 for that sport, ranked 1–5 within it
+// If today has 0 picks (pipeline still running or missed), falls back to most recent date.
 export async function fetchPicksForTab(tab, date) {
   const dateParam = date || new Date().toISOString().split('T')[0];
   const isChalky  = tab === "Chalky's Picks";
-  const url = isChalky
-    ? `${API_URL}/api/picks?date=${dateParam}&limit=5`
-    : `${API_URL}/api/picks?date=${dateParam}&sport=${encodeURIComponent(tab)}&limit=5`;
-  const res = await fetch(url);
+
+  const buildUrl = (d) => isChalky
+    ? `${API_URL}/api/picks?date=${d}&limit=5`
+    : `${API_URL}/api/picks?date=${d}&sport=${encodeURIComponent(tab)}&limit=5`;
+
+  const res = await fetch(buildUrl(dateParam));
   if (!res.ok) throw new Error(`Picks API error: ${res.status}`);
   const { picks } = await res.json();
-  return picks.map(normalizePick);
+  if (picks.length > 0) return picks.map(normalizePick);
+
+  // Nothing for today yet — fetch the most recent date that has picks
+  try {
+    const fallbackRes = await fetch(
+      isChalky
+        ? `${API_URL}/api/picks/recent?limit=5`
+        : `${API_URL}/api/picks/recent?limit=5&sport=${encodeURIComponent(tab)}`
+    );
+    if (!fallbackRes.ok) return [];
+    const { picks: recent } = await fallbackRes.json();
+    return (recent || []).map(normalizePick);
+  } catch {
+    return [];
+  }
 }
 
 // Fetch per-sport pick counts for tab badges.
+// Falls back to most recent available date if today has 0 picks.
 export async function fetchPickCounts(date) {
   const dateParam = date || new Date().toISOString().split('T')[0];
   const res = await fetch(`${API_URL}/api/picks/counts?date=${dateParam}`);
   if (!res.ok) return {};
-  const { counts } = await res.json();
-  return counts || {};
+  const counts = (await res.json()).counts || {};
+
+  // If today has nothing yet, fall back to most recent picks date counts
+  const totalToday = Object.values(counts).reduce((s, v) => s + (v || 0), 0);
+  if (totalToday === 0) {
+    try {
+      const fallback = await fetch(`${API_URL}/api/picks/counts/recent`);
+      if (fallback.ok) {
+        const { counts: recent } = await fallback.json();
+        return recent || {};
+      }
+    } catch {}
+  }
+  return counts;
 }
 
 export async function fetchPickById(id) {

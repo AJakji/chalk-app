@@ -241,6 +241,77 @@ router.get('/today', async (req, res) => {
   }
 });
 
+// GET /api/picks/counts/recent
+// Returns pick counts for the most recent date that has picks.
+// Used as fallback badge counts when today = 0.
+router.get('/counts/recent', async (req, res) => {
+  if (process.env.MOCK_MODE === 'true') {
+    return res.json({ counts: { NBA: 4, CHALKY: 4 } });
+  }
+
+  try {
+    const { rows } = await db.query(
+      `SELECT league AS sport, COUNT(*) AS total
+         FROM picks
+        WHERE pick_date = (SELECT MAX(pick_date) FROM picks)
+        GROUP BY league
+        UNION ALL
+       SELECT 'CHALKY' AS sport, LEAST(COUNT(*), 5) AS total
+         FROM picks
+        WHERE pick_date = (SELECT MAX(pick_date) FROM picks)`
+    );
+    const counts = {};
+    for (const row of rows) counts[row.sport] = parseInt(row.total, 10);
+    res.json({ counts });
+  } catch (err) {
+    console.error('Error fetching recent pick counts:', err);
+    res.status(500).json({ counts: {} });
+  }
+});
+
+// GET /api/picks/recent
+// Returns picks from the most recent date that has any picks.
+// Used as a fallback when today has 0 picks (pipeline still running or failed).
+// Optional: ?sport=NBA → most recent picks for that sport only
+// Optional: ?limit=5
+router.get('/recent', async (req, res) => {
+  if (process.env.MOCK_MODE === 'true') {
+    return res.json({ picks: MOCK_PICKS.slice(0, 5) });
+  }
+
+  try {
+    const limit = parseInt(req.query.limit || '5', 10);
+    const sport = req.query.sport || null;
+
+    let rows;
+    if (sport) {
+      ({ rows } = await db.query(
+        `SELECT * FROM picks
+         WHERE league = $1
+           AND pick_date = (
+             SELECT MAX(pick_date) FROM picks WHERE league = $1
+           )
+         ORDER BY confidence DESC
+         LIMIT $2`,
+        [sport, limit]
+      ));
+    } else {
+      ({ rows } = await db.query(
+        `SELECT * FROM picks
+         WHERE pick_date = (SELECT MAX(pick_date) FROM picks)
+         ORDER BY confidence DESC
+         LIMIT $1`,
+        [limit]
+      ));
+    }
+
+    res.json({ picks: rows });
+  } catch (err) {
+    console.error('Error fetching recent picks:', err);
+    res.status(500).json({ picks: [] });
+  }
+});
+
 // GET /api/picks/:id
 // Returns a single pick with full analysis detail.
 router.get('/:id', async (req, res) => {
