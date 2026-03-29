@@ -255,9 +255,10 @@ const s = StyleSheet.create({
     fontSize: 32,
     fontWeight: '800',
     color: '#F5F5F0',
+    textAlign: 'center',
     paddingHorizontal: 28,
     marginTop: 20,
-    marginBottom: 8,
+    marginBottom: 36,
   },
   sub: {
     fontSize: 14,
