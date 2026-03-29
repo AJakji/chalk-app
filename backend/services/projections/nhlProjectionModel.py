@@ -1535,7 +1535,48 @@ def project_moneyline(home_tl: list, away_tl: list,
     return home_win, factors
 
 
-# ── Confidence scoring ────────────────────────────────────────────────────────
+# ── Universal confidence formula ─────────────────────────────────────────────
+
+def calculate_confidence(edge: float, prop_type: str, sport: str, sample_size: int = 10):
+    """
+    Universal confidence formula tied to edge size.
+    Returns None if edge is too small (skip this pick).
+    Returns int confidence score 62–87 if edge qualifies.
+    """
+    MIN_EDGES = {
+        # NBA player
+        'points': 1.5, 'rebounds': 0.8, 'assists': 0.8, 'threes': 0.4,
+        'pra': 2.0, 'pr': 1.5, 'pa': 1.5, 'ar': 1.2, 'blocks': 0.3, 'steals': 0.3,
+        # NBA team
+        'spread': 1.5, 'total': 2.0,
+        # NHL player
+        'shots_on_goal': 0.8, 'goals': 0.3,
+        # NHL team
+        'puck_line': 0.4,
+        # MLB player
+        'hits': 0.3, 'total_bases': 0.5, 'home_runs': 0.2, 'rbis': 0.4,
+        'strikeouts': 0.8, 'earned_runs': 0.5,
+        # MLB team
+        'run_line': 0.5,
+    }
+    min_edge = MIN_EDGES.get(prop_type, 1.0)
+    if abs(edge) < min_edge:
+        return None  # Skip this pick
+    base = 62
+    edge_ratio = abs(edge) / min_edge
+    edge_bonus = min(20, int((edge_ratio - 1) * 10))
+    if sample_size >= 20:
+        sample_bonus = 5
+    elif sample_size >= 10:
+        sample_bonus = 3
+    elif sample_size >= 5:
+        sample_bonus = 1
+    else:
+        sample_bonus = 0
+    return min(87, base + edge_bonus + sample_bonus)
+
+
+# ── Legacy confidence scoring (kept for non-edge contexts) ───────────────────
 
 def compute_confidence(prop_type: str,
                        edge_pct: float,
@@ -1603,7 +1644,6 @@ MIN_EDGE = {
     'goals_against': 0.4,
     'puck_line':     0.04,
     'total':         0.4,
-    'moneyline':     0.05,
 }
 
 
@@ -1689,8 +1729,13 @@ def upsert_player_projection(conn, player_id: int, player_name: str,
     line = get_market_line(conn, player_name, prop_type, game_date)
     if line is not None:
         edge = round(proj_value - line, 2)
+        # Use universal confidence formula — returns None if edge too small (skip pick)
+        conf_score = calculate_confidence(edge, prop_type, 'NHL', confidence)
+        if conf_score is None:
+            return  # edge below threshold — skip this projection
         stored_factors = {**factors, 'market_line': line, 'edge': edge}
     else:
+        conf_score = confidence  # use passed-in base confidence until line posts
         stored_factors = dict(factors)
 
     try:
@@ -1711,7 +1756,7 @@ def upsert_player_projection(conn, player_id: int, player_name: str,
                        updated_at      = NOW()""",
                 (player_id, player_name, team, opponent, game_date,
                  prop_type, proj_value, proj_value,
-                 confidence, json.dumps(stored_factors), MODEL_VERSION)
+                 conf_score, json.dumps(stored_factors), MODEL_VERSION)
             )
         conn.commit()
     except Exception as e:
@@ -2165,7 +2210,6 @@ def main():
         if home_is_backup or away_is_backup:            team_conf = min(82, team_conf + 15)
 
         upsert_team_projection(conn, home, away, game_date, 'total',           proj_total, total_f, team_conf)
-        upsert_team_projection(conn, home, away, game_date, 'moneyline',        home_win,   ml_f,   team_conf)
         upsert_team_projection(conn, home, away, game_date, 'puck_line_cover',  home_cover, hl_f,   team_conf)
         upsert_team_projection(conn, away, home, game_date, 'puck_line_cover',  away_cover, al_f,   team_conf)
 

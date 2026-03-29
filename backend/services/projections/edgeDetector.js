@@ -254,7 +254,7 @@ async function fetchNBAEvents() {
 
 async function fetchNBAGameOdds() {
   if (!ODDS_API_KEY) return [];
-  const url = `${BASE_URL}/sports/basketball_nba/odds?apiKey=${ODDS_API_KEY}&regions=us&markets=h2h,spreads,totals&oddsFormat=american&bookmakers=draftkings,fanduel,betmgm,bet365`;
+  const url = `${BASE_URL}/sports/basketball_nba/odds?apiKey=${ODDS_API_KEY}&regions=us&markets=spreads,totals&oddsFormat=american&bookmakers=draftkings,fanduel,betmgm,bet365`;
   return (await fetchWithRetry(url, { fallback: [] })) || [];
 }
 
@@ -556,95 +556,34 @@ async function getH2HStrong(playerId, opponentAbbr, propType, gameDate) {
   }
 }
 
-// ── Confidence scoring ─────────────────────────────────────────────────────────
+// ── Universal confidence formula ──────────────────────────────────────────────
 
 /**
- * Calculate confidence for a single pick.
- *
- * Design principle: The projection already embeds all research — opponent rank,
- * pace, rest, hot/cold streak, weather, park factor, goalie, usage, etc.
- * The edge (projection minus market line) IS the primary signal.
- *
- * Confidence is only adjusted by:
- *   1. Edge size (primary driver)
- *   2. Post-projection signals — new information that arrived AFTER the model ran
- *   3. Reliability — sample size tells us how trustworthy the projection itself is
- *
- * Nothing else. No double-counting of what the projection already knows.
- *
- * Returns { confidence: number, breakdown: object }
+ * Universal confidence formula tied to edge size.
+ * Returns null if edge is too small (caller should skip this pick).
+ * Returns integer confidence score 62–87 if edge qualifies.
  */
-function calculateConfidence({
-  edge,
-  sport = 'NBA',
-  propType              = null,    // NBA: 'points', 'rebounds', 'assists', 'threes', 'pra', etc.
-  gamesPlayedThisSeason = null,
-  // Post-projection signals (true only if event occurred AFTER model ran)
-  isQuestionable        = false,   // player listed Q or out after model ran
-  backupGoalieConfirmed = false,   // NHL: backup confirmed after model ran
-  goalieUnconfirmed     = false,   // NHL: starter still unknown 90 min out
-  lineMovedOurWay       = false,   // line moved in our direction (sharp money agrees)
-  lineMovedAgainstUs    = false,   // line moved against our direction
-  lateInjuryFavours     = false,   // key opponent player ruled out after model ran
-  weatherDataAvailable  = true,    // MLB: false means model couldn't apply weather
-}) {
-  const breakdown = { base: 60 };
-  let confidence = 60;
-
-  // ── 1. Edge (primary driver) ─────────────────────────────────────────────
-  const absEdge = Math.abs(edge);
-  let edgeBonus = 0;
-  if      (absEdge >= 5.0) edgeBonus = 35;
-  else if (absEdge >= 4.0) edgeBonus = 28;
-  else if (absEdge >= 3.0) edgeBonus = 22;
-  else if (absEdge >= 2.5) edgeBonus = 18;
-  else if (absEdge >= 2.0) edgeBonus = 14;
-  else if (absEdge >= 1.5) edgeBonus =  8;
-  // NHL/MLB: markets with small absolute edges need relative scaling
-  // A 0.4 edge on a 0.5 line is 80% — very strong signal
-  else if (sport === 'NHL' && absEdge >= 0.3) edgeBonus = 6;
-  else if (sport === 'NHL' && absEdge >= 0.15) edgeBonus = 3;
-  else if (sport === 'MLB' && absEdge >= 0.8) edgeBonus = 10;
-  else if (sport === 'MLB' && absEdge >= 0.5) edgeBonus = 6;
-  else if (sport === 'MLB' && absEdge >= 0.3) edgeBonus = 3;
-  confidence += edgeBonus;
-  breakdown.edge_bonus = edgeBonus;
-
-  // ── 2. Post-projection adjustments (cap: +15 / -20) ─────────────────────
-  let postProj = 0;
-  if (backupGoalieConfirmed)                             { postProj += 15; breakdown.backup_goalie_bonus       =  15; }
-  if (lineMovedOurWay)                                   { postProj +=  8; breakdown.line_move_bonus           =   8; }
-  if (lateInjuryFavours)                                 { postProj +=  5; breakdown.injury_bonus              =   5; }
-  if (isQuestionable)                                    { postProj -= 20; breakdown.questionable_penalty      = -20; }
-  if (goalieUnconfirmed)                                 { postProj -= 12; breakdown.goalie_unconfirmed_penalty = -12; }
-  if (lineMovedAgainstUs)                                { postProj -=  8; breakdown.line_move_against_penalty =  -8; }
-  if (sport === 'MLB' && weatherDataAvailable === false) { postProj -= 10; breakdown.no_weather_penalty        = -10; }
-  postProj = Math.max(-20, Math.min(15, postProj));
-  confidence += postProj;
-  breakdown.post_proj = postProj;
-
-  // ── 3. Reliability (sample size only) ───────────────────────────────────
-  let reliability = 0;
-  if (gamesPlayedThisSeason != null && gamesPlayedThisSeason < 10) { reliability -= 8; breakdown.small_sample_penalty = -8; }
-  if (gamesPlayedThisSeason != null && gamesPlayedThisSeason > 30) { reliability += 3; breakdown.large_sample_bonus   =  3; }
-  confidence += reliability;
-  breakdown.reliability = reliability;
-
-  // ── 4. Prop-type variance adjustments ────────────────────────────────────
-  // Threes are the highest-variance prop — even a correct projection hits less
-  // reliably than a correct points projection due to shooting randomness.
-  if (propType === 'threes') {
-    confidence -= 6;
-    breakdown.threes_variance_penalty = -6;
+function calculateConfidence(edge, propType, sport, sampleSize = 10) {
+  const MIN_EDGES = {
+    points: 1.5, rebounds: 0.8, assists: 0.8, threes: 0.4,
+    pra: 2.0, pr: 1.5, pa: 1.5, ar: 1.2, blocks: 0.3, steals: 0.3,
+    spread: 1.5, total: 2.0,
+    shots_on_goal: 0.8, goals: 0.3,
+    puck_line: 0.4,
+    hits: 0.3, total_bases: 0.5, home_runs: 0.2, rbis: 0.4,
+    strikeouts: 0.8, earned_runs: 0.5,
+    run_line: 0.5,
   }
-
-  // ── Soft cap above 85, hard cap 50–92 ───────────────────────────────────
-  if (confidence > 85) {
-    confidence = 85 + (confidence - 85) * 0.4;
-  }
-  confidence = Math.max(50, Math.min(92, Math.round(confidence)));
-  breakdown.final = confidence;
-  return { confidence, breakdown };
+  const minEdge = MIN_EDGES[propType] || 1.0
+  if (Math.abs(edge) < minEdge) return null
+  const base = 62
+  const edgeRatio = Math.abs(edge) / minEdge
+  const edgeBonus = Math.min(20, Math.floor((edgeRatio - 1) * 10))
+  let sampleBonus = 0
+  if (sampleSize >= 20) sampleBonus = 5
+  else if (sampleSize >= 10) sampleBonus = 3
+  else if (sampleSize >= 5) sampleBonus = 1
+  return Math.min(87, base + edgeBonus + sampleBonus)
 }
 
 // ── Today's projections from DB ────────────────────────────────────────────────
@@ -805,7 +744,7 @@ const MAX_TEAM_PICKS  = 12;
 
 async function fetchGameOdds(sportKey) {
   if (!ODDS_API_KEY) return [];
-  const url = `${BASE_URL}/sports/${sportKey}/odds?apiKey=${ODDS_API_KEY}&regions=us&markets=h2h,spreads,totals&oddsFormat=american&bookmakers=draftkings,fanduel,betmgm,bet365`;
+  const url = `${BASE_URL}/sports/${sportKey}/odds?apiKey=${ODDS_API_KEY}&regions=us&markets=spreads,totals&oddsFormat=american&bookmakers=draftkings,fanduel,betmgm,bet365`;
   return (await fetchWithRetry(url, { fallback: [] })) || [];
 }
 
@@ -882,7 +821,7 @@ function calculateTeamBetConfidence({ coverProb, gamesUsed = 0, backupGoalie = f
 // ── Main team bet edge detection pipeline ─────────────────────────────────────
 
 /**
- * Detect team bet edges (spread / total / moneyline) for a given sport.
+ * Detect team bet edges (spread / total) for a given sport.
  * Reads team_projections from DB, fetches Odds API game lines, computes
  * cover probability via normalCDF, and writes qualifying picks to picks table.
  *
@@ -1870,26 +1809,21 @@ async function detectEdges(gameDate) {
         // ── Sample size for reliability signal ────────────────────────────
         const playerStats = await getPlayerRecentStats(proj.player_id, propType, today);
 
-        let { confidence, breakdown } = calculateConfidence({
-          edge,
-          sport:                 'NBA',
-          propType,
-          gamesPlayedThisSeason: playerStats.gamesPlayed,
-          isQuestionable,
-        });
+        const confidence = calculateConfidence(edge, propType, 'NBA', playerStats.gamesPlayed);
+        if (confidence === null) continue; // edge below threshold — skip
+        const breakdown = {};
 
         // ── Teammate injury cascading for assist-sensitive props ──────────
+        let finalConfidence = confidence;
         const astProps = ['assists', 'pra', 'pts_ast', 'ast_reb'];
         if (astProps.includes(propType)) {
           const injAdj = await getTeammateAstInjuryAdj(proj.team, proj.player_id, 'NBA', today);
           if (injAdj.delta !== 0) {
-            confidence += injAdj.delta;
-            breakdown.teammate_injury_ast = injAdj.delta;
-            confidence = Math.max(50, Math.min(92, confidence));
+            finalConfidence = Math.max(50, Math.min(92, confidence + injAdj.delta));
           }
         }
 
-        if (confidence < MIN_CONFIDENCE) continue;
+        if (finalConfidence < MIN_CONFIDENCE) continue;
 
         const edgeObj = {
           playerId:        proj.player_id,
@@ -1902,7 +1836,7 @@ async function detectEdges(gameDate) {
           direction,
           chalkProjection: projValue,
           chalkEdge:       parseFloat(edge.toFixed(3)),
-          confidence,
+          confidence:      finalConfidence,
           confidenceBreakdown: breakdown,
           dkOdds:          lineData.dk_odds,
           fdOdds:          lineData.fd_odds,
@@ -1929,7 +1863,7 @@ async function detectEdges(gameDate) {
             bet365Odds:      lineData.bet365_odds,
             chalkProjection: projValue,
             chalkEdge:       edgeObj.chalkEdge,
-            confidence,
+            confidence:      finalConfidence,
           });
         } catch (err) {
           console.error(`  [storeEdge] Failed for ${edgeObj.playerName} ${propType}: ${err.message}`);
@@ -2080,17 +2014,8 @@ async function detectEdgesForSport(sport, gameDate) {
         let factors = {};
         try { factors = typeof activeRow.factors_json === 'string' ? JSON.parse(activeRow.factors_json) : (activeRow.factors_json || {}); } catch {}
 
-        const { confidence } = calculateConfidence({
-          edge,
-          sport,
-          gamesPlayedThisSeason: sampleSize,
-          isQuestionable,
-          weatherDataAvailable:  sport === 'MLB' ? factors?.weather_available !== false : true,
-          backupGoalieConfirmed: sport === 'NHL' ? (factors?.backup_goalie_detected || false) : false,
-          goalieUnconfirmed:     sport === 'NHL' ? (factors?.goalie_unconfirmed     || false) : false,
-        });
-
-        if (confidence < MIN_CONFIDENCE) continue;
+        const confidence = calculateConfidence(edge, propTypeInternal, sport, sampleSize ?? 10);
+        if (confidence === null || confidence < MIN_CONFIDENCE) continue;
 
         const edgeObj = {
           playerId:        proj.player_id,

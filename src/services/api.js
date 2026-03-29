@@ -382,6 +382,11 @@ function normalizePick(row) {
     playerPosition: row.player_position ?? null,
     matchupText:    row.matchup_text    ?? null,
     headshotUrl:    row.headshot_url    ?? null,
+    // Model stats for pick card display
+    proj_value:     row.proj_value      ?? null,
+    prop_line:      row.prop_line       ?? null,
+    chalk_edge:     row.chalk_edge      ?? row.edge ?? null,
+    confidence_score: row.confidence_score ?? row.confidence ?? null,
   };
 }
 

@@ -16,11 +16,11 @@ Execution order:
      d. Compute confidence with soft cap 85 → hard cap 92
      e. Apply minimum edge threshold
      f. Write to chalk_projections
-  3. Compute team props: Total, Spread, Moneyline
+  3. Compute team props: Total, Spread
   4. Log summary
 
 Player props: Points, Rebounds, Assists, Threes, PRA, P+R, P+A, A+R
-Team props:   Total, Spread, Moneyline
+Team props:   Total, Spread
 """
 
 from __future__ import annotations
@@ -127,6 +127,49 @@ def safe_float(v, default: float = 0.0) -> float:
 
 def clamp(v: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, v))
+
+
+# ---------------------------------------------------------------------------
+# Universal confidence formula (FIX 3)
+# ---------------------------------------------------------------------------
+
+def calculate_confidence(edge: float, prop_type: str, sport: str, sample_size: int = 10):
+    """
+    Universal confidence formula tied to edge size.
+    Returns None if edge is too small (skip this pick).
+    Returns int confidence score 62–87 if edge qualifies.
+    """
+    MIN_EDGES = {
+        # NBA player
+        'points': 1.5, 'rebounds': 0.8, 'assists': 0.8, 'threes': 0.4,
+        'pra': 2.0, 'pr': 1.5, 'pa': 1.5, 'ar': 1.2, 'blocks': 0.3, 'steals': 0.3,
+        # NBA team
+        'spread': 1.5, 'total': 2.0,
+        # NHL player
+        'shots_on_goal': 0.8, 'goals': 0.3,
+        # NHL team
+        'puck_line': 0.4,
+        # MLB player
+        'hits': 0.3, 'total_bases': 0.5, 'home_runs': 0.2, 'rbis': 0.4,
+        'strikeouts': 0.8, 'earned_runs': 0.5,
+        # MLB team
+        'run_line': 0.5,
+    }
+    min_edge = MIN_EDGES.get(prop_type, 1.0)
+    if abs(edge) < min_edge:
+        return None  # Skip this pick
+    base = 62
+    edge_ratio = abs(edge) / min_edge
+    edge_bonus = min(20, int((edge_ratio - 1) * 10))
+    if sample_size >= 20:
+        sample_bonus = 5
+    elif sample_size >= 10:
+        sample_bonus = 3
+    elif sample_size >= 5:
+        sample_bonus = 1
+    else:
+        sample_bonus = 0
+    return min(87, base + edge_bonus + sample_bonus)
 
 
 def normal_cdf(x: float) -> float:
@@ -778,17 +821,8 @@ def project_player(
                   * scoring_context_f
                   * game_script_f)
 
-    # Confidence: base 60 + factors
-    conf_pts_raw = (60.0
-                    + (10 if len(logs) >= 10 else 5)           # sample size
-                    + (8  if abs(base_pts - l5_pts) < 2 else 2)  # consistency
-                    + (5  if pos_def_pts != 1.0 else 0)         # matchup data
-                    + (5  if pace_f > 1.02 else 0)              # pace boost
-                    + (4  if usage_f > 1.10 else 0)             # usage spike
-                    + (3  if rest_f >= 1.0 else -3)             # rest edge
-                    + (4  if abs(ha_pts_f - 1.0) > 0.02 else 0) # h/a split
-                    + (4  if ts_f > 1.02 else 0))               # efficiency edge
-    conf_pts = cap_confidence(conf_pts_raw)
+    # Confidence: use universal formula (edge applied at write time; use sample size here)
+    conf_pts = calculate_confidence(0.0, 'points', 'NBA', len(logs)) or 62
 
     factors_pts = {
         'base':           round(base_pts, 2),
@@ -828,15 +862,7 @@ def project_player(
                 * total_f
                 * game_script_f)
 
-    conf_reb_raw = (60.0
-                    + (10 if len(logs) >= 10 else 5)
-                    + (8  if abs(base_reb - l5_reb) < 1 else 2)
-                    + (5  if pos_def_reb != 1.0 else 0)
-                    + (5  if archetype == TRUE_BIG else 0)
-                    + (4  if pace_f > 1.02 else 0)
-                    + (3  if rest_f >= 1.0 else -3)
-                    + (3  if abs(ha_reb_f - 1.0) > 0.02 else 0))
-    conf_reb = cap_confidence(conf_reb_raw)
+    conf_reb = calculate_confidence(0.0, 'rebounds', 'NBA', len(logs)) or 62
 
     factors_reb = {
         'base':        round(base_reb, 2),
@@ -871,15 +897,7 @@ def project_player(
                 * pg_bonus
                 * total_f)
 
-    conf_ast_raw = (60.0
-                    + (10 if len(logs) >= 10 else 5)
-                    + (8  if abs(base_ast - l5_ast) < 1 else 2)
-                    + (5  if pos_def_ast != 1.0 else 0)
-                    + (5  if archetype == TRUE_PLAYMAKER else 0)
-                    + (4  if pace_f > 1.02 else 0)
-                    + (3  if rest_f >= 1.0 else -3)
-                    + (3  if abs(ha_ast_f - 1.0) > 0.02 else 0))
-    conf_ast = cap_confidence(conf_ast_raw)
+    conf_ast = calculate_confidence(0.0, 'assists', 'NBA', len(logs)) or 62
 
     factors_ast = {
         'base':        round(base_ast, 2),
@@ -917,15 +935,7 @@ def project_player(
     vol_floor   = fg3a_season * avg_3pt_pct * 0.80
     proj_3pm    = max(proj_3pm, vol_floor * 0.70)
 
-    conf_3pm_raw = (55.0
-                    + (10 if len(logs) >= 10 else 5)
-                    + (8  if abs(base_3pm - l5_3pm) < 0.5 else 2)
-                    + (6  if fg3a_season > 5 else 0)                # high volume shooter
-                    + (5  if archetype == THREE_AND_D else 0)
-                    + (5  if pos_def_3pm != 1.0 else 0)
-                    + (3  if pace_f > 1.02 else 0)
-                    + (3  if rest_f >= 1.0 else -3))
-    conf_3pm = cap_confidence(conf_3pm_raw)
+    conf_3pm = calculate_confidence(0.0, 'threes', 'NBA', len(logs)) or 62
 
     factors_3pm = {
         'base':        round(base_3pm, 2),
@@ -949,7 +959,7 @@ def project_player(
 
     # PRA = pts + reb + ast
     proj_pra  = (proj_pts + proj_reb + proj_ast) * corr['pra']
-    conf_pra  = cap_confidence((conf_pts + conf_reb + conf_ast) / 3 + 2)
+    conf_pra  = calculate_confidence(0.0, 'pra', 'NBA', len(logs)) or 62
     factors_pra = {
         'proj_pts': round(proj_pts, 2), 'proj_reb': round(proj_reb, 2),
         'proj_ast': round(proj_ast, 2), 'corr_f': corr['pra'],
@@ -958,7 +968,7 @@ def project_player(
 
     # P+R
     proj_pr   = (proj_pts + proj_reb) * corr['pr']
-    conf_pr   = cap_confidence((conf_pts + conf_reb) / 2 + 2)
+    conf_pr   = calculate_confidence(0.0, 'pr', 'NBA', len(logs)) or 62
     factors_pr = {
         'proj_pts': round(proj_pts, 2), 'proj_reb': round(proj_reb, 2),
         'corr_f': corr['pr'], 'archetype': archetype,
@@ -966,7 +976,7 @@ def project_player(
 
     # P+A
     proj_pa   = (proj_pts + proj_ast) * corr['pa']
-    conf_pa   = cap_confidence((conf_pts + conf_ast) / 2 + 2)
+    conf_pa   = calculate_confidence(0.0, 'pa', 'NBA', len(logs)) or 62
     factors_pa = {
         'proj_pts': round(proj_pts, 2), 'proj_ast': round(proj_ast, 2),
         'corr_f': corr['pa'], 'archetype': archetype,
@@ -974,7 +984,7 @@ def project_player(
 
     # A+R
     proj_ar   = (proj_ast + proj_reb) * corr['ar']
-    conf_ar   = cap_confidence((conf_ast + conf_reb) / 2 + 2)
+    conf_ar   = calculate_confidence(0.0, 'ar', 'NBA', len(logs)) or 62
     factors_ar = {
         'proj_ast': round(proj_ast, 2), 'proj_reb': round(proj_reb, 2),
         'corr_f': corr['ar'], 'archetype': archetype,
@@ -1013,10 +1023,10 @@ def project_team_props(
     game_date: str,
     implied_total: float,
     spread: float,
-    home_ml: float | None,
-    away_ml: float | None,
+    home_ml: float | None = None,
+    away_ml: float | None = None,
 ) -> dict:
-    """Computes Total, Spread, Moneyline for the game."""
+    """Computes Total and Spread for the game (moneyline excluded from picks)."""
 
     home_pace = get_team_pace(conn, home_team)
     away_pace = get_team_pace(conn, away_team)
@@ -1101,30 +1111,6 @@ def project_team_props(
                      if spread > 0 else normal_cdf((-spread - expected_margin) / std_dev_spread)
     cover_prob     = clamp(cover_prob, 0.10, 0.90)
 
-    # ── MONEYLINE ────────────────────────────────────────────────────────────
-    # Log5 from team win percentages
-    log5_home = log5(home_win_pct + 0.05, away_win_pct)  # +0.05 HCA
-    log5_home = clamp(log5_home, 0.10, 0.90)
-
-    # Adjust for pace and defense
-    ml_home_final = clamp(log5_home + pace_spread_f * 0.5, 0.10, 0.90)
-    ml_away_final = 1.0 - ml_home_final
-
-    # Implied probability from market ML (for confidence)
-    def ml_to_prob(ml: float | None) -> float:
-        if ml is None:
-            return 0.5
-        if ml > 0:
-            return 100 / (ml + 100)
-        return abs(ml) / (abs(ml) + 100)
-
-    market_home_prob = ml_to_prob(home_ml)
-    market_away_prob = ml_to_prob(away_ml)
-
-    # Edge = model prob minus market implied prob
-    home_ml_edge = ml_home_final - market_home_prob
-    away_ml_edge = ml_away_final - market_away_prob
-
     # Team prop confidence
     records_available = sum(home_rec) >= 20 and sum(away_rec) >= 20
     conf_team_raw = (60
@@ -1167,27 +1153,6 @@ def project_team_props(
                 'home_win_prob': round(home_win_prob, 3),
                 'pace_spread_f': round(pace_spread_f, 3),
                 'std_dev':       std_dev_spread,
-            },
-        },
-        # moneyline: proj = win probability (home or away depending on team row)
-        # upsert reads proj_val = data.get('home_prob' if is_home else 'away_prob')
-        'moneyline': {
-            'home_prob':    round(ml_home_final, 3),
-            'away_prob':    round(ml_away_final, 3),
-            'proj':         round(ml_home_final, 3),   # home win prob as default proj
-            'over_prob':    round(ml_home_final, 3),   # stored as over_prob for querying
-            'under_prob':   round(ml_away_final, 3),
-            'home_ml_edge': round(home_ml_edge, 3),
-            'away_ml_edge': round(away_ml_edge, 3),
-            'confidence':   round(conf_team, 1),
-            'factors': {
-                'log5_home':        round(log5_home, 3),
-                'home_win_pct':     round(home_win_pct, 3),
-                'away_win_pct':     round(away_win_pct, 3),
-                'home_ml_edge':     round(home_ml_edge, 3),
-                'away_ml_edge':     round(away_ml_edge, 3),
-                'market_home_prob': round(market_home_prob, 3),
-                'market_away_prob': round(market_away_prob, 3),
             },
         },
     }
@@ -1349,15 +1314,17 @@ def upsert_player_projections(conn, proj: PlayerProjection) -> int:
             # Read market line from player_props_history (posted ~9 AM by sportsbooks).
             # Store projection regardless of line availability so the 9:15 AM --props-only
             # re-run and edge detector can apply the edge filter once lines are posted.
-            threshold = MIN_EDGE.get(prop_type, 0.5)  # always defined — used below
             line = get_market_line(conn, proj.player_name, prop_type, proj.game_date)
             if line is not None:
                 edge_val = round(raw_proj - line, 2)
-                if abs(edge_val) < threshold:
-                    continue  # edge too small — not worth storing
+                # Use universal confidence formula — returns None if edge too small
+                conf_score = calculate_confidence(edge_val, prop_type, 'NBA', len(proj.props))
+                if conf_score is None:
+                    continue  # edge too small — skip
                 factors = {**factors, 'market_line': line, 'edge': edge_val}
             else:
-                edge_val = 0.0   # placeholder until lines post at 9 AM
+                edge_val   = 0.0   # placeholder until lines post at 9 AM
+                conf_score = raw_conf  # use model's base confidence until edge known
 
             # Normalize prop_type to full DB name (e.g. 'pra' → 'points_rebounds_assists')
             db_prop_type = PROP_TYPE_TO_DB.get(prop_type, prop_type)
@@ -1388,7 +1355,7 @@ def upsert_player_projections(conn, proj: PlayerProjection) -> int:
                 home_away, proj.position,
                 proj.game_date, db_prop_type,
                 round(raw_proj, 2), round(edge_val, 2),
-                round(raw_conf, 1), json.dumps({**factors, 'meets_threshold': abs(edge_val) >= threshold}),
+                round(conf_score, 1), json.dumps(factors),
             ))
             written += 1
     conn.commit()
@@ -1396,19 +1363,12 @@ def upsert_player_projections(conn, proj: PlayerProjection) -> int:
 
 
 def upsert_team_props(conn, home_team: str, away_team: str, game_date: str, team_props: dict) -> None:
-    """Writes total, spread, moneyline to team_projections table."""
-
-    def win_prob_to_american(prob: float) -> int:
-        """Convert win probability (0-1) to American moneyline odds."""
-        prob = max(0.01, min(0.99, prob))
-        if prob >= 0.5:
-            return round(-(prob / (1 - prob)) * 100)
-        return round(((1 - prob) / prob) * 100)
+    """Writes total and spread to team_projections table (moneyline excluded)."""
 
     with conn.cursor() as cur:
         for prop_type, data in team_props.items():
             for team, opponent, is_home in [(home_team, away_team, True), (away_team, home_team, False)]:
-                proj_val  = data.get('proj', data.get('home_prob' if is_home else 'away_prob', 0))
+                proj_val  = data.get('proj', 0)
                 conf      = data.get('confidence', 60)
                 factors   = data.get('factors', {})
 
@@ -1442,10 +1402,9 @@ def upsert_team_props(conn, home_team: str, away_team: str, game_date: str, team
                     )
                 )
 
-        # Write combined 'game' row — used by edgeDetector to find spread/ML picks
+        # Write combined 'game' row — used by edgeDetector to find spread/total picks
         spread_data = team_props.get('spread', {})
         total_data  = team_props.get('total', {})
-        ml_data     = team_props.get('moneyline', {})
         expected_margin = spread_data.get('expected_margin', 0.0)
         proj_total      = total_data.get('proj', 0.0)
         conf            = spread_data.get('confidence', 60)
@@ -1453,18 +1412,15 @@ def upsert_team_props(conn, home_team: str, away_team: str, game_date: str, team
         for team, opponent, is_home in [(home_team, away_team, True), (away_team, home_team, False)]:
             spread_proj = expected_margin if is_home else -expected_margin
             cover_prob  = spread_data.get('over_prob', 0.5) if is_home else spread_data.get('under_prob', 0.5)
-            win_prob    = ml_data.get('home_prob', 0.5) if is_home else ml_data.get('away_prob', 0.5)
-            ml_american = win_prob_to_american(win_prob)
 
             cur.execute(
                 """INSERT INTO team_projections
                      (team_name, opponent, sport, game_date, prop_type,
                       proj_value, proj_total, spread_projection, spread_cover_probability,
-                      moneyline_projection, win_probability,
                       confidence_score, factors_json, created_at, updated_at)
                    VALUES
                      (%s, %s, 'NBA', %s, 'game',
-                      %s, %s, %s, %s, %s, %s,
+                      %s, %s, %s, %s,
                       %s, %s, NOW(), NOW())
                    ON CONFLICT (team_name, game_date, prop_type)
                    DO UPDATE SET
@@ -1472,8 +1428,6 @@ def upsert_team_props(conn, home_team: str, away_team: str, game_date: str, team
                      proj_total               = EXCLUDED.proj_total,
                      spread_projection        = EXCLUDED.spread_projection,
                      spread_cover_probability = EXCLUDED.spread_cover_probability,
-                     moneyline_projection     = EXCLUDED.moneyline_projection,
-                     win_probability          = EXCLUDED.win_probability,
                      confidence_score         = EXCLUDED.confidence_score,
                      factors_json             = EXCLUDED.factors_json,
                      updated_at               = NOW()""",
@@ -1483,8 +1437,6 @@ def upsert_team_props(conn, home_team: str, away_team: str, game_date: str, team
                     round(float(proj_total), 1),
                     round(float(spread_proj), 2),
                     round(float(cover_prob), 3),
-                    ml_american,
-                    round(float(win_prob), 3),
                     round(conf, 1),
                     json.dumps({'expected_margin': round(expected_margin, 2),
                                 'home_team': home_team, 'away_team': away_team}),
@@ -1573,10 +1525,10 @@ def main() -> None:
                 implied_total, spread, home_ml, away_ml
             )
             upsert_team_props(conn, home, away, game_date, team_props)
-            log.info("  Team props: total=%.1f over_prob=%.2f home_ML=%.3f",
+            log.info("  Team props: total=%.1f over_prob=%.2f spread_proj=%.2f",
                      team_props['total']['proj'],
                      team_props['total']['over_prob'],
-                     team_props['moneyline']['home_prob'])
+                     team_props['spread'].get('expected_margin', 0.0))
 
         # Player props
         for team, opponent, is_home in [(home, away, True), (away, home, False)]:

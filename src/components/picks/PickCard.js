@@ -8,6 +8,26 @@ import { useTeamLogos } from '../../context/TeamLogosContext';
 
 const CHALKY_PNG = require('../../../assets/chalky.png');
 
+// ── Stats row helpers ─────────────────────────────────────────────────────────
+
+const formatProjection = (value, type) => {
+  if (value == null) return 'N/A';
+  switch (type) {
+    case 'points': case 'rebounds': case 'assists': case 'threes':
+      return value.toFixed(1);
+    case 'spread': case 'run_line': case 'puck_line':
+      return value > 0 ? `+${value.toFixed(1)}` : value.toFixed(1);
+    case 'total': return value.toFixed(1);
+    default: return typeof value === 'number' ? value.toFixed(1) : 'N/A';
+  }
+};
+
+const getConfidenceStyle = (conf, styles) => {
+  if (conf >= 80) return styles.highConf;
+  if (conf >= 70) return styles.medConf;
+  return styles.lowConf;
+};
+
 const LEAGUE_COLORS = {
   NBA: '#C9082A',
   MLB: '#002D72',
@@ -171,6 +191,37 @@ export default function PickCard({ pick, onPress, isTopPick }) {
 
         {/* Animated confidence bar */}
         <ConfidenceBar confidence={pick.confidence} onInfoPress={(e) => { e?.stopPropagation?.(); setShowInfo(true); }} />
+
+        {/* Stats row: PROJECTION | LINE | EDGE | CONFIDENCE */}
+        <View style={styles.statsRow}>
+          <View style={styles.statBox}>
+            <Text style={styles.statLabel}>PROJECTION</Text>
+            <Text style={styles.statValue}>
+              {pick.proj_value != null ? formatProjection(pick.proj_value, pick.pickType) : 'N/A'}
+            </Text>
+          </View>
+          <View style={styles.statBox}>
+            <Text style={styles.statLabel}>LINE</Text>
+            <Text style={styles.statValue}>
+              {pick.prop_line != null ? String(pick.prop_line) : 'N/A'}
+            </Text>
+          </View>
+          <View style={styles.statBox}>
+            <Text style={styles.statLabel}>EDGE</Text>
+            <Text style={[styles.statValue, styles.edgeValue,
+              pick.chalk_edge > 0 ? styles.positiveEdge : pick.chalk_edge < 0 ? styles.negativeEdge : null]}>
+              {pick.chalk_edge != null
+                ? (pick.chalk_edge > 0 ? `+${Number(pick.chalk_edge).toFixed(1)}` : Number(pick.chalk_edge).toFixed(1))
+                : 'N/A'}
+            </Text>
+          </View>
+          <View style={styles.statBox}>
+            <Text style={styles.statLabel}>CONFIDENCE</Text>
+            <Text style={[styles.statValue, getConfidenceStyle(pick.confidence, styles)]}>
+              {pick.confidence != null ? `${pick.confidence}%` : 'N/A'}
+            </Text>
+          </View>
+        </View>
 
         {/* Tap hint */}
         <View style={styles.tapHint}>
@@ -363,4 +414,14 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
     textTransform: 'uppercase',
   },
+  statsRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 12, paddingTop: 12, borderTopWidth: 1, borderTopColor: '#1e1e1e' },
+  statBox: { alignItems: 'center', flex: 1 },
+  statLabel: { fontSize: 9, color: '#888888', letterSpacing: 1, textTransform: 'uppercase', marginBottom: 4 },
+  statValue: { fontSize: 15, fontWeight: '700', color: '#F5F5F0' },
+  positiveEdge: { color: '#00E87A' },
+  negativeEdge: { color: '#FF4444' },
+  highConf: { color: '#00E87A' },
+  medConf: { color: '#FFA500' },
+  lowConf: { color: '#888888' },
+  edgeValue: { fontSize: 15, fontWeight: '800' },
 });

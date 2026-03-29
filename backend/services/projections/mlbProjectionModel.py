@@ -2223,7 +2223,48 @@ def project_moneyline(
     return home_win, away_win, to_ml(home_win), to_ml(away_win), factors
 
 
-# ── Confidence scoring ───────────────────────────────────────────────────────────
+# ── Universal confidence formula ─────────────────────────────────────────────
+
+def calculate_confidence(edge: float, prop_type: str, sport: str, sample_size: int = 10):
+    """
+    Universal confidence formula tied to edge size.
+    Returns None if edge is too small (skip this pick).
+    Returns int confidence score 62–87 if edge qualifies.
+    """
+    MIN_EDGES = {
+        # NBA player
+        'points': 1.5, 'rebounds': 0.8, 'assists': 0.8, 'threes': 0.4,
+        'pra': 2.0, 'pr': 1.5, 'pa': 1.5, 'ar': 1.2, 'blocks': 0.3, 'steals': 0.3,
+        # NBA team
+        'spread': 1.5, 'total': 2.0,
+        # NHL player
+        'shots_on_goal': 0.8, 'goals': 0.3,
+        # NHL team
+        'puck_line': 0.4,
+        # MLB player
+        'hits': 0.3, 'total_bases': 0.5, 'home_runs': 0.2, 'rbis': 0.4,
+        'strikeouts': 0.8, 'earned_runs': 0.5,
+        # MLB team
+        'run_line': 0.5,
+    }
+    min_edge = MIN_EDGES.get(prop_type, 1.0)
+    if abs(edge) < min_edge:
+        return None  # Skip this pick
+    base = 62
+    edge_ratio = abs(edge) / min_edge
+    edge_bonus = min(20, int((edge_ratio - 1) * 10))
+    if sample_size >= 20:
+        sample_bonus = 5
+    elif sample_size >= 10:
+        sample_bonus = 3
+    elif sample_size >= 5:
+        sample_bonus = 1
+    else:
+        sample_bonus = 0
+    return min(87, base + edge_bonus + sample_bonus)
+
+
+# ── Legacy confidence scoring (kept for non-edge contexts) ───────────────────
 
 def compute_confidence(
     prop_type:       str,
@@ -2380,6 +2421,12 @@ def upsert_player_projection(
                 edge = round(proj_value - line, 2)
                 merged['market_line'] = line
                 merged['edge'] = edge
+                # Use universal confidence formula — returns None if edge too small
+                conf_score = calculate_confidence(edge, db_prop_type, 'MLB', confidence)
+                if conf_score is None:
+                    continue  # edge below threshold — skip this projection
+            else:
+                conf_score = confidence  # use base confidence until line posts
 
             cur.execute(
                 """INSERT INTO chalk_projections (
@@ -2398,7 +2445,7 @@ def upsert_player_projection(
                 (
                     player_id, player_name, team, game_date, opponent, home_away,
                     db_prop_type, proj_value,
-                    confidence, MODEL_VERSION, json.dumps(merged),
+                    conf_score, MODEL_VERSION, json.dumps(merged),
                 )
             )
             rows_written += 1
@@ -2973,9 +3020,6 @@ def main():
             proj_home_r - proj_away_r,
             home_ml=home_live_ml,
         )
-        home_win, away_win, home_ml, away_ml, ml_factors = project_moneyline(
-            home_tl, away_tl, home_sp_logs, away_sp_logs,
-        )
 
         posted_total = LEAGUE_AVG['game_total']
         over_prob  = round(_normal_cdf((proj_total_v - posted_total) / TOTAL_STD_DEV), 4)
@@ -2987,7 +3031,6 @@ def main():
 
         all_t_factors = {
             'total': total_f,
-            'moneyline': ml_factors,
             'run_line': {
                 'proj_run_diff': round(proj_home_r - proj_away_r, 3),
                 'home_cover': home_cover,
@@ -3003,9 +3046,9 @@ def main():
             },
         }
 
-        for tname, t_loc, proj_r, allowed_r, ml_v, win_p, sp_cov, t_id in [
-            (home_team, 'home', proj_home_r, proj_away_r, home_ml, home_win, home_cover, game.get('home_team_id', 0)),
-            (away_team, 'away', proj_away_r, proj_home_r, away_ml, away_win, away_cover, game.get('away_team_id', 0)),
+        for tname, t_loc, proj_r, allowed_r, sp_cov, t_id in [
+            (home_team, 'home', proj_home_r, proj_away_r, home_cover, game.get('home_team_id', 0)),
+            (away_team, 'away', proj_away_r, proj_home_r, away_cover, game.get('away_team_id', 0)),
         ]:
             tproj = {
                 'team_id':                  t_id,
@@ -3016,8 +3059,8 @@ def main():
                 'proj_points':              round(proj_r, 3),
                 'proj_points_allowed':      round(allowed_r, 3),
                 'proj_total':               round(proj_total_v, 3),
-                'moneyline_projection':     round(ml_v, 2),
-                'win_probability':          round(win_p, 4),
+                'moneyline_projection':     None,
+                'win_probability':          None,
                 'spread_projection':        round(proj_home_r - proj_away_r if t_loc == 'home' else proj_away_r - proj_home_r, 3),
                 'spread_cover_probability': round(sp_cov, 4),
                 'over_probability':         over_prob,

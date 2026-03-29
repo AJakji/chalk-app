@@ -9,6 +9,24 @@ import ConfidenceInfoModal from './ConfidenceInfoModal';
 
 const LEAGUE_EMOJI = { NBA: '🏀', MLB: '⚾', NHL: '🏒', Soccer: '⚽', NFL: '🏈' };
 
+const formatProjection = (value, type) => {
+  if (value == null) return 'N/A';
+  switch (type) {
+    case 'points': case 'rebounds': case 'assists': case 'threes':
+      return value.toFixed(1);
+    case 'spread': case 'run_line': case 'puck_line':
+      return value > 0 ? `+${value.toFixed(1)}` : value.toFixed(1);
+    case 'total': return value.toFixed(1);
+    default: return typeof value === 'number' ? value.toFixed(1) : 'N/A';
+  }
+};
+
+const getConfidenceStyle = (conf, styles) => {
+  if (conf >= 80) return styles.highConf;
+  if (conf >= 70) return styles.medConf;
+  return styles.lowConf;
+};
+
 function getConfidenceBadge(confidence) {
   if (confidence >= 90) return { label: "CHALKY'S BEST BET", color: '#FFB800', bg: '#2A1F00' };
   if (confidence >= 80) return { label: 'HIGH CONFIDENCE',   color: colors.green, bg: '#0D2A1A' };
@@ -126,9 +144,14 @@ export default function PropPickCard({ pick, onPress, isTopPick }) {
   const pickLine    = extractPickLine(pick.pick);
 
   const analysis   = pick.analysis;
-  const projStat   = analysis?.keyStats?.find(k => k.label === 'Model Projection');
-  const edgeStat   = analysis?.keyStats?.find(k => k.label === 'Edge');
   const keyFactors = (analysis?.key_factors || analysis?.trends || []).slice(0, 3);
+
+  // Stats row data — prefer direct pick fields, fall back to analysis.keyStats
+  const projStat = analysis?.keyStats?.find(k => k.label === 'Model Projection');
+  const edgeStat = analysis?.keyStats?.find(k => k.label === 'Edge');
+  const projValue = pick.proj_value ?? (projStat ? parseFloat(projStat.value) : null);
+  const propLine  = pick.prop_line  ?? null;
+  const chalkEdge = pick.chalk_edge ?? (edgeStat ? parseFloat(edgeStat.value) : null);
 
   // Bar color
   const barColor = pick.confidence >= 80 ? colors.green : pick.confidence >= 65 ? '#FFB800' : colors.red;
@@ -198,23 +221,36 @@ export default function PropPickCard({ pick, onPress, isTopPick }) {
           <Text style={styles.reason}>"{pick.shortReason}"</Text>
         ) : null}
 
-        {/* ── Model projection + edge ─────────────────────────────────────── */}
-        {(projStat || edgeStat) ? (
-          <View style={styles.modelRow}>
-            {projStat ? (
-              <View style={styles.modelItem}>
-                <Text style={styles.modelLabel}>Model projection</Text>
-                <Text style={styles.modelValue}>{projStat.value}</Text>
-              </View>
-            ) : null}
-            {edgeStat ? (
-              <View style={[styles.modelItem, styles.edgeItem]}>
-                <Text style={styles.modelLabel}>Edge</Text>
-                <Text style={[styles.modelValue, { color: colors.green }]}>{edgeStat.value}</Text>
-              </View>
-            ) : null}
+        {/* ── Stats row: PROJECTION | LINE | EDGE | CONFIDENCE ────────────── */}
+        <View style={styles.statsRow}>
+          <View style={styles.statBox}>
+            <Text style={styles.statLabel}>PROJECTION</Text>
+            <Text style={styles.statValue}>
+              {projValue != null ? formatProjection(projValue, pick.pickType) : 'N/A'}
+            </Text>
           </View>
-        ) : null}
+          <View style={styles.statBox}>
+            <Text style={styles.statLabel}>LINE</Text>
+            <Text style={styles.statValue}>
+              {propLine != null ? String(propLine) : 'N/A'}
+            </Text>
+          </View>
+          <View style={styles.statBox}>
+            <Text style={styles.statLabel}>EDGE</Text>
+            <Text style={[styles.statValue, styles.edgeValue,
+              chalkEdge > 0 ? styles.positiveEdge : chalkEdge < 0 ? styles.negativeEdge : null]}>
+              {chalkEdge != null
+                ? (chalkEdge > 0 ? `+${Number(chalkEdge).toFixed(1)}` : Number(chalkEdge).toFixed(1))
+                : 'N/A'}
+            </Text>
+          </View>
+          <View style={styles.statBox}>
+            <Text style={styles.statLabel}>CONFIDENCE</Text>
+            <Text style={[styles.statValue, getConfidenceStyle(pick.confidence, styles)]}>
+              {pick.confidence != null ? `${pick.confidence}%` : 'N/A'}
+            </Text>
+          </View>
+        </View>
 
         {/* ── Key factors ─────────────────────────────────────────────────── */}
         {keyFactors.length > 0 ? (
@@ -413,7 +449,18 @@ const styles = StyleSheet.create({
     lineHeight: 18,
   },
 
-  // Model projection + edge
+  // Stats row (replaces old model projection + edge)
+  statsRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 12, paddingTop: 12, borderTopWidth: 1, borderTopColor: '#1e1e1e', marginBottom: spacing.sm },
+  statBox: { alignItems: 'center', flex: 1 },
+  statLabel: { fontSize: 9, color: '#888888', letterSpacing: 1, textTransform: 'uppercase', marginBottom: 4 },
+  statValue: { fontSize: 15, fontWeight: '700', color: '#F5F5F0' },
+  positiveEdge: { color: '#00E87A' },
+  negativeEdge: { color: '#FF4444' },
+  highConf: { color: '#00E87A' },
+  medConf: { color: '#FFA500' },
+  lowConf: { color: '#888888' },
+  edgeValue: { fontSize: 15, fontWeight: '800' },
+  // Legacy model row styles kept for compatibility
   modelRow: {
     flexDirection: 'row',
     gap: spacing.sm,
@@ -422,12 +469,8 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: colors.border,
   },
-  modelItem: {
-    flex: 1,
-  },
-  edgeItem: {
-    alignItems: 'flex-end',
-  },
+  modelItem: { flex: 1 },
+  edgeItem: { alignItems: 'flex-end' },
   modelLabel: {
     fontSize: 9,
     fontWeight: '600',
