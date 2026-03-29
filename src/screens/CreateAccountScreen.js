@@ -257,7 +257,7 @@ const s = StyleSheet.create({
     color: '#F5F5F0',
     textAlign: 'center',
     paddingHorizontal: 28,
-    marginTop: 20,
+    marginTop: 80,
     marginBottom: 36,
   },
   sub: {
