@@ -18,7 +18,7 @@ import {
 import { useSignIn, useOAuth } from '@clerk/clerk-expo';
 import * as WebBrowser from 'expo-web-browser';
 import * as Linking from 'expo-linking';
-import { Ionicons, AntDesign } from '@expo/vector-icons';
+import { Ionicons } from '@expo/vector-icons';
 import Svg, { Path } from 'react-native-svg';
 
 WebBrowser.maybeCompleteAuthSession();
@@ -156,9 +156,10 @@ export default function SignInScreen({ navigation }) {
           <Text style={s.sub}>Sign in to your account.</Text>
 
           {/* Social buttons */}
+          <Text style={s.continueWith}>Continue with</Text>
           <View style={s.socialRow}>
             <TouchableOpacity style={s.appleBtn} onPress={handleApple} activeOpacity={0.85}>
-              <AntDesign name="apple1" size={20} color="#000000" />
+              <Ionicons name="logo-apple" size={20} color="#000000" />
               <Text style={s.appleTxt}>Apple</Text>
             </TouchableOpacity>
             <TouchableOpacity style={s.googleBtn} onPress={handleGoogle} activeOpacity={0.85}>
@@ -259,6 +260,16 @@ const s = StyleSheet.create({
     color: '#555555',
     paddingHorizontal: 28,
     marginBottom: 36,
+  },
+
+  continueWith: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#444444',
+    textAlign: 'center',
+    letterSpacing: 0.5,
+    textTransform: 'uppercase',
+    marginBottom: 14,
   },
 
   // Social

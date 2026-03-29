@@ -20,7 +20,7 @@ import {
 import { useSignUp, useOAuth } from '@clerk/clerk-expo';
 import * as WebBrowser from 'expo-web-browser';
 import * as Linking from 'expo-linking';
-import { Ionicons, AntDesign } from '@expo/vector-icons';
+import { Ionicons } from '@expo/vector-icons';
 import Svg, { Path } from 'react-native-svg';
 
 function GoogleIcon() {
@@ -176,9 +176,10 @@ export default function CreateAccountScreen({ navigation }) {
           <Text style={s.sub}>Join Chalky. Free to start.</Text>
 
           {/* Social buttons */}
+          <Text style={s.continueWith}>Continue with</Text>
           <View style={s.socialRow}>
             <TouchableOpacity style={s.appleBtn} onPress={handleApple} activeOpacity={0.85}>
-              <AntDesign name="apple1" size={20} color="#000000" />
+              <Ionicons name="logo-apple" size={20} color="#000000" />
               <Text style={s.appleTxt}>Apple</Text>
             </TouchableOpacity>
             <TouchableOpacity style={s.googleBtn} onPress={handleGoogle} activeOpacity={0.85}>
@@ -196,7 +197,7 @@ export default function CreateAccountScreen({ navigation }) {
 
           {/* Email form reveal or CTA */}
           {!showEmailForm ? (
-            <TouchableOpacity onPress={revealEmailForm} style={s.emailRevealBtn} activeOpacity={0.7}>
+            <TouchableOpacity onPress={revealEmailForm} style={s.emailRevealBtn} activeOpacity={0.85}>
               <Text style={s.emailRevealText}>Continue with Email</Text>
             </TouchableOpacity>
           ) : (
@@ -266,6 +267,16 @@ const s = StyleSheet.create({
     marginBottom: 36,
   },
 
+  continueWith: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#444444',
+    textAlign: 'center',
+    letterSpacing: 0.5,
+    textTransform: 'uppercase',
+    marginBottom: 14,
+  },
+
   // Social
   socialRow: {
     flexDirection: 'row',
@@ -305,9 +316,15 @@ const s = StyleSheet.create({
   divLine:  { flex: 1, height: 1, backgroundColor: '#1e1e1e' },
   divOr:    { color: '#444444', fontSize: 12, marginHorizontal: 12, fontWeight: '500' },
 
-  // Email reveal
-  emailRevealBtn: { alignItems: 'center', paddingVertical: 8 },
-  emailRevealText: { fontSize: 14, color: '#555555' },
+  // Email reveal — green button
+  emailRevealBtn: {
+    backgroundColor: '#00E87A',
+    borderRadius: 12,
+    paddingVertical: 16,
+    marginHorizontal: 28,
+    alignItems: 'center',
+  },
+  emailRevealText: { fontSize: 15, fontWeight: '700', color: '#080808' },
 
   // Form wrapper
   formWrap: { paddingHorizontal: 28 },
