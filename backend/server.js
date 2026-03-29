@@ -829,52 +829,56 @@ async function recoverMissedPipeline() {
     console.log(`   ET time: ${etNow.getUTCHours()}:${String(etNow.getUTCMinutes()).padStart(2,'0')}`);
     console.log(`   Re-running pipeline from appropriate step…\n`);
 
-    // Always run roster + prop lines first (fast, idempotent)
-    await runPipeline('Recovery: Nightly Roster',  () => buildNightlyRoster());
-    const { writePropLinesToDB } = require('./services/oddsService');
-    await Promise.allSettled([
-      writePropLinesToDB('NBA', today).catch(e => console.error('Recovery props NBA:', e.message)),
-      writePropLinesToDB('NHL', today).catch(e => console.error('Recovery props NHL:', e.message)),
-      writePropLinesToDB('MLB', today).catch(e => console.error('Recovery props MLB:', e.message)),
-    ]);
-
-    // Run projection models (skipped if before 4:30 AM, but we're past that)
-    console.log('  Recovery: running projection models…');
-    await Promise.allSettled([
-      runPipeline('Recovery: NBA Model', () => runPythonScript('nbaProjectionModel.py')),
-      runPipeline('Recovery: MLB Model', () => runPythonScript('mlbProjectionModel.py')),
-      runPipeline('Recovery: NHL Model', () => runPythonScript('nhlProjectionModel.py')),
-    ]);
-
-    // Edge detection
-    console.log('  Recovery: running edge detection…');
-    await Promise.allSettled([
-      runPipeline('Recovery: NBA Edges', () => detectEdges()),
-      runPipeline('Recovery: MLB Edges', () => detectEdgesForSport('MLB')),
-      runPipeline('Recovery: NHL Edges', () => detectEdgesForSport('NHL')),
-      runPipeline('Recovery: NBA Teams', () => detectTeamBetEdges('NBA')),
-      runPipeline('Recovery: MLB Teams', () => detectTeamBetEdges('MLB')),
-      runPipeline('Recovery: NHL Teams', () => detectTeamBetEdges('NHL')),
-    ]);
-
-    // Pick generation
-    console.log('  Recovery: generating picks…');
-    await runPipeline('Recovery: Model Picks', async () => {
-      const picks = await generateModelPicks();
-      console.log(`  Recovery model picks: ${picks.length}`);
+    // ── STEP 1: Immediate game picks (Odds API → Claude, no Python models needed) ──
+    // These use live game-level lines (h2h/spreads/totals) available 24/7.
+    // Runs first so users have picks within minutes of a restart, even at 1 AM.
+    await runPipeline('Recovery: Game Picks (immediate)', async () => {
+      const picks = await generatePicks();
+      console.log(`  Recovery game picks: ${picks.length}`);
     });
-    await Promise.allSettled([
-      runPipeline('Recovery: Game Picks', async () => {
-        const picks = await generatePicks();
-        console.log(`  Recovery game picks: ${picks.length}`);
-      }),
-      runPipeline('Recovery: Prop Picks', async () => {
+
+    // ── STEP 2: Full model pipeline (runs in background, takes 30-60 min) ──────
+    // Roster + prop lines → Python models → edge detection → Chalky prop picks
+    // Scheduled crons will also fire at their normal times, so this is additive.
+    runPipeline('Recovery: Nightly Roster',  () => buildNightlyRoster()).then(async () => {
+      const { writePropLinesToDB } = require('./services/oddsService');
+      await Promise.allSettled([
+        writePropLinesToDB('NBA', today).catch(e => console.error('Recovery props NBA:', e.message)),
+        writePropLinesToDB('NHL', today).catch(e => console.error('Recovery props NHL:', e.message)),
+        writePropLinesToDB('MLB', today).catch(e => console.error('Recovery props MLB:', e.message)),
+      ]);
+
+      console.log('  Recovery: running projection models…');
+      await Promise.allSettled([
+        runPipeline('Recovery: NBA Model', () => runPythonScript('nbaProjectionModel.py')),
+        runPipeline('Recovery: MLB Model', () => runPythonScript('mlbProjectionModel.py')),
+        runPipeline('Recovery: NHL Model', () => runPythonScript('nhlProjectionModel.py')),
+      ]);
+
+      console.log('  Recovery: running edge detection…');
+      await Promise.allSettled([
+        runPipeline('Recovery: NBA Edges', () => detectEdges()),
+        runPipeline('Recovery: MLB Edges', () => detectEdgesForSport('MLB')),
+        runPipeline('Recovery: NHL Edges', () => detectEdgesForSport('NHL')),
+        runPipeline('Recovery: NBA Teams', () => detectTeamBetEdges('NBA')),
+        runPipeline('Recovery: MLB Teams', () => detectTeamBetEdges('MLB')),
+        runPipeline('Recovery: NHL Teams', () => detectTeamBetEdges('NHL')),
+      ]);
+
+      console.log('  Recovery: generating model + prop picks…');
+      await runPipeline('Recovery: Model Picks', async () => {
+        const picks = await generateModelPicks();
+        console.log(`  Recovery model picks: ${picks.length}`);
+      });
+      await runPipeline('Recovery: Prop Picks', async () => {
         const picks = await generatePropPicks();
         console.log(`  Recovery prop picks: ${picks.length}`);
-      }),
-    ]);
+      });
 
-    console.log(`✅ Startup recovery complete for ${today}`);
+      console.log(`✅ Startup recovery (full pipeline) complete for ${today}`);
+    }).catch(err => console.error('Recovery full pipeline error:', err.message));
+
+    console.log(`✅ Startup recovery (game picks) launched for ${today}`);
   } catch (err) {
     console.error('Startup recovery failed:', err.message);
   }
