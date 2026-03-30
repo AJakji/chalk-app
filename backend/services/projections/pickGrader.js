@@ -396,6 +396,23 @@ async function gradeYesterdaysPicks() {
     );
   }
 
+  // ── Archive picks older than today so they never appear in the live feed ─────
+  try {
+    const { getTodayET } = require('../../utils/dateUtils');
+    const todayET = getTodayET();
+    const { rowCount } = await db.query(
+      `UPDATE picks
+       SET picks_phase = 'archived'
+       WHERE game_date < $1
+         AND (picks_phase IS NULL OR picks_phase != 'archived')`,
+      [todayET]
+    );
+    if (rowCount > 0) console.log(`  Archived ${rowCount} old picks (game_date < ${todayET})`);
+  } catch (archiveErr) {
+    console.error('  Warning: archive step failed:', archiveErr.message);
+    // Non-fatal — grading result is still valid
+  }
+
   // ── Summary ──────────────────────────────────────────────────────────────────
   console.log(`\n  ── Pick Grader Summary ──────────────`);
   console.log(`  Props:  ${propCorrect}/${propTotal} correct (${propTotal > 0 ? ((propCorrect/propTotal)*100).toFixed(1) : 'N/A'}%)`);

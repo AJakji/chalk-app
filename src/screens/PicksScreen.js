@@ -25,6 +25,38 @@ const TAB_LABELS = { Soccer: 'World Cup' };
 
 // All picks are locked for non-Pro users on every tab.
 
+// ── Time helpers ──────────────────────────────────────────────────────────────
+// Picks go live at 7 AM ET. Use EDT/EST offset to compute correctly.
+function getETOffset() {
+  try {
+    const s = new Date().toLocaleString('en-US', { timeZone: 'America/New_York', timeZoneName: 'short' });
+    return s.includes('EDT') ? 4 : 5;
+  } catch {
+    return 4; // default EDT
+  }
+}
+
+function isBeforePicksTime() {
+  const now = new Date();
+  const offset = getETOffset();
+  const etHour = (now.getUTCHours() - offset + 24) % 24;
+  const etMin  = now.getUTCMinutes();
+  return etHour < 7 || (etHour === 7 && etMin === 0 && now.getUTCSeconds() === 0);
+}
+
+function getCountdown() {
+  const now    = new Date();
+  const offset = getETOffset();
+  const target = new Date();
+  target.setUTCHours(7 + offset, 0, 0, 0); // 7 AM ET in UTC
+  if (now >= target) target.setUTCDate(target.getUTCDate() + 1);
+  const diff = target - now;
+  const h = Math.floor(diff / 3600000);
+  const m = Math.floor((diff % 3600000) / 60000);
+  const s = Math.floor((diff % 60000) / 1000);
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
 function LockedPickWrapper({ children, onUnlock }) {
   return (
     <TouchableOpacity activeOpacity={0.9} onPress={onUnlock} style={locked.container}>
@@ -96,19 +128,24 @@ function ChalkysPicksHeader({ date, totalCount, highConfCount }) {
 
 export default function PicksScreen() {
   const [picks, setPicks]         = useState([]);
-  const [counts, setCounts]       = useState({});  // { NBA: 12, NHL: 8, CHALKY: 5, ... }
-  const [loading, setLoading]     = useState(true);
+  const [counts, setCounts]       = useState({});
+  const [loading, setLoading]     = useState(!isBeforePicksTime()); // only spin if past 7 AM
   const [error, setError]         = useState(false);
+  const [countdown, setCountdown] = useState(getCountdown());
   const [selectedPick, setSelectedPick] = useState(null);
   const [activeTab, setActiveTab] = useState("Chalky's Picks");
   const { isPro } = useProStatus();
   const { openPaywall } = usePaywall();
 
+  // Ref so the countdown timer always sees the current tab
+  const activeTabRef = useRef(activeTab);
+  useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
+
   const today = new Date().toLocaleDateString('en-US', {
     weekday: 'long', month: 'long', day: 'numeric',
   });
 
-  // Fetch picks for the active tab — each tab is independently ranked 1–5
+  // Fetch picks for the active tab
   const loadPicks = useCallback(async (tab) => {
     setLoading(true);
     setError(false);
@@ -123,13 +160,35 @@ export default function PicksScreen() {
     }
   }, []);
 
-  // Fetch count badges once on mount
+  // Fetch count badges — only after 7 AM ET
   useEffect(() => {
+    if (isBeforePicksTime()) return;
     fetchPickCounts().then(setCounts).catch(() => {});
   }, []);
 
-  // Re-fetch whenever the active tab changes
-  useEffect(() => { loadPicks(activeTab); }, [activeTab, loadPicks]);
+  // Fetch picks on tab change — skip before 7 AM (countdown handles the initial fetch)
+  useEffect(() => {
+    if (isBeforePicksTime()) return;
+    loadPicks(activeTab);
+  }, [activeTab, loadPicks]);
+
+  // Countdown timer — ticks every second before 7 AM ET.
+  // When it hits 7 AM it clears itself, fetches picks, and updates count badges.
+  useEffect(() => {
+    if (!isBeforePicksTime()) return; // already past 7 AM on mount, tab effect handles it
+
+    const timer = setInterval(() => {
+      if (!isBeforePicksTime()) {
+        clearInterval(timer);
+        loadPicks(activeTabRef.current);
+        fetchPickCounts().then(setCounts).catch(() => {});
+      } else {
+        setCountdown(getCountdown());
+      }
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Picks are already sorted by confidence from the backend — use as-is
   const displayedPicks = picks;
@@ -209,6 +268,17 @@ export default function PicksScreen() {
             The WNBA season tips off in May. Chalky will have full coverage of picks, scores, and player stats when the season begins.
           </Text>
         </View>
+      ) : isBeforePicksTime() ? (
+        // ── Waiting screen: shown before 7 AM ET regardless of DB state ──────
+        <View style={styles.centered}>
+          <Image source={CHALKY_PNG} style={styles.emptyImage} resizeMode="contain" />
+          <Text style={styles.emptyTitle}>Picks drop at 7 AM ET</Text>
+          <Text style={styles.countdownText}>{countdown}</Text>
+          <Text style={styles.emptyText}>
+            Follow @chalkyapp on Instagram for free daily picks.{'\n'}
+            Pro unlocks everything inside the app.
+          </Text>
+        </View>
       ) : loading ? (
         <View style={styles.centered}>
           <ActivityIndicator size="large" color={colors.green} />
@@ -221,6 +291,16 @@ export default function PicksScreen() {
           <Text style={styles.emptyText}>Check your connection and try again.</Text>
           <TouchableOpacity style={styles.retryBtn} onPress={() => loadPicks(activeTab)}>
             <Text style={styles.retryText}>Retry</Text>
+          </TouchableOpacity>
+        </View>
+      ) : picks.length === 0 ? (
+        // ── After 7 AM with no picks = pipeline issue, not waiting ───────────
+        <View style={styles.centered}>
+          <Image source={CHALKY_PNG} style={styles.emptyImage} resizeMode="contain" />
+          <Text style={styles.emptyTitle}>No picks yet today.</Text>
+          <Text style={styles.emptyText}>Chalky's still working on it. Check back shortly.</Text>
+          <TouchableOpacity style={styles.retryBtn} onPress={() => loadPicks(activeTab)}>
+            <Text style={styles.retryText}>Refresh</Text>
           </TouchableOpacity>
         </View>
       ) : (
@@ -264,23 +344,6 @@ export default function PicksScreen() {
               </StaggeredItem>
             );
           }}
-          ListEmptyComponent={
-            <View style={styles.centered}>
-              <Image source={CHALKY_PNG} style={styles.emptyImage} resizeMode="contain" />
-              <Text style={styles.emptyTitle}>
-                {activeTab === "Chalky's Picks"
-                  ? new Date().getUTCHours() < 11
-                    ? 'Picks drop at 7 AM.'
-                    : 'No picks today.'
-                  : `No ${TAB_LABELS[activeTab] || activeTab} picks today.`}
-              </Text>
-              <Text style={styles.emptyText}>
-                {activeTab === "Chalky's Picks" && new Date().getUTCHours() < 11
-                  ? 'Follow @chalkyapp on Instagram for free daily picks. Pro unlocks everything inside the app.'
-                  : 'Day off.'}
-              </Text>
-            </View>
-          }
           contentContainerStyle={styles.listContent}
           showsVerticalScrollIndicator={false}
         />
@@ -422,7 +485,8 @@ const styles = StyleSheet.create({
   loadingText: { fontSize: 14, color: colors.grey, marginTop: spacing.sm },
   emptyImage: { width: 100, height: 100, opacity: 0.85, marginBottom: spacing.md },
   emptyTitle: { fontSize: 16, fontWeight: '700', color: colors.offWhite, textAlign: 'center' },
-  emptyText: { fontSize: 13, color: colors.grey, textAlign: 'center', marginTop: 4 },
+  countdownText: { fontSize: 36, fontWeight: '800', color: colors.green, letterSpacing: 2, fontVariant: ['tabular-nums'], marginVertical: 4 },
+  emptyText: { fontSize: 13, color: colors.grey, textAlign: 'center', marginTop: 4, lineHeight: 20 },
   retryBtn: { marginTop: 16, paddingHorizontal: 24, paddingVertical: 10, borderRadius: 20, backgroundColor: colors.green },
   retryText: { fontSize: 14, fontWeight: '700', color: colors.background },
 });

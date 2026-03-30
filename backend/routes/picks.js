@@ -4,6 +4,7 @@ const { requireAuth } = require('../middleware/auth');
 const { generateModelPicks, generatePicks, getTodaysPicks } = require('../services/aiPicks');
 const { generatePropPicks } = require('../services/propPicks');
 const db = require('../db');
+const { getTodayET } = require('../utils/dateUtils');
 
 const MOCK_PICKS = [
   // ── GAME PICKS ────────────────────────────────────────────────────────────
@@ -153,11 +154,10 @@ const MOCK_PICKS = [
 ];
 
 // GET /api/picks
-// Returns today's picks ordered by confidence DESC.
+// Returns today's picks (ET date) ordered by confidence DESC.
+// Uses getTodayET() — never new Date().toISOString() which flips at 8 PM ET.
 // Optional: ?sport=NBA  → only that sport (for league tabs), default LIMIT 5
 // No sport param → all sports (Chalky's Picks tab), default LIMIT 7
-// Optional: ?limit=N    → override the default
-// Optional: ?date=YYYY-MM-DD → specific date (defaults to today)
 router.get('/', async (req, res) => {
   if (false) { // mock mode disabled in production
     let mock = [...MOCK_PICKS].sort((a, b) => b.confidence - a.confidence);
@@ -167,17 +167,17 @@ router.get('/', async (req, res) => {
   }
 
   try {
-    const date  = req.query.date  || new Date().toISOString().split('T')[0];
+    const today = getTodayET();
     const sport = req.query.sport || null;
     const limit = parseInt(req.query.limit || (sport ? '5' : '7'), 10);
 
     let query, params;
     if (sport) {
-      query  = `SELECT * FROM picks WHERE pick_date = $1 AND league = $2 ORDER BY confidence DESC LIMIT $3`;
-      params = [date, sport, limit];
+      query  = `SELECT * FROM picks WHERE pick_date = $1 AND league = $2 AND (picks_phase IS NULL OR picks_phase != 'archived') ORDER BY confidence DESC LIMIT $3`;
+      params = [today, sport, limit];
     } else {
-      query  = `SELECT * FROM picks WHERE pick_date = $1 ORDER BY confidence DESC LIMIT $2`;
-      params = [date, limit];
+      query  = `SELECT * FROM picks WHERE pick_date = $1 AND (picks_phase IS NULL OR picks_phase != 'archived') ORDER BY confidence DESC LIMIT $2`;
+      params = [today, limit];
     }
 
     const { rows } = await db.query(query, params);
@@ -197,17 +197,17 @@ router.get('/counts', async (req, res) => {
   }
 
   try {
-    const date = req.query.date || new Date().toISOString().split('T')[0];
+    const today = getTodayET();
     const { rows } = await db.query(
       `SELECT league AS sport, COUNT(*) AS total
          FROM picks
-        WHERE pick_date = $1
+        WHERE pick_date = $1 AND (picks_phase IS NULL OR picks_phase != 'archived')
         GROUP BY league
         UNION ALL
        SELECT 'CHALKY' AS sport, LEAST(COUNT(*), 7) AS total
          FROM picks
-        WHERE pick_date = $1`,
-      [date]
+        WHERE pick_date = $1 AND (picks_phase IS NULL OR picks_phase != 'archived')`,
+      [today]
     );
     const counts = {};
     for (const row of rows) counts[row.sport] = parseInt(row.total, 10);
