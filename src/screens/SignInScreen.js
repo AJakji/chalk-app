@@ -178,7 +178,7 @@ export default function SignInScreen({ navigation }) {
           {/* Email form */}
           <View style={s.form}>
             <FormInput
-              placeholder="Email"
+              placeholder="Email address"
               value={email}
               onChangeText={setEmail}
               keyboardType="email-address"

@@ -18,8 +18,12 @@ import { useSignUp } from '@clerk/clerk-expo';
 import { Ionicons } from '@expo/vector-icons';
 
 export default function VerifyEmailScreen({ navigation, route }) {
-  const { email } = route.params ?? {};
-  const { signUp, setActive, isLoaded } = useSignUp();
+  const { email, signUpRef, setActive: setActiveParam } = route.params ?? {};
+  const { signUp: signUpHook, setActive: setActiveHook, isLoaded } = useSignUp();
+  // Prefer the signUp instance passed from CreateAccountScreen (same object that
+  // called prepareEmailAddressVerification), fall back to the hook's instance.
+  const signUp = signUpRef ?? signUpHook;
+  const setActive = setActiveParam ?? setActiveHook;
 
   const [digits, setDigits]     = useState(['', '', '', '', '', '']);
   const [loading, setLoading]   = useState(false);
@@ -72,7 +76,8 @@ export default function VerifyEmailScreen({ navigation, route }) {
         setError('Verification incomplete. Please try again.');
       }
     } catch (e) {
-      setError('Invalid code. Try again.');
+      const msg = e.errors?.[0]?.longMessage || e.errors?.[0]?.message || e.message || 'Invalid code. Try again.';
+      setError(msg);
       setDigits(['', '', '', '', '', '']);
       setTimeout(() => refs[0].current?.focus(), 100);
     } finally {

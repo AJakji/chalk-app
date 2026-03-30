@@ -259,45 +259,35 @@ function runPythonScript(scriptName, args = []) {
 }
 
 // ── Projection engine cron pipeline ──────────────────────────────────────────
-// CRON SCHEDULE (all times Eastern) — picks live by 7:00 AM every morning:
+// CRON SCHEDULE (all times Eastern / UTC) — picks live by 7:00 AM every morning:
 //
 //  MIDNIGHT — DATA COLLECTION:
-//  12:00 AM — nbaDataCollector.py + mlbDataCollector.py + nhlDataCollector.py (parallel)
-//             mlbPitcherArsenalCollector.py
-//  12:30 AM — computeDerivedStats.py  (BABIP, ISO, TS%, usage rate)
-//   1:00 AM — computePositionDefense.py
-//   1:15 AM — mlbBullpenCollector.py
-//   1:30 AM — mlbMatchupCollector.py
-//   1:45 AM — mlbSplitsCollector.py
-//   1:50 AM — mlbUmpireCollector.py
-//  Mon 2AM — statcastCollector.py    (weekly Statcast update)
+//  12:00 AM / 04:00 UTC — data collectors + team logs (all sports, parallel)
+//  12:30 AM / 04:30 UTC — computeDerivedStats.py (BABIP, ISO, TS%, usage rate)
+//   1:00 AM / 05:00 UTC — computePositionDefense.py
+//   1:15 AM / 05:15 UTC — MLB sub-collectors in parallel (bullpen/matchup/splits/umpire)
 //
 //  EARLY MORNING — ODDS + PROJECTIONS:
-//   4:00 AM — fetchAllVenueWeather() + collectPropsLines() + buildNightlyRoster()
-//             + schedule NHL goalie checks
-//   4:30 AM — nbaProjectionModel.py + mlbProjectionModel.py + nhlProjectionModel.py (parallel)
-//   5:30 AM — edgeDetector (all sports: NBA, MLB, NHL prop edges + team bets)
-//   6:00 AM — aiPicks.js (generate Chalky pick cards for all sports via Claude)
-//   6:55 AM — verification check (confirm picks are in DB before 7 AM)
+//   4:00 AM / 08:00 UTC — odds + early prop lines + roster + weather
+//   4:30 AM / 08:30 UTC — NBA + MLB + NHL projection models (parallel)
+//   5:30 AM / 09:30 UTC — edge detection (all sports: prop edges + team bets)
+//   6:00 AM / 10:00 UTC — pick generation (all sports via Claude)
+//   6:45 AM / 10:45 UTC — pre-delivery verification (zero picks = critical alert)
+//   7:00 AM / 11:00 UTC — picks live + NHL goalie confirmation scheduling
 //
-//  MORNING — PLAYER PROPS:
-//   8:00 AM — pickGrader.js (grade yesterday's picks using final scores)
-//   9:00 AM — writePropLinesToDB (NBA + NHL + MLB — lines now posted by books)
-//   9:15 AM — nbaProjectionModel.py --props-only (player props with real lines)
+//  MORNING — SAFETY NET:
+//   9:15 AM / 13:15 UTC — re-fetch prop lines + props-only re-run + edges + prop picks
+//  12:00 PM / 16:00 UTC — pick grader (grades yesterday's picks)
 //
-//  NHL SPECIAL: goalie confirmation jobs scheduled dynamically at 4:00 AM,
+//  NHL SPECIAL: goalie confirmation jobs scheduled dynamically at 7:00 AM,
 //               running 90 min before each puck drop.
 //
-//  WEEKLY (every Monday):
-//  Mon 2:00 AM — statcastCollector.py (Baseball Savant whiff rates + Statcast)
-//  Mon 3:00 AM — computeLeagueAverages.py (keep LEAGUE_AVG constants current)
+//  WEEKLY (every Monday 2:00 AM ET / 6:00 UTC):
+//  statcastCollector.py + computeLeagueAverages.py (parallel)
 //
 //  NOTE: mlbLineupFetcher.py exists but is NOT scheduled.
-//  MLB picks are generated once at 4:30 AM using lineup fallbacks.
+//  MLB picks are generated at 4:30 AM using lineup fallbacks.
 //  Lineups post 10 AM–4 PM ET — after picks are already live at 7 AM.
-//  A silent noon update (Option B) can be added later if needed.
-//
-// Disabled in MOCK_MODE to avoid API credit usage during development.
 
 // ── Pipeline helper: wraps each step with timing + error isolation ────────────
 // A failure in one step logs clearly and continues — the pipeline never crashes.

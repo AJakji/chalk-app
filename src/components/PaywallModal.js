@@ -108,21 +108,32 @@ export default function PaywallModal({ visible, onClose }) {
                 <CheckRow text="Deep stats, injury intel, and line movement alerts" />
               </View>
 
+              {/* Early access banner */}
+              <View style={styles.earlyAccessBanner}>
+                <Ionicons name="gift-outline" size={18} color={colors.green} style={{ marginTop: 2 }} />
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.earlyAccessTitle}>Research is free right now</Text>
+                  <Text style={styles.earlyAccessSub}>We are in early stages and want your feedback. Research unlocks free with any Pro plan — and we are actively improving it based on what users ask.</Text>
+                </View>
+              </View>
+
               {/* Pricing cards */}
               <View style={styles.pricingRow}>
-                {/* Seasonal — BEST VALUE */}
+                {/* Summer Pass — BEST VALUE */}
                 <View style={[styles.pricingCard, styles.pricingCardBest]}>
                   <View style={styles.bestValueBadge}>
                     <Text style={styles.bestValueText}>BEST VALUE</Text>
                   </View>
-                  <Text style={styles.pricingAmount}>$49.99</Text>
-                  <Text style={styles.pricingPeriod}>/ season</Text>
-                  <Text style={styles.pricingSavings}>Save 29%</Text>
+                  <Text style={styles.pricingLabel}>Summer Pass</Text>
+                  <Text style={styles.pricingAmount}>$34.99</Text>
+                  <Text style={styles.pricingPeriod}>/ month</Text>
+                  <Text style={styles.pricingSavings}>Save $180 vs monthly</Text>
                 </View>
 
                 {/* Monthly */}
                 <View style={styles.pricingCard}>
-                  <Text style={styles.pricingAmount}>$9.99</Text>
+                  <Text style={styles.pricingLabel}>Monthly</Text>
+                  <Text style={styles.pricingAmount}>$49.99</Text>
                   <Text style={styles.pricingPeriod}>/ month</Text>
                   <Text style={[styles.pricingSavings, { color: 'transparent' }]}>—</Text>
                 </View>
@@ -270,6 +281,28 @@ const styles = StyleSheet.create({
     lineHeight: 20,
     flex: 1,
   },
+  earlyAccessBanner: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 12,
+    backgroundColor: '#001a0d',
+    borderWidth: 1,
+    borderColor: '#00E87A33',
+    borderRadius: 12,
+    padding: 14,
+    alignSelf: 'stretch',
+  },
+  earlyAccessTitle: {
+    color: colors.green,
+    fontSize: 14,
+    fontWeight: '700',
+    marginBottom: 4,
+  },
+  earlyAccessSub: {
+    color: '#888888',
+    fontSize: 12,
+    lineHeight: 18,
+  },
   pricingRow: {
     flexDirection: 'row',
     gap: 12,
@@ -303,6 +336,14 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     color: colors.background,
     letterSpacing: 0.8,
+  },
+  pricingLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: colors.grey,
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+    marginBottom: 2,
   },
   pricingAmount: {
     fontSize: 24,

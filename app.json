@@ -13,14 +13,20 @@
     },
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "com.chalkyai.app"
+      "bundleIdentifier": "com.chalkyai.app",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "package": "com.chalkyai.app",
       "adaptiveIcon": {
         "backgroundColor": "#0A0A0A",
         "foregroundImage": "./assets/android-icon-foreground.png"
-      }
+      },
+      "permissions": [
+        "android.permission.RECORD_AUDIO"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -36,7 +42,7 @@
     ],
     "extra": {
       "eas": {
-        "projectId": ""
+        "projectId": "ec29b9ee-4f56-48b5-872e-7b606e13a3c4"
       }
     }
   }

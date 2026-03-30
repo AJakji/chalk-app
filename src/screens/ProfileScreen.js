@@ -100,7 +100,7 @@ export default function ProfileScreen() {
   const getSubLabel = () => {
     const sub = user?.publicMetadata?.subscription;
     if (sub === 'pro')      return 'Chalky Pro';
-    if (sub === 'seasonal') return 'Seasonal Pass';
+    if (sub === 'seasonal') return 'Summer Pass';
     return 'Free';
   };
 
@@ -232,7 +232,7 @@ export default function ProfileScreen() {
                 <View style={styles.upgradeCard}>
                   <View style={styles.upgradeLeft}>
                     <Text style={styles.upgradeTitle}>Unlock Chalky Pro</Text>
-                    <Text style={styles.upgradeSub}>All picks. Unlimited Research. $69.99/mo</Text>
+                    <Text style={styles.upgradeSub}>All picks. Unlimited Research. $49.99/mo</Text>
                   </View>
                   <TouchableOpacity style={styles.upgradeBtn} activeOpacity={0.85}>
                     <Text style={styles.upgradeBtnText}>Upgrade</Text>

@@ -92,6 +92,12 @@ async function generatePropPicks() {
     return [];
   }
 
+  // Build a lookup: Odds API game ID → UTC ISO commence_time, for storage later
+  const gameTimeMap = {};
+  for (const g of propLines) {
+    if (g.id && g.commence_time) gameTimeMap[g.id] = g.commence_time;
+  }
+
   // Fetch player projections from our internal Chalk model (player_props_history + chalk_projections)
   const projections = await fetchProjections(today);
 
@@ -139,7 +145,7 @@ async function generatePropPicks() {
   const props = parsed.props ?? [];
   console.log(`✅ Claude generated ${props.length} prop picks`);
 
-  await storePropPicks(props);
+  await storePropPicks(props, gameTimeMap);
   return props;
 }
 
@@ -274,7 +280,7 @@ function buildPromptContent(propLines, projections, today) {
   return `${projSummary}Today is ${today}. Below are today's player prop betting lines from The Odds API. Cross-reference the Chalk model projections above to find the 5–8 biggest edges. For each pick, use the actual projection, line, edge, last-5 stats, and injury status from the model data above. Generate 5-8 prop picks in Chalky's voice:\n\n${JSON.stringify(propLines, null, 2)}`;
 }
 
-async function storePropPicks(props) {
+async function storePropPicks(props, gameTimeMap = {}) {
   for (const prop of props) {
     try {
       // Fill safe defaults for fields Claude sometimes omits
@@ -288,7 +294,9 @@ async function storePropPicks(props) {
       if (!prop.confidence)  prop.confidence  = 65;
       if (!prop.awayTeam)    prop.awayTeam    = prop.homeTeam || 'TBD';
       if (!prop.homeTeam)    prop.homeTeam    = prop.awayTeam || 'TBD';
+      // Prefer UTC ISO from the lookup map; fall back to Claude's formatted string
       if (!prop.gameTime)    prop.gameTime    = 'Tonight';
+      const gameTimeValue = gameTimeMap[prop.gameId] || prop.gameTime;
       if (!prop.league)      prop.league      = 'NBA';
       if (!prop.sportKey)    prop.sportKey    = 'basketball_nba';
 
@@ -316,7 +324,7 @@ async function storePropPicks(props) {
           prop.playerPosition,
           prop.awayTeam,
           prop.homeTeam,
-          prop.gameTime,
+          gameTimeValue,
           prop.gameId,
           prop.matchupText,
           pickValue,

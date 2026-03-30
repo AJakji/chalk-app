@@ -1,6 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const CACHE_KEY = '@espn_team_logos_v1';
+const CACHE_KEY = '@espn_team_logos_v2';
 const CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
 
 // All leagues we want logos for

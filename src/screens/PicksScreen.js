@@ -17,6 +17,7 @@ import ChalkyLogo from '../components/ChalkyLogo';
 import { fetchPicksForTab, fetchPickCounts } from '../services/api';
 import { useProStatus } from '../hooks/useProStatus';
 import { usePaywall } from '../context/PaywallContext';
+import { isBeforePicksTime, getPicksCountdown, getPicksReleaseTime } from '../utils/timeUtils';
 
 const TABS = ["Chalky's Picks", 'NBA', 'MLB', 'NHL', 'Soccer', 'WNBA'];
 
@@ -25,37 +26,6 @@ const TAB_LABELS = { Soccer: 'World Cup' };
 
 // All picks are locked for non-Pro users on every tab.
 
-// ── Time helpers ──────────────────────────────────────────────────────────────
-// Picks go live at 7 AM ET. Use EDT/EST offset to compute correctly.
-function getETOffset() {
-  try {
-    const s = new Date().toLocaleString('en-US', { timeZone: 'America/New_York', timeZoneName: 'short' });
-    return s.includes('EDT') ? 4 : 5;
-  } catch {
-    return 4; // default EDT
-  }
-}
-
-function isBeforePicksTime() {
-  const now = new Date();
-  const offset = getETOffset();
-  const etHour = (now.getUTCHours() - offset + 24) % 24;
-  const etMin  = now.getUTCMinutes();
-  return etHour < 7 || (etHour === 7 && etMin === 0 && now.getUTCSeconds() === 0);
-}
-
-function getCountdown() {
-  const now    = new Date();
-  const offset = getETOffset();
-  const target = new Date();
-  target.setUTCHours(7 + offset, 0, 0, 0); // 7 AM ET in UTC
-  if (now >= target) target.setUTCDate(target.getUTCDate() + 1);
-  const diff = target - now;
-  const h = Math.floor(diff / 3600000);
-  const m = Math.floor((diff % 3600000) / 60000);
-  const s = Math.floor((diff % 60000) / 1000);
-  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-}
 
 function LockedPickWrapper({ children, onUnlock }) {
   return (
@@ -131,7 +101,7 @@ export default function PicksScreen() {
   const [counts, setCounts]       = useState({});
   const [loading, setLoading]     = useState(!isBeforePicksTime()); // only spin if past 7 AM
   const [error, setError]         = useState(false);
-  const [countdown, setCountdown] = useState(getCountdown());
+  const [countdown, setCountdown] = useState(getPicksCountdown());
   const [selectedPick, setSelectedPick] = useState(null);
   const [activeTab, setActiveTab] = useState("Chalky's Picks");
   const { isPro } = useProStatus();
@@ -183,7 +153,7 @@ export default function PicksScreen() {
         loadPicks(activeTabRef.current);
         fetchPickCounts().then(setCounts).catch(() => {});
       } else {
-        setCountdown(getCountdown());
+        setCountdown(getPicksCountdown());
       }
     }, 1000);
 
@@ -272,7 +242,7 @@ export default function PicksScreen() {
         // ── Waiting screen: shown before 7 AM ET regardless of DB state ──────
         <View style={styles.centered}>
           <Image source={CHALKY_PNG} style={styles.emptyImage} resizeMode="contain" />
-          <Text style={styles.emptyTitle}>Picks drop at 7 AM ET</Text>
+          <Text style={styles.emptyTitle}>Picks drop at {getPicksReleaseTime()}</Text>
           <Text style={styles.countdownText}>{countdown}</Text>
           <Text style={styles.emptyText}>
             Follow @chalkyapp on Instagram for free daily picks.{'\n'}

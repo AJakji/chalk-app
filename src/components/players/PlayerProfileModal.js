@@ -9,7 +9,7 @@ import { API_URL } from '../../config';
 import PlayerAvatar from './PlayerAvatar';
 import { navigate } from '../../navigationRef';
 import { sendToResearch } from '../../researchBridge';
-import LiveStatsCard from '../LiveStatsCard';
+
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -202,17 +202,15 @@ export default function PlayerProfileModal({ playerId, playerLeague = 'NBA', pla
   const [player, setPlayer]       = useState(null);
   const [loading, setLoading]     = useState(false);
   const [error, setError]         = useState(false);
-  const [liveStats, setLiveStats] = useState(null);
-  const [isPlaying, setIsPlaying] = useState(false);
-
   useEffect(() => {
     if (!visible) return;
     setPlayer(null);
     setError(false);
     setLoading(true);
 
-    const fetchById = (id) =>
-      fetch(`${API_URL}/api/players/${id}?league=${playerLeague}`)
+    const fetchById = (id) => {
+      const nameParam = playerName ? `&name=${encodeURIComponent(playerName)}` : '';
+      return fetch(`${API_URL}/api/players/${id}?league=${playerLeague}${nameParam}`)
         .then(r => r.json())
         .then(({ player: p }) => {
           setPlayer(p || null);
@@ -220,6 +218,7 @@ export default function PlayerProfileModal({ playerId, playerLeague = 'NBA', pla
           setLoading(false);
         })
         .catch(() => { setError(true); setLoading(false); });
+    };
 
     if (playerId) {
       fetchById(playerId);
@@ -265,25 +264,6 @@ export default function PlayerProfileModal({ playerId, playerLeague = 'NBA', pla
     }
   }, [visible]);
 
-  // Live in-game stats — fetch on open, poll every 60 seconds
-  useEffect(() => {
-    if (!visible || !playerName) return;
-    const sport = playerLeague; // NBA / NHL / MLB
-
-    const fetchLive = () => {
-      fetch(`${API_URL}/api/players/${encodeURIComponent(playerName)}/live?sport=${sport}`)
-        .then(r => r.json())
-        .then(data => {
-          setIsPlaying(!!data.isPlaying);
-          setLiveStats(data.liveStats || null);
-        })
-        .catch(() => {}); // silently fail — not critical
-    };
-
-    fetchLive();
-    const interval = setInterval(fetchLive, 60000);
-    return () => clearInterval(interval);
-  }, [visible, playerName, playerLeague]);
 
   const displayName = player?.name || playerName || 'Player';
   const isPitcher   = ['SP', 'RP', 'P'].includes(player?.position || '');
@@ -370,10 +350,6 @@ export default function PlayerProfileModal({ playerId, playerLeague = 'NBA', pla
                 </Section>
               )}
 
-              {/* Live in-game stats — shown only while player is in a game */}
-              {isPlaying && liveStats && (
-                <LiveStatsCard liveStats={liveStats} sport={playerLeague} />
-              )}
 
               {/* Last 10 Games */}
               {player?.last10Games && player.last10Games.length > 0 && (

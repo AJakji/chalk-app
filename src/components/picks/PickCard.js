@@ -6,6 +6,7 @@ import ConfidenceInfoModal from './ConfidenceInfoModal';
 import { colors, typography, spacing, radius } from '../../theme';
 import TeamLogo from '../TeamLogo';
 import { useTeamLogos } from '../../context/TeamLogosContext';
+import { formatGameDateTime } from '../../utils/timeUtils';
 
 const CHALKY_PNG = require('../../../assets/chalky.png');
 
@@ -127,7 +128,7 @@ export default function PickCard({ pick, onPress, isTopPick, isLocked, onLockedP
             <View style={styles.gamePickBadge}>
               <Text style={styles.gamePickBadgeText}>GAME PICK</Text>
             </View>
-            <Text style={styles.gameTime}>{pick.gameTime}</Text>
+            <Text style={styles.gameTime}>{formatGameDateTime(pick.gameTime)}</Text>
           </View>
           <View style={styles.matchupRow}>
             <TeamLogo uri={getLogo(pick.awayTeam, pick.league)} abbr={pick.awayTeam} size={22} />

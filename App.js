@@ -13,11 +13,13 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import PicksScreen from './src/screens/PicksScreen';
 import ScoresScreen from './src/screens/ScoresScreen';
 import ResearchScreen from './src/screens/ResearchScreen';
+import ResearchPreviewScreen from './src/screens/ResearchPreviewScreen';
 import PlayersScreen from './src/screens/PlayersScreen';
 import UFCScreen from './src/screens/UFCScreen';
 import OnboardingScreen, { ONBOARDING_SEEN_KEY } from './src/screens/OnboardingScreen';
 import WelcomeScreen from './src/screens/WelcomeScreen';
 import SignInScreen from './src/screens/SignInScreen';
+import SupportSuggestionsScreen from './src/screens/SupportSuggestionsScreen';
 import CreateAccountScreen from './src/screens/CreateAccountScreen';
 import VerifyEmailScreen from './src/screens/VerifyEmailScreen';
 import PaywallModal from './src/components/PaywallModal';
@@ -67,7 +69,15 @@ function FadeScreen({ children }) {
 }
 
 const PicksTab    = () => <FadeScreen><PicksScreen /></FadeScreen>;
-const ResearchTab = () => <FadeScreen><ResearchScreen /></FadeScreen>;
+
+function ResearchTab() {
+  const { isPro } = useProStatus();
+  return (
+    <FadeScreen>
+      {isPro ? <ResearchScreen /> : <ResearchPreviewScreen />}
+    </FadeScreen>
+  );
+}
 const ScoresTab   = () => <FadeScreen><ScoresScreen /></FadeScreen>;
 const PlayersTab  = ({ navigation }) => <FadeScreen><PlayersScreen navigation={navigation} /></FadeScreen>;
 const UFCTab      = () => <FadeScreen><UFCScreen /></FadeScreen>;
@@ -127,6 +137,7 @@ function UFCIcon({ color, size }) {
   );
 }
 
+
 function TabIcon({ IconComponent, focused, activeColor }) {
   const scale = useRef(new Animated.Value(1)).current;
   const prev  = useRef(focused);
@@ -154,8 +165,7 @@ const ti = StyleSheet.create({
 // ── Main tabs ──────────────────────────────────────────────────────────────────
 
 function MainTabs() {
-  const { isPro } = useProStatus();
-  const { openPaywall, visible, closePaywall } = usePaywall();
+  const { visible, closePaywall } = usePaywall();
   return (
     <>
       <Tab.Navigator
@@ -182,9 +192,6 @@ function MainTabs() {
         <Tab.Screen
           name="Research"
           component={ResearchTab}
-          listeners={() => ({
-            tabPress: (e) => { if (!isPro) { e.preventDefault(); openPaywall(); } },
-          })}
           options={{ tabBarIcon: ({ focused }) => <TabIcon IconComponent={ResearchIcon} focused={focused} activeColor={GOLD} />, tabBarActiveTintColor: GOLD }}
         />
         <Tab.Screen
@@ -223,7 +230,10 @@ function RootNavigator({ onboardingSeen, markOnboardingSeen }) {
     <NavigationContainer ref={navigationRef} theme={ChalkNavTheme}>
       <Stack.Navigator screenOptions={{ headerShown: false, animation: 'slide_from_right' }}>
         {isSignedIn ? (
-          <Stack.Screen name="Main" component={MainTabs} />
+          <>
+            <Stack.Screen name="Main" component={MainTabs} />
+            <Stack.Screen name="SupportSuggestions" component={SupportSuggestionsScreen} options={{ headerShown: false }} />
+          </>
         ) : (
           <>
             <Stack.Screen name="Welcome"       component={WelcomeScreen} />

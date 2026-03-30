@@ -15,14 +15,18 @@ import {
   ScrollView,
   Linking,
   Pressable,
-  Switch,
+  Alert,
   Animated,
   PanResponder,
   Dimensions,
 } from 'react-native';
+import { useUser, useAuth } from '@clerk/clerk-expo';
+import { Ionicons } from '@expo/vector-icons';
 import { colors, spacing, radius } from '../theme';
 import { AFFILIATE_LINKS } from '../config';
 import ChalkyLogo from './ChalkyLogo';
+import { useProStatus } from '../hooks/useProStatus';
+import { navigate } from '../navigationRef';
 
 const CHALKY_PNG = require('../../assets/chalky.png');
 
@@ -189,7 +193,43 @@ function TextbookModal({ visible, onClose }) {
 // ─── Profile Modal ───────────────────────────────────────────────────────────
 
 function ProfileModal({ visible, onClose }) {
-  const [notifications, setNotifications] = useState(false);
+  const { user } = useUser();
+  const { signOut } = useAuth();
+  const { isPro } = useProStatus();
+  const [signingOut, setSigningOut] = useState(false);
+
+  const initials = [user?.firstName?.[0], user?.lastName?.[0]].filter(Boolean).join('');
+
+  const getMemberSince = () => {
+    if (!user?.createdAt) return '—';
+    return new Date(user.createdAt).toLocaleDateString([], { month: 'long', year: 'numeric' });
+  };
+
+  const getSubLabel = () => {
+    const sub = user?.publicMetadata?.subscription;
+    if (sub === 'pro') return 'Chalky Pro';
+    if (sub === 'seasonal') return 'Summer Pass';
+    return 'Free';
+  };
+
+  const handleSignOut = () => {
+    Alert.alert(
+      'Sign Out',
+      'Are you sure you want to sign out?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Sign Out',
+          style: 'destructive',
+          onPress: async () => {
+            setSigningOut(true);
+            onClose();
+            await signOut();
+          },
+        },
+      ]
+    );
+  };
 
   return (
     <Modal
@@ -212,38 +252,93 @@ function ProfileModal({ visible, onClose }) {
           contentContainerStyle={styles.modalScrollContent}
           showsVerticalScrollIndicator={false}
         >
+          {/* Avatar + name */}
           <View style={styles.profileHero}>
             <View style={styles.profileAvatarCircle}>
-              <Text style={styles.profileAvatarEmoji}>👤</Text>
+              {initials ? (
+                <Text style={styles.profileAvatarInitials}>{initials}</Text>
+              ) : (
+                <Text style={styles.profileAvatarEmoji}>😎</Text>
+              )}
             </View>
-            <Text style={styles.profileName}>Guest</Text>
-            <Text style={styles.profileSub}>Sign in to follow Chalky's picks</Text>
+            <Text style={styles.profileName}>
+              {user?.fullName || user?.username || user?.primaryEmailAddress?.emailAddress?.split('@')[0] || 'Chalky User'}
+            </Text>
+            <Text style={styles.profileSub}>
+              {user?.primaryEmailAddress?.emailAddress || ''}
+            </Text>
           </View>
 
-          <Text style={styles.settingsSectionLabel}>Preferences</Text>
-          <View style={styles.settingsRow}>
-            <Text style={styles.settingsRowText}>Push Notifications</Text>
-            <Switch
-              value={notifications}
-              onValueChange={setNotifications}
-              trackColor={{ false: colors.border, true: colors.green + '88' }}
-              thumbColor={notifications ? colors.green : colors.grey}
-            />
+          {/* Account card */}
+          <Text style={styles.settingsSectionLabel}>Account</Text>
+          <View style={styles.profileCard}>
+            <View style={styles.profileInfoRow}>
+              <View style={styles.profileInfoLeft}>
+                <Ionicons name="calendar-outline" size={16} color={colors.grey} />
+                <Text style={styles.settingsRowText}>Member since</Text>
+              </View>
+              <Text style={styles.settingsRowValue}>{getMemberSince()}</Text>
+            </View>
+            <View style={styles.profileCardDivider} />
+            <View style={styles.profileInfoRow}>
+              <View style={styles.profileInfoLeft}>
+                <Ionicons name="trophy-outline" size={16} color={colors.grey} />
+                <Text style={styles.settingsRowText}>Plan</Text>
+              </View>
+              <Text style={[styles.settingsRowValue, { color: isPro ? '#FFD700' : colors.grey, fontWeight: '700' }]}>
+                {getSubLabel()}
+              </Text>
+            </View>
           </View>
 
-          <Text style={[styles.settingsSectionLabel, { marginTop: spacing.lg }]}>About</Text>
-          <TouchableOpacity style={styles.settingsRowBtn} activeOpacity={0.75}>
-            <Text style={styles.settingsRowText}>Privacy Policy</Text>
-            <Text style={styles.settingsRowArrow}>→</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.settingsRowBtn} activeOpacity={0.75}>
-            <Text style={styles.settingsRowText}>Terms of Service</Text>
-            <Text style={styles.settingsRowArrow}>→</Text>
-          </TouchableOpacity>
-          <View style={styles.settingsRow}>
-            <Text style={styles.settingsRowText}>Version</Text>
-            <Text style={styles.settingsRowValue}>1.0.0</Text>
+          {/* Upgrade banner — free users only */}
+          {!isPro && (
+            <>
+              <Text style={[styles.settingsSectionLabel, { marginTop: spacing.lg }]}>Upgrade</Text>
+              <View style={styles.upgradeCard}>
+                <View style={{ flex: 1, marginRight: 12 }}>
+                  <Text style={styles.upgradeTitle}>Unlock Chalky Pro</Text>
+                  <Text style={styles.upgradeSub}>All picks. Unlimited Research. $49.99/mo</Text>
+                </View>
+                <TouchableOpacity style={styles.upgradeBtn} activeOpacity={0.85}>
+                  <Text style={styles.upgradeBtnText}>Upgrade</Text>
+                </TouchableOpacity>
+              </View>
+            </>
+          )}
+
+          {/* Support */}
+          <Text style={[styles.settingsSectionLabel, { marginTop: spacing.lg }]}>Support</Text>
+          <View style={styles.profileCard}>
+            <TouchableOpacity style={styles.profileInfoRow} activeOpacity={0.75}>
+              <View style={styles.profileInfoLeft}>
+                <Ionicons name="document-text-outline" size={16} color={colors.grey} />
+                <Text style={styles.settingsRowText}>Terms of Service</Text>
+              </View>
+              <Ionicons name="chevron-forward" size={14} color="#3a3a3a" />
+            </TouchableOpacity>
+            <View style={styles.profileCardDivider} />
+            <TouchableOpacity style={styles.profileInfoRow} activeOpacity={0.75}>
+              <View style={styles.profileInfoLeft}>
+                <Ionicons name="shield-outline" size={16} color={colors.grey} />
+                <Text style={styles.settingsRowText}>Privacy Policy</Text>
+              </View>
+              <Ionicons name="chevron-forward" size={14} color="#3a3a3a" />
+            </TouchableOpacity>
           </View>
+
+          {/* Sign out */}
+          <TouchableOpacity
+            style={styles.signOutBtn}
+            onPress={handleSignOut}
+            disabled={signingOut}
+            activeOpacity={0.8}
+          >
+            <Ionicons name="log-out-outline" size={18} color={colors.red} />
+            <Text style={styles.signOutText}>{signingOut ? 'Signing out…' : 'Sign Out'}</Text>
+          </TouchableOpacity>
+
+          <Text style={styles.versionText}>Chalky v1.0.0</Text>
         </ScrollView>
       </SafeAreaView>
     </Modal>
@@ -326,6 +421,10 @@ export default function ChalkyMenuButton() {
     closeDrawer(() => setTimeout(() => setProfileOpen(true), 100));
   };
 
+  const openSupport = () => {
+    closeDrawer(() => setTimeout(() => navigate('SupportSuggestions'), 300));
+  };
+
   return (
     <>
       {/* Hamburger button */}
@@ -403,6 +502,19 @@ export default function ChalkyMenuButton() {
               <View style={styles.drawerItemText}>
                 <Text style={styles.drawerItemLabel}>Profile</Text>
                 <Text style={styles.drawerItemSub}>Settings & preferences</Text>
+              </View>
+              <Text style={styles.drawerItemArrow}>›</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.drawerItem}
+              onPress={openSupport}
+              activeOpacity={0.75}
+            >
+              <Ionicons name="chatbubble-ellipses-outline" size={20} color={colors.green} />
+              <View style={styles.drawerItemText}>
+                <Text style={styles.drawerItemLabel}>Support & Suggestions</Text>
+                <Text style={styles.drawerItemSub}>Report issues or share ideas</Text>
               </View>
               <Text style={styles.drawerItemArrow}>›</Text>
             </TouchableOpacity>
@@ -687,16 +799,18 @@ const styles = StyleSheet.create({
     marginBottom: spacing.md,
   },
   profileAvatarCircle: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
+    width: 80,
+    height: 80,
+    borderRadius: 40,
     backgroundColor: colors.surface,
     borderWidth: 2,
     borderColor: colors.border,
     alignItems: 'center',
     justifyContent: 'center',
+    overflow: 'hidden',
   },
-  profileAvatarEmoji: { fontSize: 32 },
+  profileAvatarInitials: { fontSize: 30, fontWeight: '700', color: colors.offWhite },
+  profileAvatarEmoji: { fontSize: 34 },
   profileName: {
     fontSize: 22,
     fontWeight: '800',
@@ -715,38 +829,76 @@ const styles = StyleSheet.create({
     letterSpacing: 1.2,
     marginBottom: spacing.sm,
   },
-  settingsRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+  profileCard: {
     backgroundColor: colors.surface,
-    borderRadius: radius.md,
-    padding: spacing.md,
-    marginBottom: spacing.xs,
+    borderRadius: 14,
     borderWidth: 1,
     borderColor: colors.border,
+    overflow: 'hidden',
+    marginBottom: spacing.xs,
   },
-  settingsRowBtn: {
+  profileInfoRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    backgroundColor: colors.surface,
-    borderRadius: radius.md,
-    padding: spacing.md,
-    marginBottom: spacing.xs,
-    borderWidth: 1,
-    borderColor: colors.border,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+  },
+  profileInfoLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  profileCardDivider: {
+    height: 1,
+    backgroundColor: colors.border,
+    marginLeft: 42,
   },
   settingsRowText: {
     fontSize: 15,
     color: colors.offWhite,
-  },
-  settingsRowArrow: {
-    fontSize: 15,
-    color: colors.grey,
+    fontWeight: '500',
   },
   settingsRowValue: {
-    fontSize: 13,
+    fontSize: 14,
     color: colors.grey,
+  },
+  upgradeCard: {
+    backgroundColor: colors.surface,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#FFD700',
+    padding: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  upgradeTitle: { color: colors.offWhite, fontSize: 15, fontWeight: '700', marginBottom: 4 },
+  upgradeSub: { color: colors.grey, fontSize: 12, lineHeight: 18 },
+  upgradeBtn: {
+    backgroundColor: '#FFD700',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 8,
+  },
+  upgradeBtnText: { color: '#080808', fontSize: 13, fontWeight: '800' },
+  signOutBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: colors.surface,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingVertical: 16,
+    marginTop: spacing.lg,
+  },
+  signOutText: { color: colors.red, fontSize: 15, fontWeight: '600' },
+  versionText: {
+    color: '#3a3a3a',
+    fontSize: 12,
+    textAlign: 'center',
+    marginTop: spacing.lg,
+    marginBottom: spacing.md,
   },
 });

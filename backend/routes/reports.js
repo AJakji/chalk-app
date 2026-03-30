@@ -29,6 +29,32 @@ router.post('/research', async (req, res) => {
   }
 });
 
+// ── POST /api/reports/feedback ────────────────────────────────────────────────
+// Stores user-submitted support reports and feature suggestions.
+// Body: { type, message, userEmail, userId }
+router.post('/feedback', async (req, res) => {
+  const { type, message, userEmail, userId, screenshotBase64 } = req.body;
+
+  if (!message?.trim()) {
+    return res.status(400).json({ error: 'Message required' });
+  }
+
+  const prefix = type === 'support' ? '[SUPPORT] ' : '[SUGGESTION] ';
+
+  try {
+    await db.query(
+      `INSERT INTO research_reports
+         (user_id, question, chalky_response, sport, status, screenshot_url)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [userId || null, prefix + message.trim(), userEmail || 'anonymous', type, 'open', screenshotBase64 || null]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[reports] Failed to store feedback:', err.message);
+    res.status(500).json({ error: 'Failed to save feedback' });
+  }
+});
+
 // ── GET /api/reports/admin?secret=... ─────────────────────────────────────────
 // Simple admin view — browse open reports in a browser.
 router.get('/admin', async (req, res) => {

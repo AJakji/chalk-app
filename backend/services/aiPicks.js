@@ -652,6 +652,20 @@ async function storeModelPicks(picks, headshotMap = {}) {
 
       const headshotUrl = headshotMap[pick.playerName] || null;
 
+      // Look up UTC ISO game time from game picks stored by edgeDetector (runs before aiPicks).
+      // Falls back to Claude's formatted string for cases where no game pick exists.
+      let utcGameTime = pick.gameTime || 'Tonight';
+      try {
+        const gtRes = await db.query(
+          `SELECT game_time FROM picks
+           WHERE away_team ILIKE $1 AND home_team ILIKE $2
+             AND pick_date = CURRENT_DATE AND pick_category = 'game'
+           LIMIT 1`,
+          [pick.awayTeam || '', pick.homeTeam || pick.playerTeam || '']
+        );
+        if (gtRes.rows[0]?.game_time) utcGameTime = gtRes.rows[0].game_time;
+      } catch { /* non-fatal, use Claude's time */ }
+
       await db.query(
         `INSERT INTO picks
           (league, sport_key, pick_type, pick_category,
@@ -667,7 +681,7 @@ async function storeModelPicks(picks, headshotMap = {}) {
           'prop',
           pick.awayTeam || '',
           pick.homeTeam || pick.playerTeam || '',
-          pick.gameTime || 'Tonight',
+          utcGameTime,
           gameId,
           pick.pick,
           pick.confidence,
