@@ -9,6 +9,6 @@ export function useProStatus() {
   const { user, isLoaded } = useUser();
   if (!isLoaded || !user) return { isPro: false, isLoaded };
   const sub = user.publicMetadata?.subscription;
-  const isPro = sub === 'pro' || sub === 'seasonal';
+  const isPro = true; // DEV: paywall disabled
   return { isPro, isLoaded };
 }

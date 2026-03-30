@@ -149,25 +149,42 @@ async function generatePropPicks() {
   return props;
 }
 
+// Player props require the event-specific endpoint — the /odds/ endpoint doesn't support them
 async function fetchPropLines() {
   try {
     const apiKey = process.env.ODDS_API_KEY;
     if (!apiKey) return [];
 
-    // Fetch player props for NBA (extend to other leagues as needed)
-    const sports = ['basketball_nba', 'icehockey_nhl', 'baseball_mlb'];
-    const markets = ['player_points', 'player_rebounds', 'player_assists', 'player_threes', 'player_goals', 'player_shots_on_goal'];
+    const SPORT_MARKETS = {
+      basketball_nba: 'player_points,player_rebounds,player_assists,player_threes,player_points_rebounds_assists,player_points_rebounds,player_points_assists',
+      icehockey_nhl:  'player_goals,player_assists,player_points,player_shots_on_goal',
+      baseball_mlb:   'batter_hits,batter_total_bases,batter_home_runs,batter_rbis,pitcher_strikeouts,pitcher_earned_runs',
+    };
 
     const allLines = [];
-    for (const sport of sports) {
+
+    for (const [sport, markets] of Object.entries(SPORT_MARKETS)) {
       try {
-        const url = `https://api.the-odds-api.com/v4/sports/${sport}/odds/?apiKey=${apiKey}&regions=us&markets=${markets.join(',')}&oddsFormat=american&bookmakers=draftkings,fanduel,betmgm,bet365`;
-        const res = await fetch(url);
-        if (!res.ok) continue;
-        const games = await res.json();
-        allLines.push(...games.map(g => ({ ...g, sport })));
-      } catch { /* continue */ }
+        // Step 1: get today's events
+        const eventsRes = await fetch(`https://api.the-odds-api.com/v4/sports/${sport}/events?apiKey=${apiKey}`);
+        if (!eventsRes.ok) continue;
+        const events = await eventsRes.json();
+        if (!Array.isArray(events) || events.length === 0) continue;
+
+        // Step 2: fetch event-specific prop odds for each game
+        for (const event of events) {
+          try {
+            const url = `https://api.the-odds-api.com/v4/sports/${sport}/events/${event.id}/odds?apiKey=${apiKey}&regions=us&markets=${markets}&oddsFormat=american&bookmakers=draftkings,fanduel,betmgm,bet365`;
+            const res = await fetch(url);
+            if (!res.ok) continue;
+            const data = await res.json();
+            allLines.push({ ...data, sport, id: event.id });
+          } catch { /* continue to next event */ }
+        }
+      } catch { /* continue to next sport */ }
     }
+
+    console.log(`[fetchPropLines] Fetched prop lines for ${allLines.length} games`);
     return allLines;
   } catch (err) {
     console.warn('Failed to fetch prop lines:', err.message);
