@@ -16,19 +16,30 @@ export default function useProfile() {
     setLoading(true);
     try {
       const token = await getToken();
-      const res = await fetch(`${API_URL}/api/users/me`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const headers = { Authorization: `Bearer ${token}` };
+
+      let res = await fetch(`${API_URL}/api/users/me`, { headers });
+
+      // First sign-in — user not in DB yet. Auto-sync from Clerk then re-fetch.
+      if (res.status === 404 && clerkUser) {
+        await fetch(`${API_URL}/api/users/sync`, {
+          method: 'POST',
+          headers: { ...headers, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            displayName: clerkUser.fullName ||
+              clerkUser.primaryEmailAddress?.emailAddress?.split('@')[0] || '',
+            avatar: '😎',
+          }),
+        });
+        res = await fetch(`${API_URL}/api/users/me`, { headers });
+      }
+
       if (!res.ok) throw new Error(`${res.status}`);
       const data = await res.json();
       setProfile(normalizeProfile(data));
     } catch (e) {
       console.warn('Profile API unavailable:', e.message);
-      if (clerkUser) {
-        setProfile(clerkFallback(clerkUser));
-      } else {
-        setProfile(guestProfile());
-      }
+      setProfile(clerkUser ? clerkFallback(clerkUser) : guestProfile());
     } finally {
       setLoading(false);
     }
@@ -80,7 +91,10 @@ function clerkFallback(clerkUser) {
   return {
     id:          clerkUser.id,
     username:    clerkUser.username || null,
-    displayName: clerkUser.fullName || clerkUser.username || null,
+    displayName: clerkUser.fullName ||
+      clerkUser.username ||
+      clerkUser.primaryEmailAddress?.emailAddress?.split('@')[0] ||
+      'Chalky User',
     avatar:      '😎',
     bio:         null,
     streak:      0,
