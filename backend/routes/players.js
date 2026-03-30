@@ -1052,140 +1052,157 @@ router.get('/search', async (req, res) => {
 // ── Live in-game stats ─────────────────────────────────────────────────────────
 
 async function getNBALiveStats(playerName) {
-  const playerRes = await fetch(
-    `https://api.balldontlie.io/v1/players?search=${encodeURIComponent(playerName)}&per_page=5`,
-    { headers: { Authorization: process.env.BALLDONTLIE_API_KEY } }
-  );
-  if (!playerRes.ok) return null;
-  const playerData = await playerRes.json();
-  const player = playerData.data?.[0];
-  if (!player) return null;
-
   const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-  const statsRes = await fetch(
-    `https://api.balldontlie.io/v1/stats?dates[]=${todayET}&player_ids[]=${player.id}&per_page=5`,
-    { headers: { Authorization: process.env.BALLDONTLIE_API_KEY } }
-  );
-  if (!statsRes.ok) return null;
-  const statsData = await statsRes.json();
-  const stat = statsData.data?.[0];
-  if (!stat) return null;
+  // Use the existing BDL service — handles auth, retries, and caching correctly.
+  // /box_scores returns live in-progress stats; /stats only returns completed games.
+  const boxScores = await bdl.getLiveBoxScores(todayET);
+  if (!boxScores || !boxScores.length) return null;
 
-  const game   = stat.game;
-  const isLive = game?.status && game.status !== 'Final' && !game.status.includes('Final');
+  const surname   = playerName.split(' ').pop().toLowerCase();
+  const fullLower = playerName.toLowerCase();
 
-  return {
-    points:    stat.pts,
-    rebounds:  stat.reb,
-    assists:   stat.ast,
-    steals:    stat.stl,
-    blocks:    stat.blk,
-    turnovers: stat.turnover,
-    fg:        `${stat.fgm}/${stat.fga}`,
-    fg_pct:    stat.fg_pct,
-    three_pt:  `${stat.fg3m}/${stat.fg3a}`,
-    minutes:   stat.min,
-    isLive,
-    gameStatus: game?.status,
-    opponent:  game?.home_team_id === player.team_id
-      ? game?.visitor_team?.abbreviation
-      : game?.home_team?.abbreviation,
-    isHome:   game?.home_team_id === player.team_id,
-    period:   game?.period,
-    clock:    game?.time,
-  };
+  for (const gameBox of boxScores) {
+    const { game, home_team, visitor_team } = gameBox;
+    for (const side of [home_team, visitor_team]) {
+      const entry = (side?.players || []).find(p => {
+        const name = `${p.player?.first_name || ''} ${p.player?.last_name || ''}`.toLowerCase().trim();
+        return name === fullLower || name.includes(surname);
+      });
+      if (!entry) continue;
+
+      const isLive = game?.status && game.status !== 'Final' && !game.status.includes('Final');
+      const teamId = entry.player?.team_id;
+
+      return {
+        points:    entry.pts    ?? 0,
+        rebounds:  entry.reb    ?? 0,
+        assists:   entry.ast    ?? 0,
+        steals:    entry.stl    ?? 0,
+        blocks:    entry.blk    ?? 0,
+        turnovers: entry.turnover ?? 0,
+        fg:        `${entry.fgm ?? 0}/${entry.fga ?? 0}`,
+        minutes:   entry.min,
+        isLive,
+        gameStatus: game?.status,
+        opponent:  game?.home_team_id === teamId
+          ? (visitor_team?.team?.abbreviation || '')
+          : (home_team?.team?.abbreviation || ''),
+        isHome:  game?.home_team_id === teamId,
+        period:  game?.period,
+        clock:   game?.time,
+      };
+    }
+  }
+  return null;
 }
 
 async function getNHLLiveStats(playerName) {
   const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-  const schedRes = await fetch(`https://api-web.nhle.com/v1/schedule/${todayET}`);
+  const schedRes = await fetch(`https://api-web.nhle.com/v1/schedule/${todayET}`,
+    { signal: AbortSignal.timeout(8000) });
   if (!schedRes.ok) return null;
   const schedData = await schedRes.json();
+  // Search ALL today's games (live + finished) — player might be in any of them
   const games = schedData.gameWeek?.[0]?.games || [];
-
-  const liveGame = games.find(g => g.gameState === 'LIVE' || g.gameState === 'CRIT');
-  if (!liveGame) return null;
-
-  const boxRes = await fetch(`https://api-web.nhle.com/v1/gamecenter/${liveGame.id}/boxscore`);
-  if (!boxRes.ok) return null;
-  const boxData = await boxRes.json();
-
-  const allPlayers = [
-    ...(boxData.playerByGameStats?.homeTeam?.forwards  || []),
-    ...(boxData.playerByGameStats?.homeTeam?.defense   || []),
-    ...(boxData.playerByGameStats?.homeTeam?.goalies   || []),
-    ...(boxData.playerByGameStats?.awayTeam?.forwards  || []),
-    ...(boxData.playerByGameStats?.awayTeam?.defense   || []),
-    ...(boxData.playerByGameStats?.awayTeam?.goalies   || []),
-  ];
+  const todayGames = games.filter(g =>
+    ['LIVE', 'CRIT', 'FINAL', 'OFF', 'PRE'].includes(g.gameState) === false
+      ? true  // include anything
+      : ['LIVE', 'CRIT', 'FINAL', 'OFF'].includes(g.gameState)
+  );
 
   const surname = playerName.split(' ').pop().toLowerCase();
-  const player  = allPlayers.find(p =>
-    (p.name?.default || '').toLowerCase().includes(surname)
-  );
-  if (!player) return null;
 
-  const base = {
-    isLive:     liveGame.gameState === 'LIVE',
-    gameStatus: liveGame.gameState,
-    period:     boxData.periodDescriptor?.number,
-    clock:      boxData.clock?.timeRemaining,
-  };
+  for (const game of todayGames) {
+    const boxRes = await fetch(`https://api-web.nhle.com/v1/gamecenter/${game.id}/boxscore`,
+      { signal: AbortSignal.timeout(8000) });
+    if (!boxRes.ok) continue;
+    const boxData = await boxRes.json();
 
-  if (player.savePctg !== undefined) {
-    return { ...base, isGoalie: true, saves: player.saves, shotsAgainst: player.shotsAgainst,
-             savePct: player.savePctg, goalsAgainst: player.goalsAgainst, toi: player.toi };
+    const allPlayers = [
+      ...(boxData.playerByGameStats?.homeTeam?.forwards  || []),
+      ...(boxData.playerByGameStats?.homeTeam?.defense   || []),
+      ...(boxData.playerByGameStats?.homeTeam?.goalies   || []),
+      ...(boxData.playerByGameStats?.awayTeam?.forwards  || []),
+      ...(boxData.playerByGameStats?.awayTeam?.defense   || []),
+      ...(boxData.playerByGameStats?.awayTeam?.goalies   || []),
+    ];
+
+    const player = allPlayers.find(p =>
+      (p.name?.default || '').toLowerCase().includes(surname)
+    );
+    if (!player) continue;
+
+    const base = {
+      isLive:     game.gameState === 'LIVE' || game.gameState === 'CRIT',
+      gameStatus: game.gameState,
+      period:     boxData.periodDescriptor?.number,
+      clock:      boxData.clock?.timeRemaining,
+    };
+    if (player.savePctg !== undefined) {
+      return { ...base, isGoalie: true, saves: player.saves, shotsAgainst: player.shotsAgainst,
+               savePct: player.savePctg, goalsAgainst: player.goalsAgainst, toi: player.toi };
+    }
+    return { ...base, goals: player.goals, assists: player.assists,
+             points: (player.goals || 0) + (player.assists || 0),
+             shots: player.shots, hits: player.hits, blocked: player.blocked,
+             plusMinus: player.plusMinus, toi: player.toi };
   }
-  return { ...base, goals: player.goals, assists: player.assists,
-           points: (player.goals || 0) + (player.assists || 0),
-           shots: player.shots, hits: player.hits, blocked: player.blocked,
-           plusMinus: player.plusMinus, toi: player.toi };
+  return null;
 }
 
 async function getMLBLiveStats(playerName) {
   const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
   const schedRes = await fetch(
-    `https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=${todayET}&hydrate=linescore`
+    `https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=${todayET}&hydrate=linescore`,
+    { signal: AbortSignal.timeout(8000) }
   );
   if (!schedRes.ok) return null;
   const schedData = await schedRes.json();
-  const games     = schedData.dates?.[0]?.games || [];
-
-  const liveGame = games.find(g => g.status?.abstractGameState === 'Live');
-  if (!liveGame) return null;
-
-  const boxRes = await fetch(`https://statsapi.mlb.com/api/v1/game/${liveGame.gamePk}/boxscore`);
-  if (!boxRes.ok) return null;
-  const boxData = await boxRes.json();
+  // Search ALL today's games — live or finished (show "TODAY" for finished)
+  const games = schedData.dates?.[0]?.games || [];
+  const activeGames = games.filter(g =>
+    g.status?.abstractGameState === 'Live' || g.status?.abstractGameState === 'Final'
+  );
 
   const surname = playerName.split(' ').pop().toLowerCase();
-  for (const side of ['home', 'away']) {
-    const players = Object.values(boxData.teams?.[side]?.players || {});
-    const player  = players.find(p =>
-      p.person?.fullName?.toLowerCase().includes(surname)
+
+  for (const game of activeGames) {
+    const boxRes = await fetch(
+      `https://statsapi.mlb.com/api/v1/game/${game.gamePk}/boxscore`,
+      { signal: AbortSignal.timeout(8000) }
     );
-    if (!player) continue;
+    if (!boxRes.ok) continue;
+    const boxData = await boxRes.json();
 
-    const batting  = player.stats?.batting;
-    const pitching = player.stats?.pitching;
-    const base = {
-      isLive:      true,
-      inning:      liveGame.linescore?.currentInning,
-      inningHalf:  liveGame.linescore?.inningHalf,
-    };
+    for (const side of ['home', 'away']) {
+      const players = Object.values(boxData.teams?.[side]?.players || {});
+      const player  = players.find(p =>
+        p.person?.fullName?.toLowerCase().includes(surname)
+      );
+      if (!player) continue;
 
-    if (pitching?.inningsPitched) {
-      return { ...base, isPitcher: true,
-               inningsPitched: pitching.inningsPitched,
-               strikeouts: pitching.strikeOuts, earnedRuns: pitching.earnedRuns,
-               hits: pitching.hits, walks: pitching.baseOnBalls,
-               pitchCount: pitching.numberOfPitches, era: pitching.era };
-    }
-    if (batting) {
-      return { ...base, isBatter: true,
-               atBats: batting.atBats, hits: batting.hits, homeRuns: batting.homeRuns,
-               rbi: batting.rbi, runs: batting.runs, strikeouts: batting.strikeOuts,
-               walks: batting.baseOnBalls, avg: batting.avg };
+      const batting  = player.stats?.batting;
+      const pitching = player.stats?.pitching;
+      const isLive   = game.status?.abstractGameState === 'Live';
+      const base = {
+        isLive,
+        inning:     game.linescore?.currentInning,
+        inningHalf: game.linescore?.inningHalf,
+      };
+
+      if (pitching?.inningsPitched) {
+        return { ...base, isPitcher: true,
+                 inningsPitched: pitching.inningsPitched,
+                 strikeouts: pitching.strikeOuts, earnedRuns: pitching.earnedRuns,
+                 hits: pitching.hits, walks: pitching.baseOnBalls,
+                 pitchCount: pitching.numberOfPitches, era: pitching.era };
+      }
+      if (batting) {
+        return { ...base, isBatter: true,
+                 atBats: batting.atBats, hits: batting.hits, homeRuns: batting.homeRuns,
+                 rbi: batting.rbi, runs: batting.runs, strikeouts: batting.strikeOuts,
+                 walks: batting.baseOnBalls, avg: batting.avg };
+      }
     }
   }
   return null;
