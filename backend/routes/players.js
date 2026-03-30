@@ -1051,17 +1051,46 @@ router.get('/search', async (req, res) => {
 
 // ── Live in-game stats ─────────────────────────────────────────────────────────
 
+// Trim the BDL key once (avoids whitespace issues on Railway)
+const BDL_KEY = (process.env.BALLDONTLIE_API_KEY || '').trim();
+
+// Raw BDL fetch used only for endpoints the bdl service doesn't expose
+async function bdlRaw(path) {
+  try {
+    const res = await fetch(`https://api.balldontlie.io/v1${path}`, {
+      headers: { Authorization: BDL_KEY },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return null;
+    return res.json();
+  } catch { return null; }
+}
+
 async function getNBALiveStats(playerName) {
   const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-  // Use the existing BDL service — handles auth, retries, and caching correctly.
-  // /box_scores returns live in-progress stats; /stats only returns completed games.
-  const boxScores = await bdl.getLiveBoxScores(todayET);
-  if (!boxScores || !boxScores.length) return null;
+
+  // Fetch live in-progress games AND today's completed games in parallel.
+  // /box_scores/live  → currently active games (correct live stats + status)
+  // /box_scores?date= → completed games today (for "TODAY" card after game ends)
+  const [liveJson, dateBoxScores, todayGames] = await Promise.all([
+    bdlRaw('/box_scores/live'),
+    bdl.getLiveBoxScores(todayET),
+    bdl.getGames(todayET),
+  ]);
+
+  // Merge by game ID — live data takes priority over date-based (fresher status)
+  const byGameId = new Map();
+  for (const g of (dateBoxScores || [])) if (g.game?.id) byGameId.set(g.game.id, g);
+  for (const g of (liveJson?.data || [])) if (g.game?.id) byGameId.set(g.game.id, g);
+
+  // Build game-info lookup from getGames (has reliable abbreviations)
+  const gameInfoById = {};
+  for (const g of (todayGames || [])) gameInfoById[g.id] = g;
 
   const surname   = playerName.split(' ').pop().toLowerCase();
   const fullLower = playerName.toLowerCase();
 
-  for (const gameBox of boxScores) {
+  for (const gameBox of byGameId.values()) {
     const { game, home_team, visitor_team } = gameBox;
     for (const side of [home_team, visitor_team]) {
       const entry = (side?.players || []).find(p => {
@@ -1070,26 +1099,31 @@ async function getNBALiveStats(playerName) {
       });
       if (!entry) continue;
 
-      const isLive = game?.status && game.status !== 'Final' && !game.status.includes('Final');
       const teamId = entry.player?.team_id;
+      const isHome = game?.home_team_id === teamId;
+      const isLive = game?.status && game.status !== 'Final' && !game.status.includes('Final');
+
+      // Prefer getGames abbreviations (most reliable); fall back to box score team objects
+      const gi = gameInfoById[game?.id] || {};
+      const opponent = isHome
+        ? (gi.visitor_team?.abbreviation || visitor_team?.team?.abbreviation || '')
+        : (gi.home_team?.abbreviation    || home_team?.team?.abbreviation    || '');
 
       return {
-        points:    entry.pts    ?? 0,
-        rebounds:  entry.reb    ?? 0,
-        assists:   entry.ast    ?? 0,
-        steals:    entry.stl    ?? 0,
-        blocks:    entry.blk    ?? 0,
+        points:    entry.pts      ?? 0,
+        rebounds:  entry.reb      ?? 0,
+        assists:   entry.ast      ?? 0,
+        steals:    entry.stl      ?? 0,
+        blocks:    entry.blk      ?? 0,
         turnovers: entry.turnover ?? 0,
         fg:        `${entry.fgm ?? 0}/${entry.fga ?? 0}`,
         minutes:   entry.min,
         isLive,
         gameStatus: game?.status,
-        opponent:  game?.home_team_id === teamId
-          ? (visitor_team?.team?.abbreviation || '')
-          : (home_team?.team?.abbreviation || ''),
-        isHome:  game?.home_team_id === teamId,
-        period:  game?.period,
-        clock:   game?.time,
+        opponent,
+        isHome,
+        period: game?.period,
+        clock:  game?.time,
       };
     }
   }

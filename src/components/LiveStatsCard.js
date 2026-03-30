@@ -126,7 +126,6 @@ export default function LiveStatsCard({ liveStats, sport }) {
         ))}
       </View>
 
-      <Text style={styles.updateNote}>Updates every 60 seconds</Text>
     </View>
   );
 }
@@ -194,11 +193,5 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     letterSpacing: 1,
     textTransform: 'uppercase',
-  },
-  updateNote: {
-    color: '#3a3a3a',
-    fontSize: 10,
-    textAlign: 'center',
-    marginTop: 12,
   },
 });
