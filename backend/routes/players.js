@@ -1069,28 +1069,28 @@ async function bdlRaw(path) {
 async function getNBALiveStats(playerName) {
   const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
 
-  // Fetch live in-progress games AND today's completed games in parallel.
-  // /box_scores/live  → currently active games (correct live stats + status)
-  // /box_scores?date= → completed games today (for "TODAY" card after game ends)
-  const [liveJson, dateBoxScores, todayGames] = await Promise.all([
-    bdlRaw('/box_scores/live'),
+  // Use the date-based box scores to find the player and their stats.
+  // Separately fetch /box_scores/live to get which game IDs are currently active —
+  // this avoids structure mismatches from merging two different endpoint responses.
+  const [dateBoxScores, liveJson, todayGames] = await Promise.all([
     bdl.getLiveBoxScores(todayET),
+    bdlRaw('/box_scores/live'),
     bdl.getGames(todayET),
   ]);
 
-  // Merge by game ID — live data takes priority over date-based (fresher status)
-  const byGameId = new Map();
-  for (const g of (dateBoxScores || [])) if (g.game?.id) byGameId.set(g.game.id, g);
-  for (const g of (liveJson?.data || [])) if (g.game?.id) byGameId.set(g.game.id, g);
+  // Set of game IDs that are currently live
+  const liveGameIds = new Set(
+    (liveJson?.data || []).map(g => g.game?.id).filter(Boolean)
+  );
 
-  // Build game-info lookup from getGames (has reliable abbreviations)
+  // Build team abbreviation lookup from getGames (most reliable source)
   const gameInfoById = {};
   for (const g of (todayGames || [])) gameInfoById[g.id] = g;
 
   const surname   = playerName.split(' ').pop().toLowerCase();
   const fullLower = playerName.toLowerCase();
 
-  for (const gameBox of byGameId.values()) {
+  for (const gameBox of (dateBoxScores || [])) {
     const { game, home_team, visitor_team } = gameBox;
     for (const side of [home_team, visitor_team]) {
       const entry = (side?.players || []).find(p => {
@@ -1101,9 +1101,12 @@ async function getNBALiveStats(playerName) {
 
       const teamId = entry.player?.team_id;
       const isHome = game?.home_team_id === teamId;
-      const isLive = game?.status && game.status !== 'Final' && !game.status.includes('Final');
 
-      // Prefer getGames abbreviations (most reliable); fall back to box score team objects
+      // A game is live if it appears in /box_scores/live, OR if BDL status isn't Final
+      const statusFinal = !game?.status || game.status === 'Final' || game.status.includes('Final');
+      const isLive = liveGameIds.has(game?.id) || !statusFinal;
+
+      // Team abbreviations: prefer getGames data, fall back to box score team objects
       const gi = gameInfoById[game?.id] || {};
       const opponent = isHome
         ? (gi.visitor_team?.abbreviation || visitor_team?.team?.abbreviation || '')
