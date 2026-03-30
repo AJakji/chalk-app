@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
+import { View, Text, Image, TouchableOpacity, StyleSheet } from 'react-native';
 import { colors, spacing, radius } from '../../theme';
 import StreakBadge from '../feed/StreakBadge';
 
@@ -41,7 +41,7 @@ function Last10Visualiser({ record }) {
   );
 }
 
-export default function ProfileHeader({ profile, isOwnProfile, isFollowing, onFollowToggle }) {
+export default function ProfileHeader({ profile, isOwnProfile, isFollowing, onFollowToggle, imageUrl, initials }) {
   const { avatar, displayName, username, bio, streak, streakType, followers, following, record } = profile;
 
   return (
@@ -49,7 +49,13 @@ export default function ProfileHeader({ profile, isOwnProfile, isFollowing, onFo
       {/* Avatar + follow button row */}
       <View style={styles.avatarRow}>
         <View style={styles.avatarWrap}>
-          <Text style={styles.avatarText}>{avatar}</Text>
+          {imageUrl ? (
+            <Image source={{ uri: imageUrl }} style={styles.avatarImage} />
+          ) : initials ? (
+            <Text style={styles.avatarInitials}>{initials}</Text>
+          ) : (
+            <Text style={styles.avatarText}>{avatar}</Text>
+          )}
         </View>
         {!isOwnProfile && (
           <TouchableOpacity
@@ -138,6 +144,16 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     borderWidth: 2,
     borderColor: colors.border,
+  },
+  avatarImage: {
+    width: 72,
+    height: 72,
+    borderRadius: radius.full,
+  },
+  avatarInitials: {
+    fontSize: 28,
+    fontWeight: '700',
+    color: colors.offWhite,
   },
   avatarText: { fontSize: 36 },
   followBtn: {
