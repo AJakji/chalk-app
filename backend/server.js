@@ -830,6 +830,7 @@ app.get('/api/admin/status', async (req, res) => {
     return res.status(403).json({ error: 'Unauthorized' });
   }
   try {
+    const db = require('./db');
     const today = new Date().toISOString().split('T')[0];
 
     // chalk_projections: how many rows per sport written by Python models
@@ -847,7 +848,7 @@ app.get('/api/admin/status', async (req, res) => {
              ROUND(AVG(chalk_edge)::numeric, 3) as avg_edge,
              ROUND(AVG(confidence)::numeric, 1) as avg_confidence
       FROM player_props_history
-      WHERE date = $1
+      WHERE game_date = $1
       GROUP BY sport, prop_type
       ORDER BY sport, prop_type
     `, [today]);
