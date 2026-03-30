@@ -670,9 +670,15 @@ app.post('/api/admin/run-pipeline', async (req, res) => {
         console.log('✅ Nightly roster built');
       }
       if (step === 'all' || step === 'props') {
-        console.log('\n🔧 [Admin] Collecting prop lines…');
-        await collectPropsLines();
-        console.log('✅ Prop lines collected');
+        console.log('\n🔧 [Admin] Writing player prop lines to DB…');
+        const { writePropLinesToDB } = require('./services/oddsService');
+        const today = getTodayET();
+        await Promise.allSettled([
+          writePropLinesToDB('NBA', today),
+          writePropLinesToDB('MLB', today),
+          writePropLinesToDB('NHL', today),
+        ]);
+        console.log('✅ Prop lines written to DB');
       }
       if (step === 'all' || step === 'model') {
         console.log('\n🔧 [Admin] Running projection models…');
@@ -699,6 +705,8 @@ app.post('/api/admin/run-pipeline', async (req, res) => {
         console.log('\n🔧 [Admin] Generating Chalky\'s picks…');
         const modelPicks = await generateModelPicks();
         console.log(`✅ Model picks: ${modelPicks.length}`);
+        const propPicks = await generatePropPicks();
+        console.log(`✅ Prop picks: ${propPicks.length}`);
         const [gamePicks] = await Promise.allSettled([generatePicks()]);
         console.log(`✅ Game picks: ${gamePicks.value?.length || 0}`);
       }
