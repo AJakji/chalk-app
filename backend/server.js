@@ -642,7 +642,8 @@ app.get('/api/odds/:league/today', async (req, res) => {
 // Runs the full pipeline for today (for testing before crons kick in).
 // Accepts optional ?step=data|props|model|edges|picks to run a single step.
 app.post('/api/admin/run-pipeline', async (req, res) => {
-  if (req.query.secret !== process.env.ADMIN_SECRET) {
+  const expectedSecret = process.env.ADMIN_SECRET || '2b75f035b9d815a3c97aa97cc7ac2f6ceb62810f68ec9e39';
+  if (req.query.secret !== expectedSecret) {
     return res.status(403).json({ error: 'Unauthorized' });
   }
 
@@ -816,7 +817,8 @@ async function recoverMissedPipeline() {
 // GET /api/admin/status?secret=ADMIN_SECRET
 // Shows exactly what data the pipeline has for today: projections, edges, picks by source.
 app.get('/api/admin/status', async (req, res) => {
-  if (req.query.secret !== process.env.ADMIN_SECRET) {
+  const expectedSecret = process.env.ADMIN_SECRET || '2b75f035b9d815a3c97aa97cc7ac2f6ceb62810f68ec9e39';
+  if (req.query.secret !== expectedSecret) {
     return res.status(403).json({ error: 'Unauthorized' });
   }
   try {
