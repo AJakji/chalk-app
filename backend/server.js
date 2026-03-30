@@ -872,12 +872,32 @@ app.get('/api/admin/status', async (req, res) => {
       ORDER BY pick_source, confidence DESC
     `);
 
+    // player_game_logs: total rows + recent (last 7 days) + per sport
+    const gameLogsRows = await db.query(`
+      SELECT sport, COUNT(*) as total_rows,
+             SUM(CASE WHEN game_date >= CURRENT_DATE - INTERVAL '7 days' THEN 1 ELSE 0 END) as last_7_days
+      FROM player_game_logs
+      GROUP BY sport
+      ORDER BY sport
+    `);
+
+    // nightly_roster: rows for today per sport
+    const rosterRows = await db.query(`
+      SELECT sport, COUNT(*) as cnt
+      FROM nightly_roster
+      WHERE game_date = $1
+      GROUP BY sport
+      ORDER BY sport
+    `, [today]);
+
     res.json({
       date: today,
       projections: projRows.rows,
       edges: edgeRows.rows,
       pick_counts_by_source: pickRows.rows,
       picks: allPicks.rows,
+      player_game_logs: gameLogsRows.rows,
+      nightly_roster_today: rosterRows.rows,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
