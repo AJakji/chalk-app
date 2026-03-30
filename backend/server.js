@@ -865,7 +865,7 @@ app.get('/api/admin/status', async (req, res) => {
     // all picks today with key fields for inspection
     const allPicks = await db.query(`
       SELECT id, league, pick_type, pick_category, pick_source,
-             player_name, pick_value, confidence, proj_value, prop_line, chalk_edge,
+             player_name, pick_value, confidence,
              away_team, home_team, created_at
       FROM picks
       WHERE pick_date = CURRENT_DATE
