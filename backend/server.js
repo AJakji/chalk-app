@@ -414,11 +414,12 @@ if (true) { // crons always run in production — MOCK_MODE removed
 
   // ── 4:30 AM ET (8:30 UTC) — All three projection models (parallel) ────────────
   cron.schedule('30 4 * * *', async () => {
+    const modelDate = getTodayET();
     console.log('\n⏰ [4:30 AM ET] Running NBA + MLB + NHL projection models (parallel)…');
     await Promise.allSettled([
-      runPipeline('NBA Projection Model', () => runPythonScript('nbaProjectionModel.py')),
-      runPipeline('MLB Projection Model', () => runPythonScript('mlbProjectionModel.py')),
-      runPipeline('NHL Projection Model', () => runPythonScript('nhlProjectionModel.py')),
+      runPipeline('NBA Projection Model', () => runPythonScript('nbaProjectionModel.py', ['--date', modelDate])),
+      runPipeline('MLB Projection Model', () => runPythonScript('mlbProjectionModel.py', ['--date', modelDate])),
+      runPipeline('NHL Projection Model', () => runPythonScript('nhlProjectionModel.py', ['--date', modelDate])),
     ]);
 
     // Fail-loud check: if models wrote 0 rows the edge detector will find no edges.
@@ -592,9 +593,9 @@ if (true) { // crons always run in production — MOCK_MODE removed
 
     // Step 2: re-run projection models (props-only) against fresh lines
     await Promise.allSettled([
-      runPipeline('NBA Props-Only Model', () => runPythonScript('nbaProjectionModel.py', ['--props-only'])),
-      runPipeline('MLB Props-Only Model', () => runPythonScript('mlbProjectionModel.py', ['--props-only'])),
-      runPipeline('NHL Props-Only Model', () => runPythonScript('nhlProjectionModel.py', ['--props-only'])),
+      runPipeline('NBA Props-Only Model', () => runPythonScript('nbaProjectionModel.py', ['--date', today, '--props-only'])),
+      runPipeline('MLB Props-Only Model', () => runPythonScript('mlbProjectionModel.py', ['--date', today, '--props-only'])),
+      runPipeline('NHL Props-Only Model', () => runPythonScript('nhlProjectionModel.py', ['--date', today, '--props-only'])),
     ]);
 
     // Step 3: re-run edge detection so new projections get confidence scores
@@ -682,10 +683,11 @@ app.post('/api/admin/run-pipeline', async (req, res) => {
       }
       if (step === 'all' || step === 'model') {
         console.log('\n🔧 [Admin] Running projection models…');
+        const modelDate = getTodayET();
         await Promise.allSettled([
-          runPythonScript('nbaProjectionModel.py'),
-          runPythonScript('mlbProjectionModel.py'),
-          runPythonScript('nhlProjectionModel.py'),
+          runPythonScript('nbaProjectionModel.py', ['--date', modelDate]),
+          runPythonScript('mlbProjectionModel.py', ['--date', modelDate]),
+          runPythonScript('nhlProjectionModel.py', ['--date', modelDate]),
         ]);
         console.log('✅ Projection models complete');
       }
@@ -786,10 +788,11 @@ async function recoverMissedPipeline() {
       ]);
 
       console.log('  Recovery: running projection models…');
+      const recoveryDate = getTodayET();
       await Promise.allSettled([
-        runPipeline('Recovery: NBA Model', () => runPythonScript('nbaProjectionModel.py')),
-        runPipeline('Recovery: MLB Model', () => runPythonScript('mlbProjectionModel.py')),
-        runPipeline('Recovery: NHL Model', () => runPythonScript('nhlProjectionModel.py')),
+        runPipeline('Recovery: NBA Model', () => runPythonScript('nbaProjectionModel.py', ['--date', recoveryDate])),
+        runPipeline('Recovery: MLB Model', () => runPythonScript('mlbProjectionModel.py', ['--date', recoveryDate])),
+        runPipeline('Recovery: NHL Model', () => runPythonScript('nhlProjectionModel.py', ['--date', recoveryDate])),
       ]);
 
       console.log('  Recovery: running edge detection…');
