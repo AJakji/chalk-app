@@ -6,7 +6,9 @@ import { View, Animated, StyleSheet, ActivityIndicator } from 'react-native';
 import { ClerkProvider, useAuth } from '@clerk/clerk-expo';
 import { TeamLogosProvider } from './src/context/TeamLogosContext';
 import { PaywallProvider, usePaywall } from './src/context/PaywallContext';
+import { RevenueCatProvider } from './src/context/RevenueCatContext';
 import { useProStatus } from './src/hooks/useProStatus';
+import { configureRevenueCat } from './src/services/purchases';
 import * as SecureStore from 'expo-secure-store';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
@@ -247,6 +249,18 @@ function RootNavigator({ onboardingSeen, markOnboardingSeen }) {
   );
 }
 
+// ── RevenueCat initializer — runs once when Clerk auth state is known ──────────
+// Re-configures RC whenever the signed-in user changes so the RC identity
+// always matches the Clerk identity.
+
+function RevenueCatInit() {
+  const { userId } = useAuth();
+  useEffect(() => {
+    configureRevenueCat(userId || null);
+  }, [userId]);
+  return null;
+}
+
 // ── MainApp — handles loading + onboarding gate ────────────────────────────────
 
 function MainApp() {
@@ -285,11 +299,14 @@ function MainApp() {
 export default function App() {
   return (
     <ClerkProvider publishableKey={CLERK_PUBLISHABLE_KEY} tokenCache={tokenCache}>
-      <TeamLogosProvider>
-        <PaywallProvider>
-          <MainApp />
-        </PaywallProvider>
-      </TeamLogosProvider>
+      <RevenueCatProvider>
+        <RevenueCatInit />
+        <TeamLogosProvider>
+          <PaywallProvider>
+            <MainApp />
+          </PaywallProvider>
+        </TeamLogosProvider>
+      </RevenueCatProvider>
     </ClerkProvider>
   );
 }

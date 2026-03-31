@@ -62,7 +62,7 @@ log = logging.getLogger(__name__)
 
 DATABASE_URL   = os.getenv('DATABASE_URL', '')
 MODEL_VERSION  = 'v3.1'
-CURRENT_SEASON = '2025'
+CURRENT_SEASON = '2026'
 
 # ── League-average baselines (2024 MLB) ─────────────────────────────────────────
 LEAGUE_AVG = {

@@ -58,7 +58,7 @@ log = logging.getLogger(__name__)
 
 DATABASE_URL = os.getenv('DATABASE_URL', '')
 BASE_URL     = 'https://statsapi.mlb.com/api/v1'
-SEASONS      = [2022, 2023, 2024, 2025]
+SEASONS      = [2022, 2023, 2024, 2025, 2026]
 DELAY        = 0.3   # seconds between player API calls
 
 

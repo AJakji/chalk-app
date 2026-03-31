@@ -11,6 +11,7 @@ import {
   ActivityIndicator,
   Alert,
 } from 'react-native';
+import RevenueCatUI from 'react-native-purchases-ui';
 import { useUser, useAuth } from '@clerk/clerk-expo';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, spacing, radius } from '../theme';
@@ -226,30 +227,18 @@ export default function ProfileScreen() {
               </View>
             </View>
 
-            {/* Upgrade card — free users only */}
-            {!isPro && (
-              <View style={styles.section}>
-                <View style={styles.upgradeCard}>
-                  <View style={styles.upgradeLeft}>
-                    <Text style={styles.upgradeTitle}>Unlock Chalky Pro</Text>
-                    <Text style={styles.upgradeSub}>All picks. Unlimited Research. $49.99/mo</Text>
-                  </View>
-                  <TouchableOpacity style={styles.upgradeBtn} activeOpacity={0.85}>
-                    <Text style={styles.upgradeBtnText}>Upgrade</Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
-            )}
 
             {/* ── Support section ── */}
             <View style={styles.section}>
               <Text style={styles.sectionTitle}>Support</Text>
               <View style={styles.card}>
-                <SupportRow icon="help-circle-outline" label="Help Center"       onPress={() => {}} />
+                <SupportRow icon="help-circle-outline"    label="Help Center"        onPress={() => {}} />
                 <View style={styles.divider} />
-                <SupportRow icon="document-text-outline" label="Terms of Service" onPress={() => {}} />
+                <SupportRow icon="card-outline"           label="Manage Subscription" onPress={() => RevenueCatUI.presentCustomerCenter()} />
                 <View style={styles.divider} />
-                <SupportRow icon="shield-outline"       label="Privacy Policy"   onPress={() => {}} />
+                <SupportRow icon="document-text-outline"  label="Terms of Service"   onPress={() => {}} />
+                <View style={styles.divider} />
+                <SupportRow icon="shield-outline"         label="Privacy Policy"     onPress={() => {}} />
               </View>
             </View>
 
