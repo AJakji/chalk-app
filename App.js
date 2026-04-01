@@ -110,7 +110,7 @@ function ResearchIcon({ color, size }) {
 function ScoresIcon({ color, size }) {
   const barW = size * 0.14, gap = size * 0.08;
   return (
-    <View style={{ width: size, height: size, alignItems: 'flex-end', justifyContent: 'flex-end', flexDirection: 'row', gap }}>
+    <View style={{ width: size, height: size, alignItems: 'flex-end', justifyContent: 'center', flexDirection: 'row', gap }}>
       {[0.45, 0.65, 0.85, 1.0].map((h, i) => (
         <View key={i} style={{ width: barW, height: size * h * 0.7, backgroundColor: color, borderRadius: 2 }} />
       ))}
