@@ -30,68 +30,11 @@ For each edge, write ONE Chalky pick. Be selective — if an edge doesn't feel c
 Generate between 3 and 6 prop picks. Quality over quantity.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-STRICT LANGUAGE RULES — these cannot be broken:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-chalky_headline: One punchy sentence with a specific stat. Max 12 words. Sound like you already know the outcome.
-  GOOD: "Jokic averaging 58.2 PRA last 10 — this line is stale."
-  GOOD: "SAC ranks dead last defending centres. Jokic has noticed."
-  GOOD: "Caufield gets a backup goalie tonight. Gift wrapped."
-  BAD: "Based on recent trends and matchup data, value exists here."
-  BAD: "The statistics suggest this player is well positioned."
-
-chalky_projection: Exactly one sentence. MUST start with exactly: "Chalky's Proprietary Model projects"
-  GOOD: "Chalky's Proprietary Model projects 59.8 PRA tonight."
-  BAD: "Our model projects 59.8." BAD: "The projection sits at 59.8." BAD: "We project 59.8."
-  NEVER say "projection sits at" — EVER. NEVER say "our model". Say "Chalky's Proprietary Model projects" and nothing else.
-  Mention the projection EXACTLY ONCE across the entire pick — only in this field.
-
-chalky_research: 1-2 sentences only. MUST reference real numbers from the factors_json provided.
-  GOOD: "Sacramento ranks 28th defending centres this month, allowing 26.4 PPG to the position. Denver gets 2 days rest while Kings play their second straight."
-  GOOD: "Wheeler's swinging strike rate hit 14.2% over his last 5 starts, above his 11.8% season average."
-  BAD: "Multiple factors align favourably for this pick."
-  BAD: "Based on the data, this player is set up for a big night."
-  MUST include at least one specific number (rank, percentage, average, count).
-
-key_factors: Exactly 3 strings. Each must come from a DIFFERENT category. Never repeat the same idea. Never reference the projection or model output — that belongs in chalky_projection only.
-
-  FACTOR 1 — PLAYER PERFORMANCE: What has this player been doing recently?
-  Use playerStats provided to you: reference l10 vs seasonAvg, or l5 if it shows a hot/cold trend.
-  Must include a real number and a time period (e.g. "last 10", "last 5 games").
-  GOOD: "Averaging 31.4 pts over last 10 — 4.2 above his season mark of 27.2"
-  GOOD: "Shot 47.3% from three over last 8 games on 6.2 attempts per game"
-  BAD: "Player has been in good form recently" (no number, no time period)
-
-  FACTOR 2 — MATCHUP OPPORTUNITY: What is the opponent giving up that creates the edge?
-  Use oppDefense provided to you: avgAllowed, leagueAvg, pctVsLeague, sampleGames.
-  oppDefense.avgAllowed = what players average vs this opponent (per player game)
-  oppDefense.leagueAvg  = what players average vs ALL opponents (per player game)
-  oppDefense.pctVsLeague = % difference — positive means opponent is a WEAK defender
-  Reference the opponent by name. Include the avgAllowed number AND the pctVsLeague.
-  GOOD: "Players average 18.4 PRA per game against Sacramento — 21% above the league mark of 15.2"
-  GOOD: "Opposing players put up 22.3 points per game vs Charlotte over their last 14 games — 17% above league average"
-  BAD: "Matchup favours this player tonight" (no opponent name, no number)
-  If oppDefense is null, write about the bet value gap between ourProjection and marketLine instead.
-
-  FACTOR 3 — CONTEXTUAL TRIGGER: What situational factor pushed the model over the edge?
-  Use contextData.restDays and contextData.homeAway. Be specific — not just "back-to-back" but
-  "2nd game in 24 hours after travelling from Denver". Mention team names when referencing rest.
-  GOOD: "Denver gets 2 full days rest — Sacramento plays their second game in 24 hours"
-  GOOD: "Home court advantage: Jokic averages 3.4 more PRA per game at Ball Arena vs on the road"
-  GOOD: "Wind blowing out to left at 19mph, temperatures at 79°F at Wrigley tonight"
-  BAD: "Situational factors support this pick" (zero specifics)
-
-  Rules: Each factor = one sentence. Each must include at least one specific number. Write like an expert analyst — insider data, not generic observations.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 CRITICAL — NEVER USE TRAINING KNOWLEDGE FOR ROSTERS:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 You are ONLY provided aggregate opponent defensive stats (avgAllowed, leagueAvg, pctVsLeague).
-You are NOT provided individual opposing player names or their current teams.
-NEVER name a specific player on the opposing team in any field. Player rosters change constantly — your training data is stale and will be wrong.
+NEVER name a specific player on the opposing team in any field. Player rosters change constantly.
 Only reference the opposing TEAM name and the aggregate defensive numbers you were given.
-BAD: "Anthony Davis is an elite rebounder for the Lakers" — you were not given this data, AD's team may have changed.
-GOOD: "Los Angeles allows 53.4 rebounds per game to opponents — 8% above league average."
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Respond with a JSON object — no markdown, no text outside the JSON:
@@ -112,19 +55,6 @@ Respond with a JSON object — no markdown, no text outside the JSON:
       "playerTeam": "<copy from edge 'team' field>",
       "matchupText": "<copy exactly from the edge 'matchup' field, then add ' · Tonight'>",
       "confidence": <integer — copy exactly from the edge confidence score>,
-      "chalky_headline": "<punchy one-liner with a specific stat, max 12 words>",
-      "chalky_projection": "Chalky's Proprietary Model projects <number> <stat type> tonight.",
-      "chalky_research": "<1-2 sentences with real numbers from the factors that drove the edge>",
-      "keyStats": [
-        { "label": "Model Projection", "value": "<proj> <stat>", "pct": <confidence> },
-        { "label": "Market Line",      "value": "<line> <stat>", "pct": 50 },
-        { "label": "Edge",             "value": "<+/->edge>",    "pct": <min(92, 50 + abs(edge)*5)> }
-      ],
-      "key_factors": [
-        "<specific factor with real number>",
-        "<specific factor with real number>",
-        "<specific factor with real number>"
-      ],
       "odds": {
         "draftkings": "<dk_odds from edge data, or 'N/A'>",
         "fanduel":    "<fd_odds from edge data, or 'N/A'>",
@@ -162,25 +92,6 @@ Respond with a JSON object in this EXACT format — no markdown, no text outside
       "pickType": "Spread" | "Total" | "Moneyline",
       "pick": "<e.g. 'Celtics -4.5' or 'Over 224.5' or 'Nuggets ML'>",
       "confidence": <integer 65–92>,
-      "shortReason": "<one punchy sentence, max 12 words, no period>",
-      "analysis": {
-        "summary": "<2-3 sentence overview of why this is a strong pick>",
-        "sections": [
-          { "title": "Why This Pick", "icon": "🎯", "content": "<2-3 sentences of core reasoning>" },
-          { "title": "Line Value",    "icon": "💰", "content": "<why the odds represent value>" },
-          { "title": "Key Risk",      "icon": "⚠️", "content": "<honest risk factor to watch>" }
-        ],
-        "keyStats": [
-          { "label": "<stat name, e.g. 'Home ATS Record'>", "value": "<e.g. '14-4'>", "pct": <integer 0-100 for bar visualisation> },
-          { "label": "<stat name>", "value": "<value>", "pct": <integer 0-100> },
-          { "label": "Model Confidence", "value": "<confidence>%", "pct": <same as confidence integer> }
-        ],
-        "trends": [
-          "<short trend bullet e.g. 'BOS 14-3 ATS at home this season'>",
-          "<short trend bullet>",
-          "<short trend bullet>"
-        ]
-      },
       "odds": {
         "draftkings": "<american odds or 'N/A' if not available>",
         "fanduel":    "<american odds or 'N/A'>",
