@@ -26,6 +26,18 @@ const STAT_PILLS = {
   WNBA:   [],
 };
 
+// Returns the correct display label for each sport + stat combination.
+// NBA shows per-game averages (PTS/G). NHL/MLB/Soccer show season totals or rate stats.
+const STAT_LABELS = {
+  NBA:    { PTS: 'PTS/G', REB: 'REB/G', AST: 'AST/G', '3PM': '3PM/G', STL: 'STL/G', BLK: 'BLK/G' },
+  NHL:    { G: 'Goals', A: 'Assists', PTS: 'Points', '+/-': '+/-', SOG: 'Shots' },
+  MLB:    { AVG: 'AVG', HR: 'HR', RBI: 'RBI', ERA: 'ERA', K: 'K' },
+  Soccer: { G: 'Goals', A: 'Assists', SOT: 'Shots on Target', MIN: 'Minutes' },
+};
+
+const getStatLabel = (league, stat) =>
+  STAT_LABELS[league]?.[stat] ?? stat;
+
 // ── Sub-components ─────────────────────────────────────────────────────────────
 
 function StaggerRow({ index, children }) {
@@ -283,7 +295,7 @@ export default function PlayersScreen({ navigation }) {
         {/* WNBA coming soon placeholder */}
         {league === 'WNBA' ? (
           <View style={styles.wnbaPlaceholder}>
-            <ChalkyMascot size={100} style={styles.wnbaAvatar} />
+            <ChalkyMascot size={200} style={styles.wnbaAvatar} />
             <Text style={styles.wnbaTitle}>WNBA Coming Soon</Text>
             <Text style={styles.wnbaText}>
               The WNBA season tips off in May. Chalky will have full coverage of picks, scores, and player stats when the season begins.
@@ -294,7 +306,7 @@ export default function PlayersScreen({ navigation }) {
             {/* League leaders */}
             <View style={styles.sectionHeader}>
               <Text style={styles.sectionTitle}>League Leaders</Text>
-              <Text style={styles.sectionStat}>{stat} / Game</Text>
+              <Text style={styles.sectionStat}>{getStatLabel(league, stat)}</Text>
             </View>
 
             <View style={styles.leadersList}>
