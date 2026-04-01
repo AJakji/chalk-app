@@ -1,11 +1,18 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View, Text, TouchableOpacity, Modal,
   ScrollView, StyleSheet, SafeAreaView,
+  LayoutAnimation, Platform, UIManager,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 
-// ── Schedule data (unchanged) ─────────────────────────────────────────────────
+// Enable LayoutAnimation on Android
+if (Platform.OS === 'android') {
+  UIManager.setLayoutAnimationEnabledExperimental &&
+    UIManager.setLayoutAnimationEnabledExperimental(true);
+}
+
+// ── Schedule data ─────────────────────────────────────────────────────────────
 
 const SCHEDULE_STEPS = [
   {
@@ -45,12 +52,13 @@ const SCHEDULE_STEPS = [
   },
 ];
 
-// ── Model data (tabbed) ───────────────────────────────────────────────────────
+// ── Model data ────────────────────────────────────────────────────────────────
 
 const MODEL_DATA = {
   NBA: {
     player: {
       intro: 'Every NBA player projection is the product of a multi-factor formula — not a single stat, not a gut call. The formula runs identically for every player in every game on the slate. Most outputs never become picks.',
+      note: 'On any given night the model evaluates every player in every NBA game. Most projections do not clear the threshold. The ones that do have a genuine mathematical edge — not a guess.',
       sections: [
         {
           icon: '📊',
@@ -84,7 +92,7 @@ const MODEL_DATA = {
           title: 'Edge and Confidence',
           items: [
             'Live lines are pulled from multiple books at 4 AM. The projection is compared against tonight\'s line — not yesterday\'s closing number. Edge = projection minus line.',
-            'Each stat has its own minimum edge threshold based on measured variance: Points requires +1.5, Rebounds requires +0.8, Assists requires +0.7. Anything below threshold is filtered. No edge means no pick — the output is discarded regardless of how clean the projection looks.',
+            'Each stat has its own minimum edge threshold based on measured variance: Points requires +1.5, Rebounds requires +0.8, Assists requires +0.7. Anything below threshold is filtered. No edge means no pick.',
             'Confidence is a ratio of edge size to the minimum threshold for that stat type. A 74% confidence pick has roughly 2.5× the minimum required edge. An 87% pick has 4×. The percentage is derived from the ratio — it is not a subjective score.',
           ],
         },
@@ -92,6 +100,7 @@ const MODEL_DATA = {
     },
     team: {
       intro: 'Spread and total picks run both teams through the full projection model independently. The outputs are compared against each other and against the market line. The market has to be meaningfully wrong for a pick to qualify.',
+      note: 'Both teams run through the same formula independently. The market has to be wrong by a minimum margin before a pick qualifies — most games do not produce one.',
       sections: [
         {
           icon: '📊',
@@ -116,7 +125,7 @@ const MODEL_DATA = {
           title: 'Edge and Confidence',
           items: [
             'Projected margin (home projection minus away projection) is compared directly to the spread. A projected margin of +6 against a spread of -3.5 is a +2.5 edge on the cover.',
-            'Spread picks require a minimum 1.5-point edge. Total picks require the projected combined score to differ from the over/under by at least 2 points. Anything inside those thresholds is too close to the market to be reliable.',
+            'Spread picks require a minimum 1.5-point edge. Total picks require the projected combined score to differ from the over/under by at least 2 points.',
             'Confidence for team picks uses the same ratio structure as player props — edge size divided by the minimum threshold, converted to a percentage and clamped between 60% and 95%.',
           ],
         },
@@ -126,12 +135,13 @@ const MODEL_DATA = {
   NHL: {
     player: {
       intro: 'NHL player props are the hardest to model in any sport. Ice time shifts without warning, line combinations rotate daily, and one goalie decision changes every shooter projection on the opposite team. The formula handles all of it — but it only runs after the starting goalie is confirmed.',
+      note: 'NHL is unpredictable by design. The model is built for it. Every factor is clamped so volatility does not produce false confidence — and no projection runs until the goalie is confirmed.',
       sections: [
         {
           icon: '📊',
           title: 'The Weighted Base',
           items: [
-            'Even strength and power play production are tracked as completely separate data streams. A player who generates 70% of his points on the power play is a fundamentally different projection than one who produces primarily at even strength — the formula does not combine these until the final output, so each component is weighted correctly.',
+            'Even strength and power play production are tracked as completely separate data streams. A player who generates 70% of his points on the power play is a fundamentally different projection than one who produces primarily at even strength — the formula does not combine these until the final output.',
             'Time on ice is projected per game based on the last 10 appearances, adjusted for line combination changes detected in morning skate reports. The TOI projection feeds directly into the counting stat formula — more ice time means proportionally higher shot and point ceilings.',
             'Linemate quality factor: being on a line with a top-6 forward increases shot and point production by a measured coefficient. The formula detects line combination changes and adjusts accordingly before the model runs at 4:30 AM.',
           ],
@@ -141,8 +151,8 @@ const MODEL_DATA = {
           title: 'Goalie Intelligence',
           items: [
             'No projection runs until the starting goalie is confirmed from morning skate reports. An unconfirmed starter is too risky to model around — if confirmation has not come by 4:00 AM the game is excluded from that morning\'s slate.',
-            'Each starting goalie\'s save percentage is compared to league average (.910) to produce a Goals Against Factor. A goalie at .895 — 1.5% below average — applies a 1.08 multiplier to the opposing team\'s goal projection. A goalie at .925 applies a 0.93 factor. The multiplier is clamped to prevent an outlier season from producing unrealistic outputs.',
-            'Backup confirmation triggers an automatic upward adjustment to all shooter props on the opposing team. Backups allow measurably more goals on a per-shot basis historically, and books are consistently slow to reprice lines when a backup is confirmed — that gap is where the edge comes from.',
+            'Each starting goalie\'s save percentage is compared to league average (.910) to produce a Goals Against Factor. A goalie at .895 applies a 1.08 multiplier to the opposing team\'s goal projection. A goalie at .925 applies a 0.93 factor. The multiplier is clamped to prevent outlier seasons from producing unrealistic outputs.',
+            'Backup confirmation triggers an automatic upward adjustment to all shooter props on the opposing team. Books are consistently slow to reprice lines when a backup is confirmed — that gap is where the edge comes from.',
           ],
         },
         {
@@ -151,13 +161,14 @@ const MODEL_DATA = {
           items: [
             'Shots on goal uses a 0.8 minimum edge — a tighter threshold than point props because shot volume is more volatile and the variance requires a larger cushion to produce reliable picks.',
             'Goals and assists use a 0.3 minimum edge — lower threshold because the lines are already low integers and even a 0.3 delta represents a meaningful percentage edge over the market.',
-            'Lines are pulled live at 4 AM and the model runs at 4:30 AM after goalie confirmation. The 30-minute window between data pull and model run is intentional — it catches any late line movement before the projection is finalized.',
+            'Lines are pulled live at 4 AM and the model runs at 4:30 AM after goalie confirmation. The 30-minute window catches any late line movement before the projection is finalized.',
           ],
         },
       ],
     },
     team: {
       intro: 'Puck line and total picks run the same formula as player props but at the team level — goalie quality on both sides, offensive depth, and pace of play all combine into a single projected goal total for each team.',
+      note: 'Goalie quality is the single biggest driver of NHL team picks. When a backup is confirmed and the line has not moved, that is where the edge lives.',
       sections: [
         {
           icon: '📊',
@@ -165,7 +176,7 @@ const MODEL_DATA = {
           items: [
             'Each team\'s offensive output is projected independently using goals scored per game over the last 5 and 10 games with weighted coefficients. Recent form carries more weight than the season total — a team on a 4-game cold stretch is modeled as weaker than their season goals-for average suggests.',
             'Home and away splits are tracked separately. NHL home ice advantage is statistically significant and the formula measures it per team rather than applying a league-average assumption.',
-            'The combined projected total is derived from both teams\' offensive projections — not from historical over/under data. Each team\'s number feeds the total independently so both sides of the matchup are accounted for correctly.',
+            'The combined projected total is derived from both teams\' offensive projections — not from historical over/under data. Each team\'s number feeds the total independently.',
           ],
         },
         {
@@ -182,7 +193,7 @@ const MODEL_DATA = {
           title: 'Edge and Confidence',
           items: [
             'Projected goal differential (home minus away) is compared to the puck line (-1.5). A team projected to win by 2.1 goals has a +0.6 edge on the puck line — that clears the minimum threshold of 0.4.',
-            'Total picks require a 0.8-goal edge over the over/under. NHL totals are typically set between 5.5 and 6.5 goals — an 0.8-goal delta represents a meaningful edge at that scale.',
+            'Total picks require a 0.8-goal edge over the over/under. NHL totals are typically set between 5.5 and 6.5 goals — a 0.8-goal delta represents a meaningful edge at that scale.',
             'Confidence is computed the same way as player props: edge divided by minimum threshold, converted to percentage, clamped between 60% and 95%.',
           ],
         },
@@ -191,23 +202,24 @@ const MODEL_DATA = {
   },
   MLB: {
     player: {
-      intro: 'Baseball is the most data-rich sport in the model. Every projection pulls from Statcast pitch-level data, umpire zone tendencies, live weather readings, ballpark coefficients, and platoon splits that most bettors never think about. The formula has more inputs than any other sport and the edge thresholds are set accordingly.',
+      intro: 'Baseball is the most data-rich sport in the model. Every projection pulls from Statcast pitch-level data, umpire zone tendencies, live weather readings, ballpark coefficients, and platoon splits that most bettors never think about.',
+      note: 'Baseball has the richest data in sports. More inputs means more edges — and more places for books to be wrong.',
       sections: [
         {
           icon: '⚾',
           title: 'The Weighted Base',
           items: [
             'The base uses ISO (Isolated Power = slugging minus batting average) rather than raw slugging to measure true power output without inflating for singles contact. ISO is weighted across the last 15 and 30 games with recent form carrying a higher coefficient.',
-            'BABIP (Batting Average on Balls In Play) is tracked to separate luck from skill. A batter with a BABIP well above his career average is likely due to regression — the formula detects this and moderates the base projection so the model is not chasing a hot streak that the market has already priced in.',
-            'Platoon splits are applied as a hard multiplier: every batter\'s historical performance against same-handed and opposite-handed pitching is computed separately and the correct split is used for tonight\'s matchup. Books frequently misprice platoon edges — it is one of the most consistent sources of +EV in baseball props.',
+            'BABIP (Batting Average on Balls In Play) is tracked to separate luck from skill. A batter with a BABIP well above his career average is likely due to regression — the formula detects this and moderates the base projection so the model is not chasing a hot streak the market has already priced in.',
+            'Platoon splits are applied as a hard multiplier: every batter\'s historical performance against same-handed and opposite-handed pitching is computed separately and the correct split is used for tonight\'s matchup.',
           ],
         },
         {
           icon: '🔥',
           title: 'Pitcher and Matchup Factors',
           items: [
-            'FIP (Fielding Independent Pitching) is used instead of ERA for pitcher evaluation. ERA includes defensive support which the pitcher does not control — FIP isolates strikeouts, walks, and home runs allowed, which are the outcomes the pitcher actually determines. A pitcher with a good ERA but a worse FIP is weaker than his numbers suggest.',
-            'Pitch mix analysis: fastball velocity trend over the last 5 starts (velocity decline is a warning sign), breaking ball usage rate, and whiff rate per pitch type are all measured. The specific batter\'s historical whiff rate against that pitch type is applied as a multiplier — some hitters are genuinely elite against breaking balls and terrible against velocity.',
+            'FIP (Fielding Independent Pitching) is used instead of ERA for pitcher evaluation. ERA includes defensive support which the pitcher does not control — FIP isolates strikeouts, walks, and home runs allowed, which are the outcomes the pitcher actually determines.',
+            'Pitch mix analysis: fastball velocity trend over the last 5 starts, breaking ball usage rate, and whiff rate per pitch type are all measured. The specific batter\'s historical whiff rate against that pitch type is applied as a multiplier — some hitters are genuinely elite against breaking balls and terrible against velocity.',
             'The matchup produces a projected strikeout rate and hits-allowed rate for the pitcher, which directly drives the opposing batter\'s hit and total bases projections.',
           ],
         },
@@ -215,16 +227,16 @@ const MODEL_DATA = {
           icon: '🌤️',
           title: 'Environmental Coefficients',
           items: [
-            'Wind speed and direction are pulled from tonight\'s venue forecast. Wind blowing out at 15+ mph applies a home run multiplier derived from historical run environment data at that specific park under those conditions. Wind in suppresses offense — the coefficient of restitution of a baseball changes with temperature and the formula accounts for it.',
-            'Temperature factor: cold games below 50°F apply a downward multiplier to all offensive projections based on measured historical differences in ball carry at temperature. This is not a rough estimate — it is a coefficient derived from Statcast exit velocity data segmented by game-time temperature.',
-            'Umpire zone tendencies: every active umpire has a measured called-strike-rate vs league average. A tight-zone umpire who calls 4% fewer strikes than average directly suppresses strikeout props for starting pitchers and increases walk props. The umpire factor is applied as a multiplier to all pitcher strikeout projections before edge detection.',
+            'Wind speed and direction are pulled from tonight\'s venue forecast. Wind blowing out at 15+ mph applies a home run multiplier derived from historical run environment data at that specific park. The coefficient of restitution of a baseball changes with temperature and the formula accounts for it.',
+            'Temperature factor: cold games below 50°F apply a downward multiplier to all offensive projections based on measured historical differences in ball carry at temperature — derived from Statcast exit velocity data segmented by game-time temperature.',
+            'Umpire zone tendencies: every active umpire has a measured called-strike-rate vs league average. A tight-zone umpire directly suppresses strikeout props for starting pitchers. The umpire factor is applied as a multiplier to all pitcher strikeout projections before edge detection.',
           ],
         },
         {
           icon: '🎯',
           title: 'Edge and Confidence',
           items: [
-            'Each stat has a minimum edge threshold set by its variance: Hits +0.3, Total Bases +0.5, Home Runs +0.2, Strikeouts (pitcher) +0.8. The strikeout threshold is highest because variance is highest — a single bad inning can move a strikeout total by 2 or 3 units so the model requires a larger cushion.',
+            'Each stat has a minimum edge threshold set by its variance: Hits +0.3, Total Bases +0.5, Home Runs +0.2, Strikeouts (pitcher) +0.8. The strikeout threshold is highest because variance is highest — a single bad inning can move the total by 2 or 3 units.',
             'All lines are pulled live at 4 AM before the model runs. Overnight line movement from sharp action is captured — a line that has moved significantly from open is flagged and the edge is recalculated against the current number.',
             'Confidence follows the same ratio structure: edge divided by minimum threshold, converted to percentage, clamped between 60% and 95%.',
           ],
@@ -233,23 +245,24 @@ const MODEL_DATA = {
     },
     team: {
       intro: 'Run line and total picks combine starting pitcher quality, bullpen depth, offensive run scoring rate, and environmental factors into a projected final score for each team. The market sets the line — the model has to beat it by a minimum margin to generate a pick.',
+      note: 'Most games produce no qualifying team picks. The model runs all of them — the threshold filters everything else out.',
       sections: [
         {
           icon: '📊',
           title: 'The Weighted Base',
           items: [
-            'Starting pitcher FIP drives the opposing team\'s run projection. A pitcher with a recent FIP of 3.1 is a meaningfully stronger suppressor than one at 4.4 and the formula weights both the season FIP and the last-5-starts FIP with a recency coefficient.',
-            'Bullpen fatigue is tracked at the individual reliever level — a closer or setup man who threw 30+ pitches yesterday has a reduced availability and effectiveness coefficient for tonight. The team\'s bullpen depth rating is adjusted dynamically based on who is likely unavailable.',
-            'Team runs scored per game uses the same weighted rolling window as player props — 5 and 15-game windows with recent form carrying a higher coefficient. Offensive variance in baseball is high enough that season averages mislead more than they help.',
+            'Starting pitcher FIP drives the opposing team\'s run projection. A pitcher with a recent FIP of 3.1 is a meaningfully stronger suppressor than one at 4.4 — the formula weights both the season FIP and the last-5-starts FIP with a recency coefficient.',
+            'Bullpen fatigue is tracked at the individual reliever level — a closer or setup man who threw 30+ pitches yesterday has a reduced availability and effectiveness coefficient for tonight. The team\'s bullpen depth rating is adjusted dynamically.',
+            'Team runs scored per game uses the same weighted rolling window as player props — 5 and 15-game windows with recent form carrying a higher coefficient.',
           ],
         },
         {
           icon: '🌤️',
           title: 'Park and Environment',
           items: [
-            'Every MLB ballpark has a run factor coefficient built into the model — Coors Field at elevation projects 12-15% more runs than the same matchup at Petco Park or Oracle Park. The coefficient is derived from multi-year run environment data at each venue, not from generic park factor tables.',
-            'Wind and temperature are applied to the total projection for tonight specifically. A hot game at a hitter-friendly park with wind blowing out produces a different total than the same matchup on a cold night with wind in — the formula handles both.',
-            'Umpire run environment tendencies are applied at the game level. Some umpires consistently produce high or low scoring environments across their career — these tendencies are measured and applied as a multiplier to the total projection.',
+            'Every MLB ballpark has a run factor coefficient built into the model — Coors Field at elevation projects 12-15% more runs than the same matchup at Petco Park or Oracle Park. The coefficient is derived from multi-year run environment data at each venue.',
+            'Wind and temperature are applied to the total projection for tonight specifically. A hot game at a hitter-friendly park with wind blowing out produces a different total than the same matchup on a cold night with wind in.',
+            'Umpire run environment tendencies are applied at the game level. Some umpires consistently produce high or low scoring environments across their career — these are measured and applied as a multiplier to the total projection.',
           ],
         },
         {
@@ -258,7 +271,7 @@ const MODEL_DATA = {
           items: [
             'Projected run margin versus the run line (-1.5): minimum 0.5-run edge required. A team projected to win by 2.3 runs has a +0.8 edge — that clears the threshold.',
             'Projected combined total versus the over/under: minimum 1.0-run edge required. Baseball total variance is high enough that anything inside 1 run is indistinguishable from noise.',
-            'Most games produce no qualifying team picks. The model runs every game and produces projections for all of them — but the vast majority sit too close to the line to qualify. When a team pick appears, it cleared a real threshold.',
+            'Most games produce no qualifying team picks. The model runs every game and produces projections for all of them — but the vast majority sit too close to the line to qualify.',
           ],
         },
       ],
@@ -266,40 +279,172 @@ const MODEL_DATA = {
   },
 };
 
-// ── ModelContent subcomponent ─────────────────────────────────────────────────
+// ── Accordion section ─────────────────────────────────────────────────────────
 
-function ModelContent({ league, type }) {
-  const data = MODEL_DATA[league]?.[type];
-  if (!data) return null;
-
+function AccordionSection({ section, isOpen, onToggle }) {
   return (
-    <View style={styles.contentWrapper}>
-      <Text style={styles.intro}>{data.intro}</Text>
+    <View style={acc.wrapper}>
+      <TouchableOpacity style={acc.header} onPress={onToggle} activeOpacity={0.7}>
+        <View style={acc.headerLeft}>
+          <Text style={acc.icon}>{section.icon}</Text>
+          <Text style={acc.title}>{section.title}</Text>
+        </View>
+        <Text style={[acc.chevron, isOpen && acc.chevronOpen]}>›</Text>
+      </TouchableOpacity>
 
-      {data.sections.map((section, i) => (
-        <View key={i} style={styles.section}>
-          <View style={styles.sectionHeader}>
-            <Text style={styles.sectionIcon}>{section.icon}</Text>
-            <Text style={styles.sectionTitle}>{section.title}</Text>
-          </View>
-          {section.items.map((item, j) => (
-            <View key={j} style={styles.itemRow}>
-              <View style={styles.dot} />
-              <Text style={styles.itemText}>{item}</Text>
+      {isOpen && (
+        <View style={acc.content}>
+          {section.items.map((item, i) => (
+            <View key={i} style={acc.itemRow}>
+              <View style={acc.dot} />
+              <Text style={acc.itemText}>{item}</Text>
             </View>
           ))}
         </View>
+      )}
+
+      <View style={acc.divider} />
+    </View>
+  );
+}
+
+// ── ModelContent subcomponent ─────────────────────────────────────────────────
+
+function ModelContent({ league, type }) {
+  const [openIndex, setOpenIndex] = useState(0);
+
+  useEffect(() => {
+    setOpenIndex(0);
+  }, [league, type]);
+
+  const data = MODEL_DATA[league]?.[type];
+  if (!data) return null;
+
+  const handleToggle = (index) => {
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setOpenIndex(openIndex === index ? null : index);
+  };
+
+  return (
+    <View style={acc.container}>
+      <Text style={acc.intro}>{data.intro}</Text>
+
+      {data.sections.map((section, i) => (
+        <AccordionSection
+          key={i}
+          section={section}
+          isOpen={openIndex === i}
+          onToggle={() => handleToggle(i)}
+        />
       ))}
 
-      <View style={styles.edgeNote}>
-        <Text style={styles.edgeNoteIcon}>🎯</Text>
-        <Text style={styles.edgeNoteText}>
-          On a typical night the model evaluates hundreds of players across every game on the slate. Each one runs through the full formula. A fraction clear every filter and produce a real edge over the market line. The ones that do are here because the math said so — not because a human picked them.
-        </Text>
+      <View style={acc.note}>
+        <Text style={acc.noteIcon}>🎯</Text>
+        <Text style={acc.noteText}>{data.note}</Text>
       </View>
     </View>
   );
 }
+
+// ── Accordion styles ──────────────────────────────────────────────────────────
+
+const acc = StyleSheet.create({
+  container: {
+    paddingHorizontal: 20,
+    paddingTop: 12,
+    paddingBottom: 32,
+  },
+  intro: {
+    color: '#888888',
+    fontSize: 13,
+    lineHeight: 20,
+    marginBottom: 16,
+  },
+  wrapper: {},
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 14,
+  },
+  headerLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    flex: 1,
+  },
+  icon: {
+    fontSize: 16,
+    width: 24,
+    textAlign: 'center',
+  },
+  title: {
+    color: '#F5F5F0',
+    fontSize: 14,
+    fontWeight: '700',
+    flex: 1,
+  },
+  chevron: {
+    color: '#3a3a3a',
+    fontSize: 20,
+    fontWeight: '300',
+    marginLeft: 8,
+    lineHeight: 22,
+  },
+  chevronOpen: {
+    color: '#00E87A',
+    transform: [{ rotate: '90deg' }],
+  },
+  content: {
+    paddingLeft: 34,
+    paddingBottom: 14,
+    paddingRight: 4,
+  },
+  itemRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+    marginBottom: 10,
+  },
+  dot: {
+    width: 4,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: '#2a2a2a',
+    marginTop: 8,
+    flexShrink: 0,
+  },
+  itemText: {
+    flex: 1,
+    color: '#888888',
+    fontSize: 13,
+    lineHeight: 20,
+  },
+  divider: {
+    height: 1,
+    backgroundColor: '#141414',
+  },
+  note: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+    backgroundColor: '#0f0f0f',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#1e1e1e',
+    padding: 14,
+    marginTop: 20,
+  },
+  noteIcon: {
+    fontSize: 14,
+  },
+  noteText: {
+    flex: 1,
+    color: '#888888',
+    fontSize: 12,
+    lineHeight: 18,
+  },
+});
 
 // ── Main component ────────────────────────────────────────────────────────────
 
@@ -595,74 +740,6 @@ const styles = StyleSheet.create({
   // Content area
   contentArea: {
     flex: 1,
-  },
-  contentWrapper: {
-    paddingHorizontal: 20,
-    paddingTop: 16,
-    paddingBottom: 40,
-  },
-  intro: {
-    color: '#888888',
-    fontSize: 13,
-    lineHeight: 20,
-    marginBottom: 20,
-  },
-  section: {
-    marginBottom: 20,
-  },
-  sectionHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    marginBottom: 10,
-  },
-  sectionIcon: {
-    fontSize: 16,
-  },
-  sectionTitle: {
-    color: '#F5F5F0',
-    fontSize: 14,
-    fontWeight: '700',
-  },
-  itemRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 10,
-    marginBottom: 7,
-  },
-  dot: {
-    width: 4,
-    height: 4,
-    borderRadius: 2,
-    backgroundColor: '#3a3a3a',
-    marginTop: 8,
-    flexShrink: 0,
-  },
-  itemText: {
-    flex: 1,
-    color: '#888888',
-    fontSize: 13,
-    lineHeight: 20,
-  },
-  edgeNote: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 10,
-    backgroundColor: '#0f0f0f',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#1e1e1e',
-    padding: 14,
-    marginTop: 8,
-  },
-  edgeNoteIcon: {
-    fontSize: 16,
-  },
-  edgeNoteText: {
-    flex: 1,
-    color: '#888888',
-    fontSize: 13,
-    lineHeight: 20,
   },
 
   bottomPad: {
