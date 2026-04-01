@@ -26,7 +26,7 @@ COLUMN MAPPING (player_game_logs):
 
 Usage:
   python mlbDataCollector.py                    # incremental: only new games
-  python mlbDataCollector.py --full             # all 4 seasons from scratch
+  python mlbDataCollector.py --full             # all 4 seasons, force re-process (fixes empty rows)
   python mlbDataCollector.py --season 2024      # single season only
 """
 
@@ -401,7 +401,7 @@ def upsert_player_game_log(conn, player_id: int, player_name: str, team: str,
 
 # ── Collection runner ──────────────────────────────────────────────────────────
 
-def collect_season(conn, year: int):
+def collect_season(conn, year: int, force: bool = False):
     """Collect all player game logs for a single MLB season year (int)."""
     log.info(f'\n--- Season {year} ---')
     players = fetch_active_players(year)
@@ -459,8 +459,8 @@ def collect_season(conn, year: int):
                 log.warning(f'    Bad date: {gd_str}')
                 continue
 
-            # Skip games already stored (incremental mode)
-            if cutoff and gd <= cutoff:
+            # Skip games already stored (incremental mode); --full bypasses this
+            if not force and cutoff and gd <= cutoff:
                 continue
 
             try:
@@ -486,13 +486,18 @@ def main():
     parser.add_argument(
         '--full',
         action='store_true',
-        help='Force full collection for all 4 seasons (ignores incremental cutoff)',
+        help='Re-process all 4 seasons, bypassing incremental cutoff (fixes empty team/opponent rows)',
     )
     parser.add_argument(
         '--season',
         type=int,
         metavar='YEAR',
         help='Collect a single season only, e.g. --season 2024',
+    )
+    parser.add_argument(
+        '--force',
+        action='store_true',
+        help='Re-process all rows even if already stored (use with --season to fix empty team/opponent)',
     )
     args = parser.parse_args()
 
@@ -511,8 +516,9 @@ def main():
 
     conn = get_db()
     try:
+        force = args.full or args.force  # --full or --force re-processes all rows
         for year in seasons_to_run:
-            collect_season(conn, year)
+            collect_season(conn, year, force=force)
     finally:
         conn.close()
 
