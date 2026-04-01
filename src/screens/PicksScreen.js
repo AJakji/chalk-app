@@ -18,6 +18,7 @@ import ChalkyLogo from '../components/ChalkyLogo';
 import { fetchPicksForTab, fetchPickCounts } from '../services/api';
 import { useProStatus } from '../hooks/useProStatus';
 import { usePaywall } from '../context/PaywallContext';
+import PicksInfoButtons from '../components/PicksInfoButtons';
 import { isBeforePicksTime, getPicksCountdown, getPicksReleaseTime } from '../utils/timeUtils';
 
 const TABS = ["Chalky's Picks", 'NBA', 'MLB', 'NHL', 'Soccer', 'WNBA'];
@@ -69,11 +70,11 @@ function StaggeredItem({ index, children }) {
 }
 
 // Header for the Chalky's Picks tab
-function ChalkysPicksHeader({ date, totalCount, highConfCount }) {
+function ChalkysPicksHeader({ date }) {
   return (
     <View style={styles.chalkysHeader}>
       <View style={styles.chalkysAvatarRow}>
-        <ChalkyFace size={44} style={styles.chalkysAvatar} />
+        <ChalkyFace size={40} style={styles.chalkysAvatar} />
         <View style={styles.chalkysHeaderText}>
           <Text style={styles.chalkysTitle}>Today's Best 7</Text>
           <Text style={styles.chalkysDate}>{date}</Text>
@@ -82,17 +83,7 @@ function ChalkysPicksHeader({ date, totalCount, highConfCount }) {
       <Text style={styles.chalkysSubtext}>
         Chalky's highest confidence picks across all leagues and props today
       </Text>
-      <View style={styles.chalkysStats}>
-        <View style={styles.chalkysStatItem}>
-          <Text style={styles.chalkysStatNum}>{totalCount}</Text>
-          <Text style={styles.chalkysStatLabel}>Picks Today</Text>
-        </View>
-        <View style={styles.chalkysStatDivider} />
-        <View style={styles.chalkysStatItem}>
-          <Text style={[styles.chalkysStatNum, { color: colors.green }]}>{highConfCount}</Text>
-          <Text style={styles.chalkysStatLabel}>High Confidence</Text>
-        </View>
-      </View>
+      <PicksInfoButtons />
     </View>
   );
 }
@@ -212,7 +203,7 @@ export default function PicksScreen() {
               activeOpacity={0.75}
             >
               {isChalky && (
-                <ChalkyFace size={16} style={styles.tabChalkyAvatar} />
+                <ChalkyFace size={32} style={styles.tabChalkyAvatar} />
               )}
               <Text style={[
                 styles.tabText,
@@ -233,7 +224,7 @@ export default function PicksScreen() {
       {/* Content */}
       {activeTab === 'WNBA' ? (
         <View style={styles.centered}>
-          <ChalkyMascot size={100} style={styles.emptyImage} />
+          <ChalkyMascot size={200} style={styles.emptyImage} />
           <Text style={styles.emptyTitle}>WNBA Coming Soon</Text>
           <Text style={styles.emptyText}>
             The WNBA season tips off in May. Chalky will have full coverage of picks, scores, and player stats when the season begins.
@@ -242,7 +233,7 @@ export default function PicksScreen() {
       ) : isBeforePicksTime() ? (
         // ── Waiting screen: shown before 7 AM ET regardless of DB state ──────
         <View style={styles.centered}>
-          <ChalkyMascot size={100} style={styles.emptyImage} />
+          <ChalkyMascot size={200} style={styles.emptyImage} />
           <Text style={styles.emptyTitle}>Picks drop at {getPicksReleaseTime()}</Text>
           <Text style={styles.countdownText}>{countdown}</Text>
           <Text style={styles.emptyText}>
@@ -257,7 +248,7 @@ export default function PicksScreen() {
         </View>
       ) : error ? (
         <View style={styles.centered}>
-          <ChalkyMascot size={100} style={styles.emptyImage} />
+          <ChalkyMascot size={200} style={styles.emptyImage} />
           <Text style={styles.emptyTitle}>Can't reach the server.</Text>
           <Text style={styles.emptyText}>Check your connection and try again.</Text>
           <TouchableOpacity style={styles.retryBtn} onPress={() => loadPicks(activeTab)}>
@@ -267,7 +258,7 @@ export default function PicksScreen() {
       ) : picks.length === 0 ? (
         // ── After 7 AM with no picks = pipeline issue, not waiting ───────────
         <View style={styles.centered}>
-          <ChalkyMascot size={100} style={styles.emptyImage} />
+          <ChalkyMascot size={200} style={styles.emptyImage} />
           <Text style={styles.emptyTitle}>No picks yet today.</Text>
           <Text style={styles.emptyText}>Chalky's still working on it. Check back shortly.</Text>
           <TouchableOpacity style={styles.retryBtn} onPress={() => loadPicks(activeTab)}>
@@ -280,11 +271,7 @@ export default function PicksScreen() {
           keyExtractor={(item) => item.id}
           ListHeaderComponent={
             activeTab === "Chalky's Picks" ? (
-              <ChalkysPicksHeader
-                date={today}
-                totalCount={picks.length}
-                highConfCount={highConfCount}
-              />
+              <ChalkysPicksHeader date={today} />
             ) : null
           }
           renderItem={({ item, index }) => {
@@ -370,13 +357,14 @@ const styles = StyleSheet.create({
   tab: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: spacing.md,
+    paddingLeft: 6,
+    paddingRight: spacing.md,
     paddingVertical: 7,
     borderRadius: radius.full,
     backgroundColor: colors.surface,
     borderWidth: 1,
     borderColor: colors.border,
-    gap: 5,
+    gap: 3,
   },
   tabActive: {
     backgroundColor: colors.offWhite,
@@ -386,7 +374,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.green + '22',
     borderColor: colors.green,
   },
-  tabChalkyAvatar: { width: 16, height: 16, borderRadius: 8 },
+  tabChalkyAvatar: { width: 32, height: 32, borderRadius: 16, marginVertical: -5 },
   tabText: { fontSize: 13, fontWeight: '600', color: colors.grey },
   tabTextActive: { color: colors.background },
   tabTextActiveChalky: { color: colors.green },
@@ -413,7 +401,7 @@ const styles = StyleSheet.create({
   chalkysHeader: {
     backgroundColor: colors.surface,
     borderRadius: radius.lg,
-    padding: spacing.md,
+    padding: spacing.sm,
     marginBottom: spacing.md,
     borderWidth: 1,
     borderColor: colors.green + '33',
@@ -421,27 +409,15 @@ const styles = StyleSheet.create({
     borderLeftColor: colors.green,
   },
   chalkysAvatarRow: {
-    flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.sm,
+    flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.xs,
   },
-  chalkysAvatar: { width: 44, height: 44, borderRadius: 22 },
+  chalkysAvatar: { width: 40, height: 40, borderRadius: 20 },
   chalkysHeaderText: { flex: 1 },
-  chalkysTitle: { fontSize: 18, fontWeight: '800', color: colors.offWhite },
-  chalkysDate: { fontSize: 12, color: colors.grey, marginTop: 1 },
+  chalkysTitle: { fontSize: 15, fontWeight: '800', color: colors.offWhite },
+  chalkysDate: { fontSize: 11, color: colors.grey, marginTop: 1 },
   chalkysSubtext: {
-    fontSize: 13, color: colors.grey, lineHeight: 18, marginBottom: spacing.md,
+    fontSize: 12, color: colors.grey, lineHeight: 17, marginBottom: spacing.sm,
   },
-  chalkysStats: {
-    flexDirection: 'row',
-    backgroundColor: colors.background,
-    borderRadius: radius.md,
-    padding: spacing.sm,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  chalkysStatItem: { flex: 1, alignItems: 'center' },
-  chalkysStatNum: { fontSize: 18, fontWeight: '800', color: colors.offWhite },
-  chalkysStatLabel: { fontSize: 9, color: colors.grey, textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 1, textAlign: 'center' },
-  chalkysStatDivider: { width: 1, backgroundColor: colors.border },
   // List
   listContent: {
     paddingHorizontal: spacing.md,
