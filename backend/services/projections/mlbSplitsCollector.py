@@ -125,8 +125,6 @@ def get_qualified_batters(conn, season):
 
 def run():
     season = date.today().year
-    if season > 2025:
-        season = 2025
 
     print(f"[SplitsCollector] Collecting batter splits for {season} season")
     conn = psycopg2.connect(DATABASE_URL)

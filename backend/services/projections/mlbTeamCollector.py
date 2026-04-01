@@ -44,7 +44,7 @@ log = logging.getLogger(__name__)
 
 DATABASE_URL = os.getenv('DATABASE_URL', '')
 BASE_URL     = 'https://statsapi.mlb.com/api/v1'
-SEASONS      = [2023, 2024, 2025]
+SEASONS      = [2023, 2024, 2025, 2026]
 DELAY        = 0.3   # seconds between API calls
 
 # All 30 MLB team IDs
@@ -232,7 +232,7 @@ def upsert_team_game_logs(conn, rows: list[dict]) -> int:
 
 def main():
     parser = argparse.ArgumentParser(description='Chalk MLB Team Data Collector')
-    parser.add_argument('--full',   action='store_true', help='Collect all seasons (2023-2025)')
+    parser.add_argument('--full',   action='store_true', help='Collect all seasons (2023-2026)')
     parser.add_argument('--season', type=int, default=None, help='Single season year e.g. 2024')
     args = parser.parse_args()
 
@@ -241,7 +241,7 @@ def main():
     elif args.season:
         seasons = [args.season]
     else:
-        seasons = [2025]
+        seasons = [SEASONS[-1]]  # default: current season
 
     log.info('═══════════════════════════════════════════════════')
     log.info(f'Chalk MLB Team Collector — seasons: {seasons}')

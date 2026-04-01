@@ -76,8 +76,6 @@ def fetch_arsenal(pitcher_id, season):
 
 def run():
     season = date.today().year
-    if season > 2025:
-        season = 2025  # cap at 2025 until 2026 data available
 
     print(f"[ArsenalCollector] Collecting pitch arsenals for {season} season")
     pitchers = get_sps_next_3_days()
