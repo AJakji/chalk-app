@@ -966,12 +966,18 @@ def project_player(
     }
 
     # ────────────────────────────────────────────────────────────────────────
-    # COMBO PROPS (archetype correlation)
+    # COMBO PROPS — no correlation discount applied.
+    # Sportsbooks set PRA/PR/PA/AR lines at approximately the sum of individual
+    # prop lines (P_line + R_line + A_line ≈ PRA_line). Applying an archetype
+    # correlation discount here creates a systematic ~5–18% under-projection vs
+    # market that causes the sanity check to block every combo prop. The market
+    # already prices in correlation when setting the combined line, so the model
+    # should project at the raw sum to compare on equal footing.
     # ────────────────────────────────────────────────────────────────────────
     corr = COMBO_CORRELATIONS.get(archetype, COMBO_CORRELATIONS[ROLE_PLAYER])
 
     # PRA = pts + reb + ast
-    proj_pra  = (proj_pts + proj_reb + proj_ast) * corr['pra']
+    proj_pra  = proj_pts + proj_reb + proj_ast
     conf_pra  = calculate_confidence(0.0, 'pra', 'NBA', len(logs)) or 62
     factors_pra = {
         'proj_pts': round(proj_pts, 2), 'proj_reb': round(proj_reb, 2),
@@ -980,7 +986,7 @@ def project_player(
     }
 
     # P+R
-    proj_pr   = (proj_pts + proj_reb) * corr['pr']
+    proj_pr   = proj_pts + proj_reb
     conf_pr   = calculate_confidence(0.0, 'pr', 'NBA', len(logs)) or 62
     factors_pr = {
         'proj_pts': round(proj_pts, 2), 'proj_reb': round(proj_reb, 2),
@@ -988,7 +994,7 @@ def project_player(
     }
 
     # P+A
-    proj_pa   = (proj_pts + proj_ast) * corr['pa']
+    proj_pa   = proj_pts + proj_ast
     conf_pa   = calculate_confidence(0.0, 'pa', 'NBA', len(logs)) or 62
     factors_pa = {
         'proj_pts': round(proj_pts, 2), 'proj_ast': round(proj_ast, 2),
@@ -996,7 +1002,7 @@ def project_player(
     }
 
     # A+R
-    proj_ar   = (proj_ast + proj_reb) * corr['ar']
+    proj_ar   = proj_ast + proj_reb
     conf_ar   = calculate_confidence(0.0, 'ar', 'NBA', len(logs)) or 62
     factors_ar = {
         'proj_ast': round(proj_ast, 2), 'proj_reb': round(proj_reb, 2),
