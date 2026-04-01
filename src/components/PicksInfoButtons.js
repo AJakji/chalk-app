@@ -6,6 +6,24 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import ChalkyMascot from './ChalkyMascot';
+import { LinearGradient } from 'expo-linear-gradient';
+import MaskedView from '@react-native-masked-view/masked-view';
+
+// ── Gold gradient text ────────────────────────────────────────────────────────
+
+function GoldText({ style, children }) {
+  return (
+    <MaskedView maskElement={<Text style={style}>{children}</Text>}>
+      <LinearGradient
+        colors={['#C8960C', '#FFD700', '#FFF0A0', '#FFD700', '#C8960C']}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 0 }}
+      >
+        <Text style={[style, { opacity: 0 }]}>{children}</Text>
+      </LinearGradient>
+    </MaskedView>
+  );
+}
 
 // Enable LayoutAnimation on Android
 if (Platform.OS === 'android') {
@@ -481,7 +499,7 @@ export default function PicksInfoButtons() {
           activeOpacity={0.75}
         >
           <Ionicons name="time-outline" size={14} color="#888888" />
-          <Text style={styles.infoBtnText}>How picks are made</Text>
+          <GoldText style={styles.infoBtnText}>How picks are made</GoldText>
           <Ionicons name="chevron-forward" size={12} color="#3a3a3a" />
         </TouchableOpacity>
 
@@ -491,7 +509,7 @@ export default function PicksInfoButtons() {
           activeOpacity={0.75}
         >
           <Ionicons name="analytics-outline" size={14} color="#888888" />
-          <Text style={styles.infoBtnText}>What goes into a pick</Text>
+          <GoldText style={styles.infoBtnText}>What goes into a pick</GoldText>
           <Ionicons name="chevron-forward" size={12} color="#3a3a3a" />
         </TouchableOpacity>
       </View>
