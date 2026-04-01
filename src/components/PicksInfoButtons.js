@@ -7,27 +7,6 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import ChalkyMascot from './ChalkyMascot';
 import { LinearGradient } from 'expo-linear-gradient';
-import MaskedView from '@react-native-masked-view/masked-view';
-
-// ── Gold gradient text ────────────────────────────────────────────────────────
-
-function GoldText({ style, children }) {
-  const flat = StyleSheet.flatten(style) || {};
-  const { flex, ...textStyle } = flat;
-  return (
-    <View style={flex != null ? { flex } : null}>
-      <MaskedView maskElement={<Text style={textStyle}>{children}</Text>}>
-        <LinearGradient
-          colors={['#C8960C', '#FFD700', '#FFF0A0', '#FFD700', '#C8960C']}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 0 }}
-        >
-          <Text style={[textStyle, { opacity: 0 }]}>{children}</Text>
-        </LinearGradient>
-      </MaskedView>
-    </View>
-  );
-}
 
 // Enable LayoutAnimation on Android
 if (Platform.OS === 'android') {
@@ -498,23 +477,37 @@ export default function PicksInfoButtons() {
     <>
       <View style={styles.buttonRow}>
         <TouchableOpacity
-          style={styles.infoBtn}
+          style={styles.infoBtnOuter}
           onPress={() => setScheduleVisible(true)}
           activeOpacity={0.75}
         >
-          <Ionicons name="time-outline" size={14} color="#888888" />
-          <GoldText style={styles.infoBtnText}>How picks are made</GoldText>
-          <Ionicons name="chevron-forward" size={12} color="#3a3a3a" />
+          <LinearGradient
+            colors={['#2a1d00', '#0f0f0f', '#2a1d00']}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 0 }}
+            style={styles.infoBtn}
+          >
+            <Ionicons name="time-outline" size={14} color="#C8960C" />
+            <Text style={styles.infoBtnText}>How picks are made</Text>
+            <Ionicons name="chevron-forward" size={12} color="#C8960C" />
+          </LinearGradient>
         </TouchableOpacity>
 
         <TouchableOpacity
-          style={styles.infoBtn}
+          style={styles.infoBtnOuter}
           onPress={() => setModelVisible(true)}
           activeOpacity={0.75}
         >
-          <Ionicons name="analytics-outline" size={14} color="#888888" />
-          <GoldText style={styles.infoBtnText}>What goes into a pick</GoldText>
-          <Ionicons name="chevron-forward" size={12} color="#3a3a3a" />
+          <LinearGradient
+            colors={['#2a1d00', '#0f0f0f', '#2a1d00']}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 0 }}
+            style={styles.infoBtn}
+          >
+            <Ionicons name="analytics-outline" size={14} color="#C8960C" />
+            <Text style={styles.infoBtnText}>What goes into a pick</Text>
+            <Ionicons name="chevron-forward" size={12} color="#C8960C" />
+          </LinearGradient>
         </TouchableOpacity>
       </View>
 
@@ -628,15 +621,17 @@ const styles = StyleSheet.create({
     gap: 10,
     marginBottom: 8,
   },
-  infoBtn: {
+  infoBtnOuter: {
     flex: 1,
+    borderWidth: 1,
+    borderColor: '#3a2800',
+    borderRadius: 10,
+    overflow: 'hidden',
+  },
+  infoBtn: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    backgroundColor: '#0f0f0f',
-    borderWidth: 1,
-    borderColor: '#1e1e1e',
-    borderRadius: 10,
     paddingVertical: 10,
     paddingHorizontal: 12,
   },
