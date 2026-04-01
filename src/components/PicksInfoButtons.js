@@ -48,7 +48,7 @@ const SCHEDULE_STEPS = [
   },
   {
     time: '7:00 AM',
-    title: '🎯 Picks Go Live',
+    title: 'Picks Go Live',
     desc: 'The sharpest picks from across every sport are ready in the app. Every morning. Without fail.',
   },
 ];
