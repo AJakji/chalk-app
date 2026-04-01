@@ -434,7 +434,7 @@ const acc = StyleSheet.create({
   },
   note: {
     flexDirection: 'row',
-    alignItems: 'center',
+    alignItems: 'flex-start',
     gap: 8,
     backgroundColor: '#0f0f0f',
     borderRadius: 12,
