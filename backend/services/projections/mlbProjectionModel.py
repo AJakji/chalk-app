@@ -521,6 +521,9 @@ def home_away_factor_for_col(logs: list, col: str, tonight_location: str) -> flo
 # ── DB query functions ───────────────────────────────────────────────────────────
 
 def get_batter_logs(conn, player_id: int, limit: int = 50) -> list:
+    # Try current season first; fall back to previous season when < 3 logs exist
+    # (handles Opening Day and early-season periods before enough 2026 data accumulates)
+    prev_season = str(int(CURRENT_SEASON) - 1)
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
             """SELECT * FROM player_game_logs
@@ -529,11 +532,24 @@ def get_batter_logs(conn, player_id: int, limit: int = 50) -> list:
                ORDER BY game_date DESC LIMIT %s""",
             (player_id, CURRENT_SEASON, limit)
         )
+        rows = cur.fetchall()
+        if len(rows) >= 3:
+            return rows
+        # Insufficient current-season data — fall back to previous season
+        cur.execute(
+            """SELECT * FROM player_game_logs
+               WHERE player_id = %s AND sport = 'MLB' AND season = %s
+                 AND fg_att IS NOT NULL
+               ORDER BY game_date DESC LIMIT %s""",
+            (player_id, prev_season, limit)
+        )
         return cur.fetchall()
 
 
 def get_sp_logs(conn, player_id: int, limit: int = 15) -> list:
     """Pitcher game logs — only outings with >= 1 IP."""
+    # Try current season first; fall back to previous season when < 3 starts exist
+    prev_season = str(int(CURRENT_SEASON) - 1)
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
             """SELECT * FROM player_game_logs
@@ -541,6 +557,16 @@ def get_sp_logs(conn, player_id: int, limit: int = 15) -> list:
                  AND minutes >= 1
                ORDER BY game_date DESC LIMIT %s""",
             (player_id, CURRENT_SEASON, limit)
+        )
+        rows = cur.fetchall()
+        if len(rows) >= 3:
+            return rows
+        cur.execute(
+            """SELECT * FROM player_game_logs
+               WHERE player_id = %s AND sport = 'MLB' AND season = %s
+                 AND minutes >= 1
+               ORDER BY game_date DESC LIMIT %s""",
+            (player_id, prev_season, limit)
         )
         return cur.fetchall()
 

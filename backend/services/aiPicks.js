@@ -319,6 +319,7 @@ function formatEdgeForChalky(edge) {
  */
 // Full team name → abbreviation for player_game_logs opponent matching
 const TEAM_NAME_TO_ABBR = {
+  // NBA
   'Atlanta Hawks': 'ATL', 'Boston Celtics': 'BOS', 'Brooklyn Nets': 'BKN',
   'Charlotte Hornets': 'CHA', 'Chicago Bulls': 'CHI', 'Cleveland Cavaliers': 'CLE',
   'Dallas Mavericks': 'DAL', 'Denver Nuggets': 'DEN', 'Detroit Pistons': 'DET',
@@ -330,29 +331,73 @@ const TEAM_NAME_TO_ABBR = {
   'Philadelphia 76ers': 'PHI', 'Phoenix Suns': 'PHX', 'Portland Trail Blazers': 'POR',
   'Sacramento Kings': 'SAC', 'San Antonio Spurs': 'SAS', 'Toronto Raptors': 'TOR',
   'Utah Jazz': 'UTA', 'Washington Wizards': 'WAS',
+  // NHL
+  'Anaheim Ducks': 'ANA', 'Arizona Coyotes': 'ARI', 'Boston Bruins': 'BOS',
+  'Buffalo Sabres': 'BUF', 'Calgary Flames': 'CGY', 'Carolina Hurricanes': 'CAR',
+  'Chicago Blackhawks': 'CHI', 'Colorado Avalanche': 'COL', 'Columbus Blue Jackets': 'CBJ',
+  'Dallas Stars': 'DAL', 'Detroit Red Wings': 'DET', 'Edmonton Oilers': 'EDM',
+  'Florida Panthers': 'FLA', 'Los Angeles Kings': 'LAK', 'Minnesota Wild': 'MIN',
+  'Montreal Canadiens': 'MTL', 'Nashville Predators': 'NSH', 'New Jersey Devils': 'NJD',
+  'New York Islanders': 'NYI', 'New York Rangers': 'NYR', 'Ottawa Senators': 'OTT',
+  'Philadelphia Flyers': 'PHI', 'Pittsburgh Penguins': 'PIT', 'San Jose Sharks': 'SJS',
+  'Seattle Kraken': 'SEA', 'St. Louis Blues': 'STL', 'Tampa Bay Lightning': 'TBL',
+  'Toronto Maple Leafs': 'TOR', 'Utah Hockey Club': 'UTA', 'Vancouver Canucks': 'VAN',
+  'Vegas Golden Knights': 'VGK', 'Washington Capitals': 'WSH', 'Winnipeg Jets': 'WPG',
+  // MLB
+  'Oakland Athletics': 'OAK', 'Pittsburgh Pirates': 'PIT', 'San Diego Padres': 'SD',
+  'Seattle Mariners': 'SEA', 'San Francisco Giants': 'SF', 'St. Louis Cardinals': 'STL',
+  'Tampa Bay Rays': 'TB', 'Texas Rangers': 'TEX', 'Toronto Blue Jays': 'TOR',
+  'Minnesota Twins': 'MIN', 'Philadelphia Phillies': 'PHI', 'Atlanta Braves': 'ATL',
+  'Chicago White Sox': 'CWS', 'Miami Marlins': 'MIA', 'New York Yankees': 'NYY',
+  'Milwaukee Brewers': 'MIL', 'Los Angeles Angels': 'LAA', 'Arizona Diamondbacks': 'ARI',
+  'Baltimore Orioles': 'BAL', 'Boston Red Sox': 'BOS', 'Chicago Cubs': 'CHC',
+  'Cincinnati Reds': 'CIN', 'Cleveland Guardians': 'CLE', 'Colorado Rockies': 'COL',
+  'Detroit Tigers': 'DET', 'Houston Astros': 'HOU', 'Kansas City Royals': 'KC',
+  'Los Angeles Dodgers': 'LAD', 'Washington Nationals': 'WSH', 'New York Mets': 'NYM',
 };
 
 async function enrichEdgesWithStats(edges, gameDate) {
-  const exprMap = {
-    points:   'points',
-    rebounds: 'rebounds',
-    assists:  'assists',
-    threes:   'three_made',
-    steals:   'steals',
-    blocks:   'blocks',
-    pra:      'points + rebounds + assists',
-    pts_ast:  'points + assists',
-    pts_reb:  'points + rebounds',
-    ast_reb:  'rebounds + assists',
+  // Per-sport column expression maps.
+  // player_game_logs uses shared columns with different meanings per sport.
+  // NHL: fg_made=shots_on_goal, points=goals, three_made=assists, steals=saves
+  // MLB: fg_made=hits, points=runs, three_made=homeRuns, rebounds=RBI, turnovers=batter_K, assists=pitcher_K
+  const EXPR_MAPS = {
+    NBA: {
+      points:   'points',
+      rebounds: 'rebounds',
+      assists:  'assists',
+      threes:   'three_made',
+      steals:   'steals',
+      blocks:   'blocks',
+      pra:      'points + rebounds + assists',
+      pts_ast:  'points + assists',
+      pts_reb:  'points + rebounds',
+      ast_reb:  'rebounds + assists',
+    },
+    NHL: {
+      shots_on_goal: 'fg_made',
+      goals:         'points',
+      assists:       'three_made',
+      saves:         'steals',
+    },
+    MLB: {
+      hits:          'fg_made',
+      runs_scored:   'points',
+      home_runs:     'three_made',
+      rbis:          'rebounds',
+      stolen_bases:  'steals',
+      strikeouts:    'assists',   // pitcher Ks — stored in assists column
+    },
   };
 
-  const sport = edges[0]?.sport || 'NBA';
-
-  // Pre-compute league averages once per prop type (avoids per-edge league-avg query)
-  const propTypes  = [...new Set(edges.map(e => e.prop_type))];
+  // Pre-compute league averages once per (sport, prop_type) pair.
+  // Keyed as `${sport}::${prop_type}` to avoid cross-sport collisions
+  // (e.g. 'assists' means different columns for NBA vs NHL).
+  const sportPropPairs = [...new Set(edges.map(e => `${e.sport || 'NBA'}::${e.prop_type}`))];
   const leagueAvgs = {};
-  await Promise.all(propTypes.map(async (pt) => {
-    const expr = exprMap[pt];
+  await Promise.all(sportPropPairs.map(async (key) => {
+    const [sport, pt] = key.split('::');
+    const expr = EXPR_MAPS[sport]?.[pt];
     if (!expr) return;
     try {
       const { rows } = await db.query(`
@@ -361,12 +406,13 @@ async function enrichEdgesWithStats(edges, gameDate) {
         WHERE sport = $1 AND game_date > $2::date - INTERVAL '45 days' AND minutes > 15
       `, [sport, gameDate]);
       const v = parseFloat(rows[0]?.league_avg || 0);
-      if (v > 0) leagueAvgs[pt] = v;
+      if (v > 0) leagueAvgs[key] = v;
     } catch {}
   }));
 
   return Promise.all(edges.map(async (edge) => {
-    const expr    = exprMap[edge.prop_type];
+    const sport   = edge.sport || 'NBA';
+    const expr    = EXPR_MAPS[sport]?.[edge.prop_type];
     const enriched = { ...edge };
 
     await Promise.all([
@@ -405,7 +451,7 @@ async function enrichEdgesWithStats(edges, gameDate) {
       // ── Opponent defense: what this opponent has allowed per player game ───
       (async () => {
         if (!expr || !edge.opponent) return;
-        const leagueAvg = leagueAvgs[edge.prop_type];
+        const leagueAvg = leagueAvgs[`${sport}::${edge.prop_type}`];
         if (!leagueAvg) return;
         // chalk_projections stores full team names; player_game_logs uses abbreviations
         const oppAbbr = TEAM_NAME_TO_ABBR[edge.opponent] || edge.opponent;
