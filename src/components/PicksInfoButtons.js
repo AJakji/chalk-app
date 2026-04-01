@@ -5,6 +5,7 @@ import {
   LayoutAnimation, Platform, UIManager,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import ChalkyMascot from './ChalkyMascot';
 
 // Enable LayoutAnimation on Android
 if (Platform.OS === 'android') {
@@ -339,8 +340,14 @@ function ModelContent({ league, type }) {
       ))}
 
       <View style={acc.note}>
-        <Text style={acc.noteIcon}>🎯</Text>
-        <Text style={acc.noteText}>{data.note}</Text>
+        <ChalkyMascot size={48} />
+        <View style={acc.noteBody}>
+          <Text style={acc.noteText}>
+            <Text style={acc.noteQuote}>{'\u201C'}</Text>
+            {data.note}
+            <Text style={acc.noteQuote}>{'\u201D'}</Text>
+          </Text>
+        </View>
       </View>
     </View>
   );
@@ -425,8 +432,8 @@ const acc = StyleSheet.create({
   },
   note: {
     flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 10,
+    alignItems: 'center',
+    gap: 12,
     backgroundColor: '#0f0f0f',
     borderRadius: 12,
     borderWidth: 1,
@@ -434,14 +441,18 @@ const acc = StyleSheet.create({
     padding: 14,
     marginTop: 20,
   },
-  noteIcon: {
-    fontSize: 14,
+  noteBody: {
+    flex: 1,
   },
   noteText: {
-    flex: 1,
     color: '#888888',
     fontSize: 12,
     lineHeight: 18,
+  },
+  noteQuote: {
+    color: '#00E87A',
+    fontSize: 16,
+    fontWeight: '800',
   },
 });
 
