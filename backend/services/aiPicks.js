@@ -887,6 +887,7 @@ async function getTodaysPicks() {
   const { rows } = await db.query(
     `SELECT * FROM picks
      WHERE pick_date = CURRENT_DATE
+       AND pick_type NOT IN ('Moneyline')
      ORDER BY confidence DESC`
   );
   return rows;
