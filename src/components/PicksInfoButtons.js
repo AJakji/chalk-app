@@ -340,7 +340,9 @@ function ModelContent({ league, type }) {
       ))}
 
       <View style={acc.note}>
-        <ChalkyMascot size={72} />
+        <View style={acc.mascotWrap}>
+          <ChalkyMascot size={72} />
+        </View>
         <View style={acc.noteBody}>
           <Text style={acc.noteText}>
             <Text style={acc.noteQuote}>{'\u201C '}</Text>
@@ -433,7 +435,7 @@ const acc = StyleSheet.create({
   note: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
+    gap: 8,
     backgroundColor: '#0f0f0f',
     borderRadius: 12,
     borderWidth: 1,
@@ -441,8 +443,14 @@ const acc = StyleSheet.create({
     padding: 14,
     marginTop: 20,
   },
+  mascotWrap: {
+    width: 56,
+    alignItems: 'center',
+    flexShrink: 0,
+  },
   noteBody: {
     flex: 1,
+    flexShrink: 1,
   },
   noteText: {
     color: '#888888',
