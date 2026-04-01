@@ -311,10 +311,10 @@ function AccordionSection({ section, isOpen, onToggle }) {
 // ── ModelContent subcomponent ─────────────────────────────────────────────────
 
 function ModelContent({ league, type }) {
-  const [openIndex, setOpenIndex] = useState(0);
+  const [openIndex, setOpenIndex] = useState(null);
 
   useEffect(() => {
-    setOpenIndex(0);
+    setOpenIndex(null);
   }, [league, type]);
 
   const data = MODEL_DATA[league]?.[type];
@@ -385,14 +385,13 @@ const acc = StyleSheet.create({
     flex: 1,
   },
   chevron: {
-    color: '#3a3a3a',
+    color: '#00E87A',
     fontSize: 20,
     fontWeight: '300',
     marginLeft: 8,
     lineHeight: 22,
   },
   chevronOpen: {
-    color: '#00E87A',
     transform: [{ rotate: '90deg' }],
   },
   content: {
