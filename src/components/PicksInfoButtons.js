@@ -50,74 +50,74 @@ const SCHEDULE_STEPS = [
 const MODEL_DATA = {
   NBA: {
     player: {
-      intro: 'Every NBA player prop runs through a full projection before it reaches the app.',
+      intro: 'Before a single NBA prop pick reaches the app it has passed through dozens of data checks. Most projections never make it. The ones that do have a real, measurable edge over the line the book posted.',
       sections: [
         {
           icon: '📊',
-          title: 'Recent Form',
+          title: 'Game Log Analysis',
           items: [
-            'Weighted average across last 5, 10, and 20 games',
-            'Full season baseline for stability',
-            'Home and away splits',
+            'Every game from the last 5, 10, and 20 appearances is weighted differently — recent games matter more but outliers are dampened so one big game does not inflate the projection',
+            'Home and away splits are tracked separately — some players perform 15-20% differently depending on the court',
+            'Back-to-back fatigue is factored in — players on the second night of a back-to-back historically underperform their lines',
           ],
         },
         {
           icon: '🏀',
-          title: 'Matchup',
+          title: 'Opponent Defense',
           items: [
-            "Opponent's position defense rating — how many points, rebounds, assists that position allows per game",
-            'Pace of play — faster games create more opportunities',
-            'Rest and back-to-back adjustments',
+            'Every team is rated on how many points, rebounds, and assists they allow to each specific position — not just overall defense. A team can be great against guards and terrible against centers.',
+            'These ratings update nightly so a team on a defensive slide gets reflected in tonight\'s projection',
+            'Pace of play is measured per matchup — some teams force faster games which directly inflates counting stats for both sides',
           ],
         },
         {
           icon: '⚡',
-          title: 'Player Context',
+          title: 'Contextual Factors',
           items: [
-            'Usage and efficiency trends',
-            'Teammate absences that shift usage',
-            'Minutes projection for tonight',
+            'When a starter is out their usage gets redistributed across teammates — the model detects this and adjusts projections for everyone in the lineup',
+            'Minutes projections are adjusted for game script — a team expected to lose big will rest starters early, compressing stats',
+            'Efficiency is measured against league average — only the deviation from average is applied so the base projection is never double-counted',
           ],
         },
         {
-          icon: '📈',
-          title: 'Market Analysis',
+          icon: '🎯',
+          title: 'Edge Detection',
           items: [
-            'Live line pulled from multiple sportsbooks',
-            'Edge = projection minus the posted line',
-            'Only picks clearing the minimum edge threshold reach the app',
+            'The projection is compared against the live line pulled from multiple sportsbooks at 4 AM — not yesterday\'s closing line',
+            'Each prop type has its own minimum edge requirement. Points needs at least 1.5 above the line. Rebounds needs 0.8. The threshold exists because smaller edges have too much variance to be reliable.',
+            'Confidence is mathematically tied to edge size — a 74% confidence pick has roughly 2.5x the minimum required edge. An 87% pick has 4x. The number is not a feeling — it is a ratio.',
           ],
         },
       ],
     },
     team: {
-      intro: 'Spread and total picks are built on team-level projection models.',
+      intro: 'Spread and total picks are built on full team projection models that run every game on tonight\'s slate. Both sides of every matchup are projected independently then compared to the market line.',
       sections: [
         {
           icon: '📊',
-          title: 'Offensive Output',
+          title: 'Team Offensive Output',
           items: [
-            'Team points per game weighted by recent form',
-            'Pace and possessions per game',
-            'Home court advantage adjustment',
+            'Points per game weighted by recent form — a team on a hot streak is treated differently than their season average suggests',
+            'Pace and possessions per game — a fast team playing a slow team creates a total that is different from both teams\' averages',
+            'Home court adjustment — home teams historically outperform their road numbers by a measurable margin across the league',
           ],
         },
         {
           icon: '🛡️',
           title: 'Defensive Matchup',
           items: [
-            'Opponent defensive rating',
-            'Points allowed per 100 possessions',
-            'Pace suppression tendencies',
+            'Opponent defensive rating updated nightly — how many points allowed per 100 possessions in recent games',
+            'Pace suppression tendencies — elite defenses slow games down which directly affects over/under projections',
+            'Home and away defensive splits tracked separately',
           ],
         },
         {
-          icon: '📈',
-          title: 'Market Analysis',
+          icon: '🎯',
+          title: 'Edge Detection',
           items: [
-            'Projected margin vs the spread',
-            'Projected total vs the posted over/under',
-            'Edge must clear 1.5 points for spread picks',
+            'Projected margin compared directly to the spread — if the model says home team wins by 6 and the spread is -3.5, that is a +2.5 edge on the cover',
+            'Minimum edge of 1.5 points required for spread picks — anything tighter is too close to call reliably',
+            'Total picks require the projected combined score to differ from the line by at least 2 points',
           ],
         },
       ],
@@ -125,74 +125,65 @@ const MODEL_DATA = {
   },
   NHL: {
     player: {
-      intro: 'NHL player props account for ice time, line combinations, and goalie quality.',
+      intro: 'NHL props are harder to model than any other sport — ice time changes, line combinations shift, and a single goalie decision can change everything. Chalky tracks all of it.',
       sections: [
         {
           icon: '📊',
-          title: 'Recent Form',
+          title: 'Player Performance',
           items: [
-            'Last 5 games weighted most heavily',
-            'Even strength vs power play production split',
-            'Time on ice trends',
+            'Even strength and power play production are tracked completely separately — a player who scores almost entirely on the power play is a very different bet than one who produces at even strength',
+            'Time on ice is projected for tonight based on recent usage — coaches adjust lines constantly and those shifts directly affect counting stats',
+            'Linemate quality is measured — being on a line with elite players increases shot and point production significantly',
           ],
         },
         {
           icon: '🥅',
-          title: 'Goalie Matchup',
+          title: 'Goalie Intelligence',
           items: [
-            'Confirmed starter pulled from morning skate',
-            'Goalie save percentage vs league average',
-            'Backup detected — shooter props get a confidence boost',
+            'Starting goalie is confirmed from morning skate reports before the model runs at 4:30 AM — no projection is built on an unconfirmed starter',
+            'Each goalie\'s save percentage is compared to league average — a goalie 3% below average allows measurably more goals and that flows directly into shooter prop projections',
+            'When a backup goalie is confirmed the model automatically boosts confidence on shooter props for the opposing team — backups allow significantly more goals historically',
           ],
         },
         {
-          icon: '🏒',
-          title: 'Team Context',
+          icon: '🎯',
+          title: 'Edge Detection',
           items: [
-            'Linemate quality — team goals per game',
-            'Opponent goals allowed per game',
-            'Home and away splits',
-          ],
-        },
-        {
-          icon: '📈',
-          title: 'Market Analysis',
-          items: [
-            'Live prop line across major books',
-            'Minimum edge of 0.3 goals for player props',
-            'Shots on goal minimum edge of 0.8',
+            'Shots on goal requires a minimum 0.8 edge over the line — this is a tighter threshold because shot volume is more volatile than point production',
+            'Goals and assists require 0.3 minimum edge — lower threshold because the lines are already low and small edges are meaningful',
+            'Live lines pulled from books at 4 AM before the model runs',
           ],
         },
       ],
     },
     team: {
-      intro: 'Puck line and total picks are built on team goal projection models.',
+      intro: 'Puck line and total picks combine goalie quality, team offense, and the specific matchup dynamic to project how many goals get scored and by whom.',
       sections: [
         {
           icon: '📊',
           title: 'Goal Projection',
           items: [
-            'Team goals scored and allowed per game',
-            'Home and away splits',
-            'Recent form weighting',
+            'Each team\'s offensive output is projected independently using recent goals scored per game weighted by form',
+            'The combined projection is then adjusted for goalie quality on both sides — an elite goalie matchup suppresses totals meaningfully',
+            'Home and away splits tracked separately — NHL home ice advantage is statistically significant',
           ],
         },
         {
           icon: '🥅',
           title: 'Goalie Factor',
           items: [
-            "Starting goalie save percentage vs league",
-            "Backup goalie detection boosts opposing team's goal projection",
-            'Goalie factor capped to prevent outliers',
+            'Starting goalie save percentage vs league average is applied as a multiplier to the opposing team\'s goal projection',
+            'The goalie factor is capped to prevent one outlier goalie performance from swinging projections unrealistically',
+            'Backup detection automatically adjusts the total upward when confirmed — books are often slow to move lines for backup starters, creating real edges',
           ],
         },
         {
-          icon: '📈',
-          title: 'Market Analysis',
+          icon: '🎯',
+          title: 'Edge Detection',
           items: [
-            'Projected goal differential vs the puck line',
-            'Projected total vs the over/under',
-            'Minimum edge of 0.4 goals for puck line picks',
+            'Projected goal differential vs the puck line (-1.5) — a team projected to win by 2.1 goals has a +0.6 edge on the puck line',
+            'Minimum 0.4 goal edge required for puck line picks',
+            'Total picks need 0.8 goal edge over the over/under',
           ],
         },
       ],
@@ -200,75 +191,75 @@ const MODEL_DATA = {
   },
   MLB: {
     player: {
-      intro: 'MLB props factor in pitching matchups, ballpark conditions, and lineup context.',
+      intro: 'Baseball props are the most data-rich picks in the app. The model pulls from Statcast pitch-level data, umpire tendencies, weather readings, and ballpark factors that most bettors never think about.',
       sections: [
         {
           icon: '⚾',
           title: 'Batter Analysis',
           items: [
-            'Season batting average, slugging, and on-base percentage',
-            'Platoon splits — performance vs left and right-handed pitching',
-            'Hard hit rate and exit velocity from Statcast',
+            'Platoon splits are applied for every batter — how they historically perform against left and right-handed pitching matters enormously and books often misprice these edges',
+            'Exit velocity and hard hit rate from Statcast tell the model how well a batter is actually making contact regardless of recent luck',
+            'Season baseline is weighted against recent form — a hot start inflates lines and a slump creates opportunities',
           ],
         },
         {
           icon: '🔥',
-          title: 'Pitcher Matchup',
+          title: 'Pitcher Arsenal',
           items: [
-            "Starting pitcher's strikeout rate and recent form",
-            'Pitch arsenal — fastball velocity, breaking ball usage',
-            'Opponent batting average vs that pitch type',
+            'Each starting pitcher\'s pitch mix is analyzed — fastball velocity trends, breaking ball usage rate, and how effective each pitch has been recently',
+            'The batter\'s historical performance against that specific pitch type is factored in — some batters are genuinely elite against breaking balls but weak against velocity',
+            'Pitcher strikeout rate and walk rate trends drive pitcher prop projections',
           ],
         },
         {
           icon: '🌤️',
           title: 'Game Environment',
           items: [
-            'Wind speed and direction — affects home run props',
-            'Temperature — cold weather suppresses offense',
-            'Umpire tendencies — strike zone size affects strikeout totals',
-            'Ballpark dimensions and altitude',
+            'Wind speed and direction are pulled for tonight\'s game — wind blowing out at 15+ mph at Wrigley materially increases home run probability and that shows up in projections',
+            'Temperature affects how far the ball travels — cold games suppress offense and the model adjusts accordingly',
+            'Umpire tendencies are tracked — some umpires run tight zones that increase walks and suppress strikeouts. This directly affects pitcher strikeout props.',
+            'Ballpark dimensions and altitude are applied — Coors Field at elevation plays very differently from every other park in baseball',
           ],
         },
         {
-          icon: '📈',
-          title: 'Market Analysis',
+          icon: '🎯',
+          title: 'Edge Detection',
           items: [
-            'Live prop line from major sportsbooks',
-            'Minimum edge of 0.3 hits, 0.5 total bases',
-            'Pitcher strikeouts minimum edge of 0.8',
+            'Hit props need a minimum 0.3 edge. Total bases need 0.5. Home runs need 0.2. Each threshold was set based on the variance of that stat — lower variance stats need bigger edges to be reliable.',
+            'Pitcher strikeout minimum edge of 0.8 — strikeout props have high variance so the model requires a larger cushion to qualify',
+            'All lines pulled live at 4 AM before the model runs',
           ],
         },
       ],
     },
     team: {
-      intro: 'Run line and total picks combine pitching quality, offense, and park factors.',
+      intro: 'Run line and total picks combine pitching quality, offensive depth, bullpen fatigue, and environmental factors into a single projected score for each team.',
       sections: [
         {
           icon: '📊',
           title: 'Run Projection',
           items: [
-            'Team runs scored and allowed per game',
-            'Starting pitcher ERA and recent form',
-            'Bullpen fatigue and usage patterns',
+            'Starting pitcher ERA and recent form drives the opposing team\'s run projection — a pitcher on a hot streak suppresses offense measurably',
+            'Bullpen fatigue is tracked — a team that burned their best relievers yesterday is more vulnerable in tight games tonight',
+            'Team runs scored per game weighted by recent form on both sides of the ball',
           ],
         },
         {
           icon: '🌤️',
-          title: 'Game Environment',
+          title: 'Park and Weather',
           items: [
-            'Ballpark run factor — some parks suppress scoring significantly',
-            'Wind and temperature adjustments',
-            'Umpire run environment tendencies',
+            'Every ballpark has a run factor that adjusts the projected total — a game at Coors projects higher than the same matchup at Petco Park',
+            'Wind and temperature applied to the total projection for tonight specifically — not a seasonal average',
+            'Umpire run environment tendencies factored in — some umpires consistently produce high or low scoring games based on zone tendencies',
           ],
         },
         {
-          icon: '📈',
-          title: 'Market Analysis',
+          icon: '🎯',
+          title: 'Edge Detection',
           items: [
-            'Projected run margin vs the run line (-1.5)',
-            'Projected total vs the over/under',
-            'Minimum edge of 0.5 runs for run line picks',
+            'Projected run margin vs the run line (-1.5) — minimum 0.5 run edge required to generate a pick',
+            'Projected total vs the over/under — minimum 1.0 run edge required',
+            'Most games produce no qualifying team picks. When one does appear it has a real, data-backed reason behind it.',
           ],
         },
       ],
@@ -304,7 +295,7 @@ function ModelContent({ league, type }) {
       <View style={styles.edgeNote}>
         <Text style={styles.edgeNoteIcon}>🎯</Text>
         <Text style={styles.edgeNoteText}>
-          Most projections never become picks. Only the ones with a genuine edge make it through.
+          On a typical night the model runs projections for hundreds of players and games across all three sports. A fraction of those become picks. The ones that do have passed every filter and cleared a real minimum edge. That is the only reason they are here.
         </Text>
       </View>
     </View>
