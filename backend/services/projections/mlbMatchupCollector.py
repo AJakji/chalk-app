@@ -57,8 +57,8 @@ def get_todays_lineups_and_sps():
                                 for p in (roster_data.get('roster') or [])
                                 if p.get('position', {}).get('type') != 'Pitcher'
                             ]
-                        except:
-                            pass
+                        except Exception as exc:
+                            print(f'[get_todays_lineups_and_sps] roster fallback failed for team {team_id}: {exc}')
 
                 if batters:
                     matchups.append({
@@ -94,7 +94,8 @@ def fetch_matchup(pitcher_id, batter_id):
                     'ops': float(s.get('ops') or 0),
                 }
         return None
-    except:
+    except Exception as exc:
+        print(f'[fetch_matchup] pitcher {pitcher_id} vs batter {batter_id}: {exc}')
         return None
 
 def run():

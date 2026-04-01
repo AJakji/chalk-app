@@ -40,7 +40,8 @@ def get_bullpen_usage(team_id, team_abbr):
             'rosterType': 'active',
             'hydrate': 'person,stats(group=pitching,type=gameLog)',
         })
-    except:
+    except Exception as exc:
+        print(f'[get_bullpen_usage] roster fetch failed for team {team_id}: {exc}')
         return []
 
     relievers = []
@@ -64,7 +65,8 @@ def get_bullpen_usage(team_id, team_abbr):
                     'startDate': three_days_ago,
                     'endDate': end_date,
                 })
-            except:
+            except Exception as exc:
+                print(f'[get_bullpen_usage] stats fetch failed for pitcher {pid} ({pname}): {exc}')
                 continue
 
             games = 0

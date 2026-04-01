@@ -340,7 +340,8 @@ def get_out_players(conn, team_abbr: str, game_date: str) -> list[dict]:
                 (team_abbr, game_date)
             )
             return cur.fetchall()
-    except Exception:
+    except Exception as exc:
+        log.debug('get_out_players %s %s: %s', team_abbr, game_date, exc)
         return []
 
 
@@ -359,7 +360,8 @@ def compute_usage_boost(conn, team_abbr: str, out_players: list[dict], game_date
                 (team_abbr, game_date)
             )
             active = cur.fetchone()[0] or 8
-    except Exception:
+    except Exception as exc:
+        log.debug('compute_usage_boost %s: %s', team_abbr, exc)
         active = 8
 
     lost_usage = len(out_players) * 0.22
@@ -452,8 +454,8 @@ def get_position_defense_factor(conn, opponent: str, position: str, stat: str) -
                     factor = team_val / league_avg_val
                     # Clamp: ±20% max adjustment to avoid dominating total projection
                     return clamp(factor, 0.80, 1.20)
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug('get_position_defense_factor %s %s %s: %s', opponent, position, stat, exc)
     return 1.0
 
 
@@ -474,7 +476,8 @@ def get_player_logs(conn, player_id: int, sport: str = 'NBA') -> list[dict]:
                 (player_id, sport, CURRENT_SEASON)
             )
             return cur.fetchall()
-    except Exception:
+    except Exception as exc:
+        log.debug('get_player_logs %s: %s', player_id, exc)
         return []
 
 
@@ -503,7 +506,8 @@ def get_player_season_avgs(conn, player_id: int) -> dict:
             )
             row = cur.fetchone()
             return dict(row) if row else {}
-    except Exception:
+    except Exception as exc:
+        log.debug('get_player_season_avgs %s: %s', player_id, exc)
         return {}
 
 
@@ -549,8 +553,8 @@ def get_team_pace(conn, team_abbr: str) -> float:
             row = cur.fetchone()
             if row and row[0]:
                 return float(row[0])
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug('get_team_pace %s: %s', team_abbr, exc)
     return LEAGUE_AVG['pace']
 
 
@@ -571,8 +575,8 @@ def get_team_record(conn, team_abbr: str) -> tuple[int, int]:
                 wins   = sum(1 for r in rows if r[0] == 'W')
                 losses = len(rows) - wins
                 return (wins, losses)
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug('get_team_record %s: %s', team_abbr, exc)
     return (41, 41)
 
 
@@ -593,8 +597,8 @@ def get_rest_days(conn, player_id: int, game_date: str) -> int:
                     __import__('datetime').date.fromisoformat(str(row[0]))
                 current = __import__('datetime').date.fromisoformat(game_date)
                 return (current - last).days
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug('get_rest_days %s %s: %s', player_id, game_date, exc)
     return 2
 
 
@@ -623,8 +627,8 @@ def get_team_situation_b2b_factor(conn, team_abbr: str) -> float:
             rest = rows.get('rest_2')
             if b2b and rest and rest > 0:
                 return clamp(b2b / rest, 0.87, 0.99)
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug('get_team_situation_b2b_factor %s: %s', team_abbr, exc)
     return 0.94  # league-average B2B penalty fallback
 
 
@@ -643,8 +647,8 @@ def get_team_rest_days(conn, team_abbr: str, game_date: str) -> int:
                 last    = row[0] if hasattr(row[0], 'days') else _dt.date.fromisoformat(str(row[0]))
                 current = _dt.date.fromisoformat(game_date)
                 return (current - last).days
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug('get_team_rest_days %s %s: %s', team_abbr, game_date, exc)
     return 2
 
 
@@ -668,8 +672,8 @@ def get_home_away_split(conn, player_id: int, stat: str, is_home: bool) -> float
             row = cur.fetchone()
             if row and row[0]:
                 return float(row[0])
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug('get_home_away_split %s %s: %s', player_id, stat, exc)
     return 0.0
 
 
@@ -1082,7 +1086,8 @@ def project_team_props(
             row = cur.fetchone()
             raw_away = float(row[0]) if row and row[0] else None
             away_def_f = clamp(raw_away / lg_pts, 0.88, 1.12) if raw_away else 1.0
-    except Exception:
+    except Exception as exc:
+        log.debug('project_team_props def factors %s vs %s: %s', home_team, away_team, exc)
         home_def_f = 1.0
         away_def_f = 1.0
 
@@ -1348,8 +1353,8 @@ def get_market_line(conn, player_name: str, prop_type: str, game_date: str) -> f
                     ', '.join(sorted(distinct_names)), player_name
                 )
 
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug('get_market_line %s: %s', player_name, exc)
     return None
 
 

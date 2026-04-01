@@ -1379,8 +1379,8 @@ def get_pitcher_hand(player_id: int) -> str:
         data = resp.json()
         for person in data.get('people', []):
             return person.get('pitchHand', {}).get('code', 'R')
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug('[get_pitcher_hand] player %s: %s', player_id, exc)
     return 'R'
 
 
@@ -2098,7 +2098,8 @@ def get_h2h_total_factor(conn, home_team: str, away_team: str) -> float:
                 LIMIT 5
             """, (f'%{home_team[:6]}%', f'%{away_team[:6]}%'))
             rows = cur.fetchall()
-    except Exception:
+    except Exception as exc:
+        log.debug('[get_h2h_total_factor] %s vs %s: %s', home_team, away_team, exc)
         return 1.00
 
     if len(rows) < 3:
@@ -2438,7 +2439,8 @@ def get_market_line(conn, player_name: str, prop_type: str, game_date) -> float 
                 row = cur.fetchone()
                 if row and row[0] is not None and row[1] == 1:
                     return float(row[0])
-    except Exception:
+    except Exception as exc:
+        log.debug('[get_market_line] %s %s: %s', player_name, prop_type, exc)
         conn.rollback()
     return None
 

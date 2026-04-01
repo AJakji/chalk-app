@@ -1364,7 +1364,8 @@ def project_total(home_tl: list, away_tl: list,
                         h2h_f = 1.0 + 0.06 * 0.10   # 0.10 weight
                     elif h2h_avg < LEAGUE['nhl_total'] - 1.0:
                         h2h_f = 1.0 - 0.06 * 0.10
-        except Exception:
+        except Exception as exc:
+            log.debug('[h2h_factor] %s vs %s: %s', home_team, away_team, exc)
             if conn:
                 conn.rollback()
 

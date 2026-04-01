@@ -46,7 +46,8 @@ def fetch_batter_splits(player_id, season):
             'group': 'hitting',
             'sitCodes': sit_codes,
         })
-    except:
+    except Exception as exc:
+        print(f'[fetch_batter_splits] player {player_id} season {season}: {exc}')
         return {}
 
     result = {}
@@ -105,7 +106,8 @@ def fetch_batter_season_stats(player_id, season):
                 sb_success = round(int(sb) / total, 3)
 
         return bat_side, sb_success
-    except:
+    except Exception as exc:
+        print(f'[fetch_batter_season_stats] player {player_id} season {season}: {exc}')
         return None, None
 
 def get_qualified_batters(conn, season):
