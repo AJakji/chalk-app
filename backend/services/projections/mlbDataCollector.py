@@ -61,6 +61,17 @@ BASE_URL     = 'https://statsapi.mlb.com/api/v1'
 SEASONS      = [2022, 2023, 2024, 2025, 2026]
 DELAY        = 0.3   # seconds between player API calls
 
+# MLB Stats API no longer returns 'abbreviation' in gameLog split team/opponent objects
+# (as of 2026, only 'id' and 'name' are returned). Use team ID for reliable abbreviation lookup.
+# Abbreviations match what is stored in player_game_logs and used by the projection model.
+MLB_TEAM_ID_TO_ABB = {
+    108: 'LAA', 109: 'ARI', 110: 'BAL', 111: 'BOS', 112: 'CHC', 113: 'CIN',
+    114: 'CLE', 115: 'COL', 116: 'DET', 117: 'HOU', 118: 'KC',  119: 'LAD',
+    120: 'WSH', 121: 'NYM', 133: 'OAK', 134: 'PIT', 135: 'SD',  136: 'SEA',
+    137: 'SF',  138: 'STL', 139: 'TB',  140: 'TEX', 141: 'TOR', 142: 'MIN',
+    143: 'PHI', 144: 'ATL', 145: 'CWS', 146: 'MIA', 147: 'NYY', 158: 'MIL',
+}
+
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -149,11 +160,13 @@ def fetch_hitting_logs(player_id: int, year: int) -> list[dict]:
             avg_str = st.get('avg', None)
             avg_val = safe_float(avg_str) if avg_str not in (None, '---', '.---') else None
 
+            team_id = split.get('team', {}).get('id', 0)
+            opp_id  = split.get('opponent', {}).get('id', 0)
             rows.append({
                 'game_date':  split.get('date'),
                 'game_id':    str(split.get('game', {}).get('gamePk', '')),
-                'team':       split.get('team', {}).get('abbreviation', ''),
-                'opponent':   split.get('opponent', {}).get('abbreviation', ''),
+                'team':       MLB_TEAM_ID_TO_ABB.get(team_id, split.get('team', {}).get('abbreviation', '')),
+                'opponent':   MLB_TEAM_ID_TO_ABB.get(opp_id,  split.get('opponent', {}).get('abbreviation', '')),
                 'home_away':  'home' if split.get('isHome') else 'away',
                 'season':     str(split.get('season', year)),
                 # Hitter columns
@@ -213,11 +226,13 @@ def fetch_pitching_logs(player_id: int, year: int) -> list[dict]:
             ip_str = st.get('inningsPitched', '0.0')
             ip_val = safe_float(ip_str)
 
+            team_id = split.get('team', {}).get('id', 0)
+            opp_id  = split.get('opponent', {}).get('id', 0)
             rows.append({
                 'game_date':  split.get('date'),
                 'game_id':    str(split.get('game', {}).get('gamePk', '')),
-                'team':       split.get('team', {}).get('abbreviation', ''),
-                'opponent':   split.get('opponent', {}).get('abbreviation', ''),
+                'team':       MLB_TEAM_ID_TO_ABB.get(team_id, split.get('team', {}).get('abbreviation', '')),
+                'opponent':   MLB_TEAM_ID_TO_ABB.get(opp_id,  split.get('opponent', {}).get('abbreviation', '')),
                 'home_away':  'home' if split.get('isHome') else 'away',
                 'season':     str(split.get('season', year)),
                 # Pitcher-specific columns
@@ -361,6 +376,8 @@ def upsert_player_game_log(conn, player_id: int, player_name: str, team: str,
                 %(plus_minus)s
             )
             ON CONFLICT (player_id, game_date, sport) DO UPDATE SET
+                team               = EXCLUDED.team,
+                opponent           = EXCLUDED.opponent,
                 points             = EXCLUDED.points,
                 fg_made            = EXCLUDED.fg_made,
                 fg_att             = EXCLUDED.fg_att,

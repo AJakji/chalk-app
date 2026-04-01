@@ -2686,12 +2686,33 @@ def get_batting_lineup_with_fallback(
                 timeout=10,
             )
             roster = resp.json().get('roster', [])
-            batters = [p for p in roster
-                       if p.get('position', {}).get('type', {}).get('description', '') != 'Pitcher'][:9]
+            batters = []
+            for p in roster:
+                pos = p.get('position', {})
+                # position.type is a plain string ('Pitcher', 'Infielder', etc.) —
+                # NOT a nested dict. The old .get('type', {}).get('description', '')
+                # raised AttributeError which was silently swallowed, returning [].
+                pos_type  = pos.get('type', '')
+                pos_name  = pos.get('name', '')
+                pos_abbr  = pos.get('abbreviation', '')
+                pos_code  = pos.get('code', '')
+                is_pitcher = (
+                    pos_type == 'Pitcher'
+                    or pos_name == 'Pitcher'
+                    or pos_abbr == 'P'
+                    or pos_code == '1'
+                )
+                if not is_pitcher:
+                    batters.append(p)
+            batters = batters[:9]
             return [{'id': p['person']['id'], 'name': p['person']['fullName'],
                      'batting_order': i+1, 'position': p.get('position', {}).get('abbreviation', '')}
                     for i, p in enumerate(batters)]
-        except Exception:
+        except AttributeError as exc:
+            log.warning(f'  roster_lineup({team_id}) AttributeError: {exc}')
+            return []
+        except Exception as exc:
+            log.warning(f'  roster_lineup({team_id}) error: {exc}')
             return []
 
     home_t3 = roster_lineup(home_team_id) if home_team_id else []
