@@ -3115,7 +3115,7 @@ def main():
             try:
                 upsert_team_projection(conn, tname, tproj['opponent'], game_date, tproj)
                 total_t += 1
-                log.info(f'    [{t_loc}] {tname} — runs:{proj_r:.2f} ML:{ml_v:.0f} win%:{win_p:.3f}')
+                log.info(f'    [{t_loc}] {tname} — runs:{proj_r:.2f} cover:{sp_cov:.1%}')
             except Exception as exc:
                 log.warning(f'    Failed team {tname}: {exc}')
                 conn.rollback()
