@@ -12,16 +12,20 @@ import MaskedView from '@react-native-masked-view/masked-view';
 // ── Gold gradient text ────────────────────────────────────────────────────────
 
 function GoldText({ style, children }) {
+  const flat = StyleSheet.flatten(style) || {};
+  const { flex, ...textStyle } = flat;
   return (
-    <MaskedView maskElement={<Text style={style}>{children}</Text>}>
-      <LinearGradient
-        colors={['#C8960C', '#FFD700', '#FFF0A0', '#FFD700', '#C8960C']}
-        start={{ x: 0, y: 0 }}
-        end={{ x: 1, y: 0 }}
-      >
-        <Text style={[style, { opacity: 0 }]}>{children}</Text>
-      </LinearGradient>
-    </MaskedView>
+    <View style={flex != null ? { flex } : null}>
+      <MaskedView maskElement={<Text style={textStyle}>{children}</Text>}>
+        <LinearGradient
+          colors={['#C8960C', '#FFD700', '#FFF0A0', '#FFD700', '#C8960C']}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 0 }}
+        >
+          <Text style={[textStyle, { opacity: 0 }]}>{children}</Text>
+        </LinearGradient>
+      </MaskedView>
+    </View>
   );
 }
 
