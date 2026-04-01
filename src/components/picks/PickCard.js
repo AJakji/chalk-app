@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useState } from 'react';
-import { View, Text, Image, Pressable, Animated, StyleSheet, TouchableOpacity } from 'react-native';
+import { View, Text, Pressable, Animated, StyleSheet, TouchableOpacity } from 'react-native';
 import { BlurView } from 'expo-blur';
 import { Ionicons } from '@expo/vector-icons';
 import ConfidenceInfoModal from './ConfidenceInfoModal';
@@ -8,7 +8,7 @@ import TeamLogo from '../TeamLogo';
 import { useTeamLogos } from '../../context/TeamLogosContext';
 import { formatGameDateTime } from '../../utils/timeUtils';
 
-const CHALKY_PNG = require('../../../assets/chalky.png');
+import ChalkyFace from '../ChalkyFace';
 
 // ── Stats row helpers ─────────────────────────────────────────────────────────
 
@@ -188,7 +188,7 @@ export default function PickCard({ pick, onPress, isTopPick, isLocked, onLockedP
 
         {/* The pick */}
         <View style={styles.chalkyLikesRow}>
-          <Image source={CHALKY_PNG} style={styles.chalkyIcon} resizeMode="contain" />
+          <ChalkyFace size={16} style={styles.chalkyIcon} />
           <Text style={styles.chalkyLikes}>Chalky likes</Text>
           {pick.confidence >= 90 && (
             <View style={[styles.confBadge, { backgroundColor: '#2A1F00', borderColor: '#FFB80055' }]}>

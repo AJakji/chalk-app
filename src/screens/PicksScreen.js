@@ -1,13 +1,14 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
-  View, Text, Image, FlatList, ScrollView, StyleSheet,
+  View, Text, FlatList, ScrollView, StyleSheet,
   SafeAreaView, StatusBar, ActivityIndicator, TouchableOpacity, Animated,
 } from 'react-native';
 import { BlurView } from 'expo-blur';
 import { Ionicons } from '@expo/vector-icons';
 
-const CHALKY_PNG = require('../../assets/chalky.png');
 import { colors, spacing, radius } from '../theme';
+import ChalkyFace from '../components/ChalkyFace';
+import ChalkyMascot from '../components/ChalkyMascot';
 import PickCard from '../components/picks/PickCard';
 import PropPickCard from '../components/picks/PropPickCard';
 import PickDetailModal from '../components/picks/PickDetailModal';
@@ -72,7 +73,7 @@ function ChalkysPicksHeader({ date, totalCount, highConfCount }) {
   return (
     <View style={styles.chalkysHeader}>
       <View style={styles.chalkysAvatarRow}>
-        <Image source={CHALKY_PNG} style={styles.chalkysAvatar} resizeMode="contain" />
+        <ChalkyFace size={44} style={styles.chalkysAvatar} />
         <View style={styles.chalkysHeaderText}>
           <Text style={styles.chalkysTitle}>Today's Best 7</Text>
           <Text style={styles.chalkysDate}>{date}</Text>
@@ -211,7 +212,7 @@ export default function PicksScreen() {
               activeOpacity={0.75}
             >
               {isChalky && (
-                <Image source={CHALKY_PNG} style={styles.tabChalkyAvatar} resizeMode="contain" />
+                <ChalkyFace size={16} style={styles.tabChalkyAvatar} />
               )}
               <Text style={[
                 styles.tabText,
@@ -232,7 +233,7 @@ export default function PicksScreen() {
       {/* Content */}
       {activeTab === 'WNBA' ? (
         <View style={styles.centered}>
-          <Image source={CHALKY_PNG} style={styles.emptyImage} resizeMode="contain" />
+          <ChalkyMascot size={100} style={styles.emptyImage} />
           <Text style={styles.emptyTitle}>WNBA Coming Soon</Text>
           <Text style={styles.emptyText}>
             The WNBA season tips off in May. Chalky will have full coverage of picks, scores, and player stats when the season begins.
@@ -241,7 +242,7 @@ export default function PicksScreen() {
       ) : isBeforePicksTime() ? (
         // ── Waiting screen: shown before 7 AM ET regardless of DB state ──────
         <View style={styles.centered}>
-          <Image source={CHALKY_PNG} style={styles.emptyImage} resizeMode="contain" />
+          <ChalkyMascot size={100} style={styles.emptyImage} />
           <Text style={styles.emptyTitle}>Picks drop at {getPicksReleaseTime()}</Text>
           <Text style={styles.countdownText}>{countdown}</Text>
           <Text style={styles.emptyText}>
@@ -256,7 +257,7 @@ export default function PicksScreen() {
         </View>
       ) : error ? (
         <View style={styles.centered}>
-          <Image source={CHALKY_PNG} style={styles.emptyImage} resizeMode="contain" />
+          <ChalkyMascot size={100} style={styles.emptyImage} />
           <Text style={styles.emptyTitle}>Can't reach the server.</Text>
           <Text style={styles.emptyText}>Check your connection and try again.</Text>
           <TouchableOpacity style={styles.retryBtn} onPress={() => loadPicks(activeTab)}>
@@ -266,7 +267,7 @@ export default function PicksScreen() {
       ) : picks.length === 0 ? (
         // ── After 7 AM with no picks = pipeline issue, not waiting ───────────
         <View style={styles.centered}>
-          <Image source={CHALKY_PNG} style={styles.emptyImage} resizeMode="contain" />
+          <ChalkyMascot size={100} style={styles.emptyImage} />
           <Text style={styles.emptyTitle}>No picks yet today.</Text>
           <Text style={styles.emptyText}>Chalky's still working on it. Check back shortly.</Text>
           <TouchableOpacity style={styles.retryBtn} onPress={() => loadPicks(activeTab)}>

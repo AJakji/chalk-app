@@ -7,15 +7,13 @@ import {
   Modal,
   View,
   Text,
-  Image,
   TouchableOpacity,
   StyleSheet,
   Dimensions,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { colors, spacing, radius } from '../theme';
-
-const CHALKY_PNG = require('../../assets/chalky.png');
+import ChalkyMascot from './ChalkyMascot';
 
 const SEEN_KEY = '@chalky_intro_seen';
 const { width } = Dimensions.get('window');
@@ -45,7 +43,7 @@ export default function ChalkyOnboarding() {
         <View style={styles.sheet}>
           {/* Chalky hero image */}
           <View style={styles.avatarWrap}>
-            <Image source={CHALKY_PNG} style={styles.heroImage} resizeMode="contain" />
+            <ChalkyMascot size={120} style={styles.heroImage} />
           </View>
 
           {/* Name line */}

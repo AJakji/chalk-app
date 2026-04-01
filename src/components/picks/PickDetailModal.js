@@ -2,7 +2,6 @@ import React, { useRef, useEffect } from 'react';
 import {
   View,
   Text,
-  Image,
   ScrollView,
   TouchableOpacity,
   Pressable,
@@ -14,8 +13,7 @@ import {
   StatusBar,
 } from 'react-native';
 import { colors, spacing, radius, typography } from '../../theme';
-
-const CHALKY_PNG = require('../../../assets/chalky.png');
+import ChalkyFace from '../ChalkyFace';
 
 const SPORTSBOOK_NAMES = {
   draftkings: 'DraftKings',
@@ -175,7 +173,7 @@ export default function PickDetailModal({ pick, visible, onClose }) {
             {/* Chalky's take */}
             <View style={styles.section}>
               <View style={styles.chalkyTakeHeader}>
-                <Image source={CHALKY_PNG} style={styles.chalkyTakeIcon} resizeMode="contain" />
+                <ChalkyFace size={22} style={styles.chalkyTakeIcon} />
                 <Text style={styles.sectionLabel}>Chalky's Take</Text>
               </View>
               <Text style={styles.summaryText}>{analysis.summary}</Text>

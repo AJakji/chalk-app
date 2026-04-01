@@ -1,12 +1,12 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
-  View, Text, Image, StyleSheet, SafeAreaView,
+  View, Text, StyleSheet, SafeAreaView,
   StatusBar, TouchableOpacity, TextInput, Animated,
   RefreshControl, ScrollView, TouchableWithoutFeedback, Keyboard,
 } from 'react-native';
 
-const CHALKY_PNG = require('../../assets/chalky.png');
 import { colors, spacing, radius } from '../theme';
+import ChalkyMascot from '../components/ChalkyMascot';
 import { API_URL } from '../config';
 import PlayerProfileModal from '../components/players/PlayerProfileModal';
 import PlayerAvatar from '../components/players/PlayerAvatar';
@@ -283,7 +283,7 @@ export default function PlayersScreen({ navigation }) {
         {/* WNBA coming soon placeholder */}
         {league === 'WNBA' ? (
           <View style={styles.wnbaPlaceholder}>
-            <Image source={CHALKY_PNG} style={styles.wnbaAvatar} resizeMode="contain" />
+            <ChalkyMascot size={100} style={styles.wnbaAvatar} />
             <Text style={styles.wnbaTitle}>WNBA Coming Soon</Text>
             <Text style={styles.wnbaText}>
               The WNBA season tips off in May. Chalky will have full coverage of picks, scores, and player stats when the season begins.

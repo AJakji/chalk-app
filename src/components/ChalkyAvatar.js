@@ -1,8 +1,7 @@
 import React from 'react';
-import { Image, View, StyleSheet } from 'react-native';
+import { View, StyleSheet } from 'react-native';
 import { colors } from '../theme';
-
-const CHALKY_PNG = require('../../assets/chalky.png');
+import ChalkyFace from './ChalkyFace';
 
 export default function ChalkyAvatar({ size = 40, showGlow = false }) {
   return (
@@ -13,11 +12,7 @@ export default function ChalkyAvatar({ size = 40, showGlow = false }) {
         showGlow && styles.glow,
       ]}
     >
-      <Image
-        source={CHALKY_PNG}
-        style={{ width: size, height: size, borderRadius: size / 2 }}
-        resizeMode="cover"
-      />
+      <ChalkyFace size={size} />
     </View>
   );
 }

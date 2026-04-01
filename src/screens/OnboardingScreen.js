@@ -11,15 +11,14 @@ import {
   StyleSheet,
   FlatList,
   Dimensions,
-  Image,
   SafeAreaView,
   StatusBar,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, spacing, radius } from '../theme';
-
-const CHALKY_PNG = require('../../assets/chalky.png');
+import ChalkyFace from '../components/ChalkyFace';
+import ChalkyMascot from '../components/ChalkyMascot';
 const GOLD = '#FFD700';
 const { width, height } = Dimensions.get('window');
 
@@ -41,7 +40,7 @@ function MockPickCard() {
       </View>
       <Text style={mock.matchup}>BOS @ LAL</Text>
       <View style={mock.likeRow}>
-        <Image source={CHALKY_PNG} style={mock.avatar} resizeMode="contain" />
+        <ChalkyFace size={16} style={mock.avatar} />
         <Text style={mock.likes}>Chalky likes</Text>
         <View style={mock.badge}>
           <Text style={mock.badgeText}>HIGH CONFIDENCE</Text>
@@ -66,7 +65,7 @@ function MockChat() {
         <Text style={chat.userText}>Is McDavid on the power play tonight?</Text>
       </View>
       <View style={chat.botRow}>
-        <Image source={CHALKY_PNG} style={chat.avatar} resizeMode="contain" />
+        <ChalkyFace size={28} style={chat.avatar} />
         <View style={chat.botBubble}>
           <Text style={chat.botText}>
             Yes — McDavid logged 3:24 PP TOI last game. EDM PP is clicking at 28.6% this month. That's a strong lean.
@@ -114,7 +113,7 @@ function Slide({ item }) {
         <MockChat />
       ) : (
         <View style={styles.heroImageWrap}>
-          <Image source={CHALKY_PNG} style={styles.heroImage} resizeMode="contain" />
+          <ChalkyMascot size={160} style={styles.heroImage} />
           <View style={styles.heroBadge}>
             <Text style={styles.heroBadgeText}>AI PICKS</Text>
           </View>

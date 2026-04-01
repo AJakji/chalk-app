@@ -1,11 +1,10 @@
 import React from 'react';
 import {
   Modal, View, Text, ScrollView, Pressable,
-  StyleSheet, Image,
+  StyleSheet,
 } from 'react-native';
 import { colors, spacing, radius } from '../../theme';
-
-const CHALKY_PNG = require('../../../assets/chalky.png');
+import ChalkyFace from '../ChalkyFace';
 
 const G = colors.green;
 
@@ -25,7 +24,7 @@ export default function ConfidenceInfoModal({ visible, onClose }) {
 
           {/* Chalky avatar + title */}
           <View style={styles.titleRow}>
-            <Image source={CHALKY_PNG} style={styles.avatar} resizeMode="contain" />
+            <ChalkyFace size={36} style={styles.avatar} />
             <Text style={styles.title}>How Chalky's confidence works</Text>
           </View>
 

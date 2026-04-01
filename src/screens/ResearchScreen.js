@@ -2,7 +2,6 @@ import React, { useState, useRef, useCallback, useEffect } from 'react';
 import {
   View,
   Text,
-  Image,
   ScrollView,
   TextInput,
   TouchableOpacity,
@@ -27,8 +26,8 @@ import {
   ComponentRenderer,
   ResearchVisual,
 } from '../components/research/ResearchComponents';
-
-const CHALKY_PNG = require('../../assets/chalky.png');
+import ChalkyFace from '../components/ChalkyFace';
+import ChalkyMascot from '../components/ChalkyMascot';
 
 const DAILY_LIMIT = 5;
 const RL_COUNT_KEY = 'chalk_rl_count';
@@ -93,7 +92,7 @@ function ChatBubble({ message, onSend, onReport }) {
       ]}
     >
       {!isUser && (
-        <Image source={CHALKY_PNG} style={styles.chalkyAvatar} resizeMode="cover" />
+        <ChalkyFace size={28} style={styles.chalkyAvatar} />
       )}
       <View style={styles.bubbleColumn}>
         <View style={[styles.bubble, isUser ? styles.bubbleUser : styles.bubbleAssistant]}>
@@ -367,7 +366,7 @@ export default function ResearchScreen() {
             showsVerticalScrollIndicator={false}
             keyboardShouldPersistTaps="handled"
           >
-            <Image source={CHALKY_PNG} style={styles.emptyAvatar} resizeMode="contain" />
+            <ChalkyMascot size={80} style={styles.emptyAvatar} />
             <Text style={styles.emptyTitle}>Research</Text>
             <Text style={styles.emptySubtitle}>
               Stats, trends, matchups, and betting lines. Ask about any player, team, or game.
