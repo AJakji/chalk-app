@@ -419,6 +419,10 @@ def get_position_defense_factor(conn, opponent: str, position: str, stat: str) -
     if not col:
         return 1.0
 
+    # position_defense_ratings stores team abbreviations (e.g. 'UTA').
+    # Convert full team name → abbreviation using the module-level mapping.
+    opp_abbr = FULL_NAME_TO_ABBR.get(opponent, opponent)
+
     try:
         with conn.cursor() as cur:
             # Try position-specific row first, then fall back to aggregate 'ALL' row.
@@ -428,9 +432,9 @@ def get_position_defense_factor(conn, opponent: str, position: str, stat: str) -
                 cur.execute(
                     f"""SELECT {col}
                         FROM position_defense_ratings
-                        WHERE team_name ILIKE %s AND position = %s AND sport = 'NBA'
+                        WHERE team_name = %s AND position = %s AND sport = 'NBA'
                         ORDER BY updated_at DESC LIMIT 1""",
-                    (f'%{opponent}%', pos_lookup)
+                    (opp_abbr, pos_lookup)
                 )
                 row = cur.fetchone()
                 if row and row[0] is not None:
@@ -458,16 +462,16 @@ def get_position_defense_factor(conn, opponent: str, position: str, stat: str) -
 # ---------------------------------------------------------------------------
 
 def get_player_logs(conn, player_id: int, sport: str = 'NBA') -> list[dict]:
-    """Returns game logs ordered by game date desc."""
+    """Returns game logs for the current season only, ordered by game date desc."""
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """SELECT *
                    FROM player_game_logs
-                   WHERE player_id = %s AND sport = %s
+                   WHERE player_id = %s AND sport = %s AND season = %s
                    ORDER BY game_date DESC
                    LIMIT 25""",
-                (player_id, sport)
+                (player_id, sport, CURRENT_SEASON)
             )
             return cur.fetchall()
     except Exception:
@@ -739,19 +743,25 @@ def project_player(
     ts_denom = 2 * (fga_season + 0.44 * fta_season)
     ts_pct   = pts_season / ts_denom if ts_denom > 0 else 0.50
     ts_lg    = 0.565  # league average TS%
-    ts_f     = clamp(ts_pct / ts_lg, 0.85, 1.15)
 
     # Usage approximation — normalized so league-average player ≈ 1.0.
-    # Denominator min * 0.38 gives ~1.0 for a typical starter (8 FGA, 2.5 FTA, 25 min).
-    # IMPORTANT: The weighted base (L5/L10/L20/season) already embeds a player's usage
-    # patterns — their actual historical scoring reflects how much the ball comes to them.
-    # Applying usage_approx directly as a multiplier double-counts usage for stars.
-    # Fix: only adjust ±a small amount based on deviation from league-average (1.0).
-    # The injury boost (usage_boost from out players) still applies in full — that's
-    # a genuine change from baseline and should move the projection.
-    usage_approx = (fga_season + 0.44 * fta_season) / max(min_season * 0.38, 1)
-    usage_deviation = usage_approx - 1.0
-    usage_f = clamp(1.0 + usage_deviation * 0.20 + usage_boost, 0.93, 1.20)
+    usage_approx   = (fga_season + 0.44 * fta_season) / max(min_season * 0.38, 1)
+    usage_deviation = usage_approx - 1.0  # absolute deviation from league-average (1.0)
+
+    # Combined efficiency factor — replaces the old separate ts_f * usage_f product.
+    # The weighted base (L5/L10/L20/season) already reflects a player's historical
+    # scoring output, which inherently captures both their efficiency (TS%) and their
+    # volume (usage). Multiplying by both ts_f AND usage_f independently amplified stars
+    # by ~28% on top of a base that already reflected their elite production.
+    # Fix: use one blended factor that takes the SMALLER of the two deviations to avoid
+    # amplification when both are simultaneously high (e.g. Jokic = 1.279× → 1.022×).
+    ts_deviation_rel = (ts_pct - ts_lg) / ts_lg   # relative to league avg TS%
+    combined_eff_f   = 1.0 + min(ts_deviation_rel * 0.15, usage_deviation * 0.10)
+    combined_eff_f   = clamp(combined_eff_f, 0.90, 1.15)
+
+    # Injury/role boost is applied separately — it represents a genuine change from
+    # a player's baseline (someone else is out), not a double-count of existing skill.
+    injury_boost_f = clamp(1.0 + usage_boost, 1.0, 1.20)
 
     # Archetype
     archetype = classify_archetype(
@@ -824,8 +834,8 @@ def project_player(
                   * pace_f
                   * rest_f
                   * ha_pts_f
-                  * ts_f
-                  * usage_f
+                  * combined_eff_f
+                  * injury_boost_f
                   * scoring_context_f
                   * game_script_f)
 
@@ -841,8 +851,8 @@ def project_player(
         'pace_f':         round(pace_f, 3),
         'rest_f':         round(rest_f, 3),
         'home_away_f':    round(ha_pts_f, 3),
-        'ts_f':           round(ts_f, 3),
-        'usage_f':        round(usage_f, 3),
+        'combined_eff_f': round(combined_eff_f, 3),
+        'injury_boost_f': round(injury_boost_f, 3),
         'scoring_ctx_f':  round(scoring_context_f, 3),
         'game_script_f':  round(game_script_f, 3),
         'archetype':      archetype,
@@ -1258,22 +1268,23 @@ def get_market_line(conn, player_name: str, prop_type: str, game_date: str) -> f
     Returns None if no line posted yet — prop is skipped.
 
     Matching strategy:
-    1. Exact full name (case-insensitive) — avoids surname collisions (Davis, Williams, etc.)
-    2. Last-name fallback only for surnames longer than 5 chars with no ambiguous matches
+    1. Exact full name (case-insensitive)
+    2. First + last name partial match — handles "N. Jokic" vs "Nikola Jokic" style mismatches
+    3. Last-name fallback only when surname is >= 6 chars AND exactly ONE distinct player
+       name matches today — prevents "Aaron Holiday" from getting "Jrue Holiday"'s line
     """
     if not player_name:
         return None
 
-    # Translate model short code → DB prop_type name
     db_prop_type = PROP_TYPE_TO_DB.get(prop_type, prop_type)
 
     try:
         with conn.cursor() as cur:
-            # Primary: exact full-name match (case-insensitive)
+            # Step 1 — exact full-name match
             cur.execute(
                 """SELECT prop_line
                    FROM player_props_history
-                   WHERE player_name ILIKE %s
+                   WHERE LOWER(player_name) = LOWER(%s)
                      AND prop_type = %s
                      AND game_date = %s
                    ORDER BY created_at DESC LIMIT 1""",
@@ -1283,21 +1294,54 @@ def get_market_line(conn, player_name: str, prop_type: str, game_date: str) -> f
             if row and row[0] is not None:
                 return float(row[0])
 
-            # Fallback: last name only, but only if it uniquely identifies one player
-            last_name = player_name.split()[-1]
-            if len(last_name) > 5:
+            # Step 2 — first + last partial match (handles abbreviations/nicknames)
+            name_parts = player_name.strip().split()
+            if len(name_parts) >= 2:
+                first = name_parts[0]
+                last  = name_parts[-1]
                 cur.execute(
-                    """SELECT prop_line, COUNT(*) OVER () AS name_count
+                    """SELECT prop_line
                        FROM player_props_history
                        WHERE player_name ILIKE %s
+                         AND player_name ILIKE %s
                          AND prop_type = %s
                          AND game_date = %s
                        ORDER BY created_at DESC LIMIT 1""",
-                    (f'%{last_name}%', db_prop_type, game_date)
+                    (f'%{first}%', f'%{last}%', db_prop_type, game_date)
                 )
                 row = cur.fetchone()
-                if row and row[0] is not None and row[1] == 1:
+                if row and row[0] is not None:
                     return float(row[0])
+
+            # Step 3 — last-name fallback, only when surname uniquely identifies ONE player
+            last = name_parts[-1] if name_parts else player_name
+            if len(last) < 6:
+                return None  # too short — too many collisions (Lee, King, etc.)
+
+            cur.execute(
+                """SELECT prop_line, player_name
+                   FROM player_props_history
+                   WHERE player_name ILIKE %s
+                     AND prop_type = %s
+                     AND game_date = %s
+                   ORDER BY created_at DESC""",
+                (f'%{last}%', db_prop_type, game_date)
+            )
+            fallback_rows = cur.fetchall()
+
+            # Count how many distinct player names share this surname today
+            distinct_names = {r[1].lower() for r in fallback_rows if r[1]}
+            if len(distinct_names) == 1:
+                # Exactly one player with this surname — safe to use
+                return float(fallback_rows[0][0])
+            elif len(distinct_names) > 1:
+                log.warning(
+                    'get_market_line: surname "%s" matches %d players today (%s) — '
+                    'skipping line lookup for %s',
+                    last, len(distinct_names),
+                    ', '.join(sorted(distinct_names)), player_name
+                )
+
     except Exception:
         pass
     return None
