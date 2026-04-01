@@ -241,6 +241,20 @@ def get_pk_quality_factor(opp_team_logs: list) -> float:
 
 # ── Utility helpers ───────────────────────────────────────────────────────────
 
+def is_acceptable_moneyline(ml_odds) -> bool:
+    """
+    Only generate picks for moneylines between -160 and +999.
+    Heavy favorites (-160 or worse) offer too little value — skip.
+    No restriction on underdogs (positive odds always acceptable).
+    """
+    if ml_odds is None:
+        return False
+    ml_odds = float(ml_odds)
+    if ml_odds < 0:
+        return ml_odds >= -160  # -160 is acceptable; -161 or worse is not
+    return True  # positive odds always acceptable
+
+
 def safe(val, default: float = 0.0) -> float:
     try:
         return float(val) if val is not None else default

@@ -101,22 +101,22 @@ LEAGUE_AVG: dict[str, float] = {
 }
 
 # ---------------------------------------------------------------------------
-# Minimum edge thresholds (projection must exceed line by at least this)
-# ---------------------------------------------------------------------------
-MIN_EDGE: dict[str, float] = {
-    'points':    0.8,
-    'rebounds':  0.5,
-    'assists':   0.4,
-    'threes':    0.25,
-    'pra':       1.5,
-    'pr':        1.0,
-    'pa':        1.0,
-    'ar':        0.8,
-}
-
-# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def is_acceptable_moneyline(ml_odds) -> bool:
+    """
+    Only generate picks for moneylines between -160 and +999.
+    Heavy favorites (-160 or worse) offer too little value — skip.
+    No restriction on underdogs (positive odds always acceptable).
+    """
+    if ml_odds is None:
+        return False
+    ml_odds = float(ml_odds)
+    if ml_odds < 0:
+        return ml_odds >= -160  # -160 is acceptable; -161 or worse is not
+    return True  # positive odds always acceptable
+
 
 def safe_float(v, default: float = 0.0) -> float:
     try:
@@ -698,6 +698,7 @@ class PlayerProjection:
     position:      str
     archetype:     str
     game_date:     str
+    games_played:  int = 0                              # actual game log count for sample_size in confidence
     props:         dict = field(default_factory=dict)   # prop_type → {proj, confidence, line, edge, factors_json}
 
 
@@ -993,15 +994,16 @@ def project_player(
     }
 
     return PlayerProjection(
-        player_id   = player_id,
-        player_name = player_name,
-        team        = team,
-        opponent    = opponent,
-        is_home     = is_home,
-        position    = position,
-        archetype   = archetype,
-        game_date   = game_date,
-        props       = {
+        player_id    = player_id,
+        player_name  = player_name,
+        team         = team,
+        opponent     = opponent,
+        is_home      = is_home,
+        position     = position,
+        archetype    = archetype,
+        game_date    = game_date,
+        games_played = len(logs),
+        props        = {
             'points':    {'proj': proj_pts,  'conf': conf_pts,  'factors': factors_pts},
             'rebounds':  {'proj': proj_reb,  'conf': conf_reb,  'factors': factors_reb},
             'assists':   {'proj': proj_ast,  'conf': conf_ast,  'factors': factors_ast},
@@ -1317,13 +1319,26 @@ def upsert_player_projections(conn, proj: PlayerProjection) -> int:
             # Store projection regardless of line availability so the 9:15 AM --props-only
             # re-run and edge detector can apply the edge filter once lines are posted.
             line = get_market_line(conn, proj.player_name, prop_type, proj.game_date)
+
+            # Combo sanity check: if projection is >20% above or below the market line,
+            # the correlation factor likely overcorrected — skip this prop.
+            if line is not None and prop_type in ('pra', 'pr', 'pa', 'ar') and line > 0:
+                ratio = raw_proj / line
+                if ratio > 1.20 or ratio < 0.80:
+                    import logging
+                    logging.warning(
+                        f'[NBA] Combo sanity fail {proj.player_name} {prop_type}: '
+                        f'proj={raw_proj:.1f} line={line:.1f} ratio={ratio:.2f} — skipping'
+                    )
+                    continue
+
             if line is not None:
                 edge_val = round(raw_proj - line, 2)
                 # Use universal confidence formula — returns None if edge too small.
                 # IMPORTANT: do NOT skip — store every projection so the edge detector
                 # can process it. Skipping here means the edge detector never sees this
                 # player, even if lines move later in the day.
-                conf_score = calculate_confidence(edge_val, prop_type, 'NBA', len(proj.props))
+                conf_score = calculate_confidence(edge_val, prop_type, 'NBA', proj.games_played)
                 if conf_score is None:
                     conf_score = raw_conf  # below edge threshold — store with base confidence
                 factors = {**factors, 'market_line': line, 'edge': edge_val}

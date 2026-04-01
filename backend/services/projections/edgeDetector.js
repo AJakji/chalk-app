@@ -583,6 +583,7 @@ function calculateConfidence(edge, propType, sport, sampleSize = 10) {
     hits: 0.3, total_bases: 0.5, home_runs: 0.2, rbis: 0.4,
     strikeouts: 0.8, earned_runs: 0.5,
     run_line: 0.5,
+    moneyline: 0.05,  // 5% win-probability edge required for any moneyline pick
   }
   const minEdge = MIN_EDGES[propType] || 1.0
   if (Math.abs(edge) < minEdge) return null
@@ -743,9 +744,9 @@ const TEAM_BET_STD = {
 
 // Minimum raw edge (in sport units) before computing cover probability
 const MIN_TEAM_EDGE = {
-  NBA: { spread: 3.5, total: 4.5 },
-  MLB: { run_line: 0.7, total: 1.0 },
-  NHL: { puck_line: 0.25, total: 0.35 },
+  NBA: { spread: 1.5, total: 4.5 },
+  MLB: { run_line: 0.5, total: 1.0 },
+  NHL: { puck_line: 0.4, total: 0.35 },
 };
 
 // Minimum cover probability (0–1) to generate a pick
