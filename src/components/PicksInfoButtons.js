@@ -50,74 +50,74 @@ const SCHEDULE_STEPS = [
 const MODEL_DATA = {
   NBA: {
     player: {
-      intro: 'Before a single NBA prop pick reaches the app it has passed through dozens of data checks. Most projections never make it. The ones that do have a real, measurable edge over the line the book posted.',
+      intro: 'Every NBA player projection is the product of a multi-factor formula — not a single stat, not a gut call. The formula runs identically for every player in every game on the slate. Most outputs never become picks.',
       sections: [
         {
           icon: '📊',
-          title: 'Game Log Analysis',
+          title: 'The Weighted Base',
           items: [
-            'Every game from the last 5, 10, and 20 appearances is weighted differently — recent games matter more but outliers are dampened so one big game does not inflate the projection',
-            'Home and away splits are tracked separately — some players perform 15-20% differently depending on the court',
-            'Back-to-back fatigue is factored in — players on the second night of a back-to-back historically underperform their lines',
+            'The base projection starts with a rolling weighted average across the last 5, 10, and 20 games. The 5-game window carries the highest coefficient because recent form is more predictive than season totals — but outlier games are dampened using a trimmed mean so one 50-point explosion does not permanently inflate the output.',
+            'Home and away splits are computed separately and applied as a home/road factor clamped between 0.88 and 1.12 — wide enough to matter, narrow enough to prevent a single environment from dominating the formula.',
+            'Rest factor is a multiplier applied per day of rest: same-day back-to-back carries a 0.91 coefficient, second-night back-to-back is 0.94, standard rest is 1.0, and three-plus days of rest bumps to 1.03.',
           ],
         },
         {
           icon: '🏀',
-          title: 'Opponent Defense',
+          title: 'Contextual Multipliers',
           items: [
-            'Every team is rated on how many points, rebounds, and assists they allow to each specific position — not just overall defense. A team can be great against guards and terrible against centers.',
-            'These ratings update nightly so a team on a defensive slide gets reflected in tonight\'s projection',
-            'Pace of play is measured per matchup — some teams force faster games which directly inflates counting stats for both sides',
+            'Position Defense Factor (PDF): every team is rated on points, rebounds, and assists allowed to each of the five positions specifically — not overall defense. A team can rank 28th against centers and 4th against guards simultaneously. The PDF is recalculated nightly and applied as a positional multiplier to the base projection.',
+            'Pace Factor: possessions per 48 minutes for tonight\'s matchup is computed and compared to league average. A pace delta above +3 possessions applies an upward multiplier to all counting stats on both sides. A pace delta below -3 applies a downward multiplier.',
+            'Game Script Factor: the spread is used to estimate blow-out probability. When a team is favored by 12+ points the model applies a compression factor to starters\' minutes projections — garbage time reduces counting stats and the formula accounts for it.',
           ],
         },
         {
           icon: '⚡',
-          title: 'Contextual Factors',
+          title: 'How the Formula Runs',
           items: [
-            'When a starter is out their usage gets redistributed across teammates — the model detects this and adjusts projections for everyone in the lineup',
-            'Minutes projections are adjusted for game script — a team expected to lose big will rest starters early, compressing stats',
-            'Efficiency is measured against league average — only the deviation from average is applied so the base projection is never double-counted',
+            'Injury adjustments run first: when a starter is out their usage share is redistributed proportionally across remaining players based on historical backup usage patterns. The redistribution is applied before any other factor so it flows through every subsequent multiplier.',
+            'The base × PDF × Pace × Rest × Game Script produces the raw projection. That number is then tested against an efficiency deviation — the player\'s true shooting percentage versus league average is used to adjust the points component without double-counting usage.',
+            'Combo props (e.g. points + rebounds + assists) apply a correlation discount to the combined projection. High-point games often mean fewer assist opportunities — the formula reduces the combined projection by a measured correlation coefficient rather than summing the individual projections directly.',
           ],
         },
         {
           icon: '🎯',
-          title: 'Edge Detection',
+          title: 'Edge and Confidence',
           items: [
-            'The projection is compared against the live line pulled from multiple sportsbooks at 4 AM — not yesterday\'s closing line',
-            'Each prop type has its own minimum edge requirement. Points needs at least 1.5 above the line. Rebounds needs 0.8. The threshold exists because smaller edges have too much variance to be reliable.',
-            'Confidence is mathematically tied to edge size — a 74% confidence pick has roughly 2.5x the minimum required edge. An 87% pick has 4x. The number is not a feeling — it is a ratio.',
+            'Live lines are pulled from multiple books at 4 AM. The projection is compared against tonight\'s line — not yesterday\'s closing number. Edge = projection minus line.',
+            'Each stat has its own minimum edge threshold based on measured variance: Points requires +1.5, Rebounds requires +0.8, Assists requires +0.7. Anything below threshold is filtered. No edge means no pick — the output is discarded regardless of how clean the projection looks.',
+            'Confidence is a ratio of edge size to the minimum threshold for that stat type. A 74% confidence pick has roughly 2.5× the minimum required edge. An 87% pick has 4×. The percentage is derived from the ratio — it is not a subjective score.',
           ],
         },
       ],
     },
     team: {
-      intro: 'Spread and total picks are built on full team projection models that run every game on tonight\'s slate. Both sides of every matchup are projected independently then compared to the market line.',
+      intro: 'Spread and total picks run both teams through the full projection model independently. The outputs are compared against each other and against the market line. The market has to be meaningfully wrong for a pick to qualify.',
       sections: [
         {
           icon: '📊',
-          title: 'Team Offensive Output',
+          title: 'The Weighted Base',
           items: [
-            'Points per game weighted by recent form — a team on a hot streak is treated differently than their season average suggests',
-            'Pace and possessions per game — a fast team playing a slow team creates a total that is different from both teams\' averages',
-            'Home court adjustment — home teams historically outperform their road numbers by a measurable margin across the league',
+            'Each team\'s offensive output is projected using the same weighted rolling window as player props — 5, 10, and 20-game coefficients with outlier dampening. A team on a 5-game scoring run is treated differently than their season average suggests.',
+            'Home court factor is applied as a multiplier derived from the team\'s own home/road differential over the current season — league-average home advantage is not assumed, it is measured per team.',
+            'Rest factor applies at the team level using the same coefficient structure: back-to-back, standard rest, extended rest.',
           ],
         },
         {
           icon: '🛡️',
-          title: 'Defensive Matchup',
+          title: 'Contextual Multipliers',
           items: [
-            'Opponent defensive rating updated nightly — how many points allowed per 100 possessions in recent games',
-            'Pace suppression tendencies — elite defenses slow games down which directly affects over/under projections',
-            'Home and away defensive splits tracked separately',
+            'Opponent defensive rating (points allowed per 100 possessions) is updated nightly and applied to reduce the attacking team\'s projected output. A defense ranked in the bottom 10 over the last 10 games is treated as more vulnerable than their season rank suggests.',
+            'Pace delta between the two teams drives the total projection — a fast team hosting a slow team produces a pace estimate that is lower than the fast team\'s average but higher than the slow team\'s average, and both offensive projections adjust accordingly.',
+            'Pace suppression factor: teams with elite defensive ratings historically reduce opponent pace. This is measured and applied as a secondary downward multiplier on total projections.',
           ],
         },
         {
           icon: '🎯',
-          title: 'Edge Detection',
+          title: 'Edge and Confidence',
           items: [
-            'Projected margin compared directly to the spread — if the model says home team wins by 6 and the spread is -3.5, that is a +2.5 edge on the cover',
-            'Minimum edge of 1.5 points required for spread picks — anything tighter is too close to call reliably',
-            'Total picks require the projected combined score to differ from the line by at least 2 points',
+            'Projected margin (home projection minus away projection) is compared directly to the spread. A projected margin of +6 against a spread of -3.5 is a +2.5 edge on the cover.',
+            'Spread picks require a minimum 1.5-point edge. Total picks require the projected combined score to differ from the over/under by at least 2 points. Anything inside those thresholds is too close to the market to be reliable.',
+            'Confidence for team picks uses the same ratio structure as player props — edge size divided by the minimum threshold, converted to a percentage and clamped between 60% and 95%.',
           ],
         },
       ],
@@ -125,65 +125,65 @@ const MODEL_DATA = {
   },
   NHL: {
     player: {
-      intro: 'NHL props are harder to model than any other sport — ice time changes, line combinations shift, and a single goalie decision can change everything. Chalky tracks all of it.',
+      intro: 'NHL player props are the hardest to model in any sport. Ice time shifts without warning, line combinations rotate daily, and one goalie decision changes every shooter projection on the opposite team. The formula handles all of it — but it only runs after the starting goalie is confirmed.',
       sections: [
         {
           icon: '📊',
-          title: 'Player Performance',
+          title: 'The Weighted Base',
           items: [
-            'Even strength and power play production are tracked completely separately — a player who scores almost entirely on the power play is a very different bet than one who produces at even strength',
-            'Time on ice is projected for tonight based on recent usage — coaches adjust lines constantly and those shifts directly affect counting stats',
-            'Linemate quality is measured — being on a line with elite players increases shot and point production significantly',
+            'Even strength and power play production are tracked as completely separate data streams. A player who generates 70% of his points on the power play is a fundamentally different projection than one who produces primarily at even strength — the formula does not combine these until the final output, so each component is weighted correctly.',
+            'Time on ice is projected per game based on the last 10 appearances, adjusted for line combination changes detected in morning skate reports. The TOI projection feeds directly into the counting stat formula — more ice time means proportionally higher shot and point ceilings.',
+            'Linemate quality factor: being on a line with a top-6 forward increases shot and point production by a measured coefficient. The formula detects line combination changes and adjusts accordingly before the model runs at 4:30 AM.',
           ],
         },
         {
           icon: '🥅',
           title: 'Goalie Intelligence',
           items: [
-            'Starting goalie is confirmed from morning skate reports before the model runs at 4:30 AM — no projection is built on an unconfirmed starter',
-            'Each goalie\'s save percentage is compared to league average — a goalie 3% below average allows measurably more goals and that flows directly into shooter prop projections',
-            'When a backup goalie is confirmed the model automatically boosts confidence on shooter props for the opposing team — backups allow significantly more goals historically',
+            'No projection runs until the starting goalie is confirmed from morning skate reports. An unconfirmed starter is too risky to model around — if confirmation has not come by 4:00 AM the game is excluded from that morning\'s slate.',
+            'Each starting goalie\'s save percentage is compared to league average (.910) to produce a Goals Against Factor. A goalie at .895 — 1.5% below average — applies a 1.08 multiplier to the opposing team\'s goal projection. A goalie at .925 applies a 0.93 factor. The multiplier is clamped to prevent an outlier season from producing unrealistic outputs.',
+            'Backup confirmation triggers an automatic upward adjustment to all shooter props on the opposing team. Backups allow measurably more goals on a per-shot basis historically, and books are consistently slow to reprice lines when a backup is confirmed — that gap is where the edge comes from.',
           ],
         },
         {
           icon: '🎯',
-          title: 'Edge Detection',
+          title: 'Edge and Confidence',
           items: [
-            'Shots on goal requires a minimum 0.8 edge over the line — this is a tighter threshold because shot volume is more volatile than point production',
-            'Goals and assists require 0.3 minimum edge — lower threshold because the lines are already low and small edges are meaningful',
-            'Live lines pulled from books at 4 AM before the model runs',
+            'Shots on goal uses a 0.8 minimum edge — a tighter threshold than point props because shot volume is more volatile and the variance requires a larger cushion to produce reliable picks.',
+            'Goals and assists use a 0.3 minimum edge — lower threshold because the lines are already low integers and even a 0.3 delta represents a meaningful percentage edge over the market.',
+            'Lines are pulled live at 4 AM and the model runs at 4:30 AM after goalie confirmation. The 30-minute window between data pull and model run is intentional — it catches any late line movement before the projection is finalized.',
           ],
         },
       ],
     },
     team: {
-      intro: 'Puck line and total picks combine goalie quality, team offense, and the specific matchup dynamic to project how many goals get scored and by whom.',
+      intro: 'Puck line and total picks run the same formula as player props but at the team level — goalie quality on both sides, offensive depth, and pace of play all combine into a single projected goal total for each team.',
       sections: [
         {
           icon: '📊',
-          title: 'Goal Projection',
+          title: 'The Weighted Base',
           items: [
-            'Each team\'s offensive output is projected independently using recent goals scored per game weighted by form',
-            'The combined projection is then adjusted for goalie quality on both sides — an elite goalie matchup suppresses totals meaningfully',
-            'Home and away splits tracked separately — NHL home ice advantage is statistically significant',
+            'Each team\'s offensive output is projected independently using goals scored per game over the last 5 and 10 games with weighted coefficients. Recent form carries more weight than the season total — a team on a 4-game cold stretch is modeled as weaker than their season goals-for average suggests.',
+            'Home and away splits are tracked separately. NHL home ice advantage is statistically significant and the formula measures it per team rather than applying a league-average assumption.',
+            'The combined projected total is derived from both teams\' offensive projections — not from historical over/under data. Each team\'s number feeds the total independently so both sides of the matchup are accounted for correctly.',
           ],
         },
         {
           icon: '🥅',
           title: 'Goalie Factor',
           items: [
-            'Starting goalie save percentage vs league average is applied as a multiplier to the opposing team\'s goal projection',
-            'The goalie factor is capped to prevent one outlier goalie performance from swinging projections unrealistically',
-            'Backup detection automatically adjusts the total upward when confirmed — books are often slow to move lines for backup starters, creating real edges',
+            'The goalie Goals Against Factor from the player model is applied directly to the team model — the same save percentage calculation reduces or increases the opposing team\'s projected goal output.',
+            'The factor is clamped between 0.88 and 1.14. Even the worst goalie in the league cannot multiply the projection beyond 1.14× — this prevents one catastrophic goalie performance from generating unrealistic total projections.',
+            'Backup confirmation automatically adjusts both the total and the puck line projection. When a backup starts the model assumes a larger goal differential is possible — this flows into both the over/under pick and the puck line edge calculation.',
           ],
         },
         {
           icon: '🎯',
-          title: 'Edge Detection',
+          title: 'Edge and Confidence',
           items: [
-            'Projected goal differential vs the puck line (-1.5) — a team projected to win by 2.1 goals has a +0.6 edge on the puck line',
-            'Minimum 0.4 goal edge required for puck line picks',
-            'Total picks need 0.8 goal edge over the over/under',
+            'Projected goal differential (home minus away) is compared to the puck line (-1.5). A team projected to win by 2.1 goals has a +0.6 edge on the puck line — that clears the minimum threshold of 0.4.',
+            'Total picks require a 0.8-goal edge over the over/under. NHL totals are typically set between 5.5 and 6.5 goals — an 0.8-goal delta represents a meaningful edge at that scale.',
+            'Confidence is computed the same way as player props: edge divided by minimum threshold, converted to percentage, clamped between 60% and 95%.',
           ],
         },
       ],
@@ -191,75 +191,74 @@ const MODEL_DATA = {
   },
   MLB: {
     player: {
-      intro: 'Baseball props are the most data-rich picks in the app. The model pulls from Statcast pitch-level data, umpire tendencies, weather readings, and ballpark factors that most bettors never think about.',
+      intro: 'Baseball is the most data-rich sport in the model. Every projection pulls from Statcast pitch-level data, umpire zone tendencies, live weather readings, ballpark coefficients, and platoon splits that most bettors never think about. The formula has more inputs than any other sport and the edge thresholds are set accordingly.',
       sections: [
         {
           icon: '⚾',
-          title: 'Batter Analysis',
+          title: 'The Weighted Base',
           items: [
-            'Platoon splits are applied for every batter — how they historically perform against left and right-handed pitching matters enormously and books often misprice these edges',
-            'Exit velocity and hard hit rate from Statcast tell the model how well a batter is actually making contact regardless of recent luck',
-            'Season baseline is weighted against recent form — a hot start inflates lines and a slump creates opportunities',
+            'The base uses ISO (Isolated Power = slugging minus batting average) rather than raw slugging to measure true power output without inflating for singles contact. ISO is weighted across the last 15 and 30 games with recent form carrying a higher coefficient.',
+            'BABIP (Batting Average on Balls In Play) is tracked to separate luck from skill. A batter with a BABIP well above his career average is likely due to regression — the formula detects this and moderates the base projection so the model is not chasing a hot streak that the market has already priced in.',
+            'Platoon splits are applied as a hard multiplier: every batter\'s historical performance against same-handed and opposite-handed pitching is computed separately and the correct split is used for tonight\'s matchup. Books frequently misprice platoon edges — it is one of the most consistent sources of +EV in baseball props.',
           ],
         },
         {
           icon: '🔥',
-          title: 'Pitcher Arsenal',
+          title: 'Pitcher and Matchup Factors',
           items: [
-            'Each starting pitcher\'s pitch mix is analyzed — fastball velocity trends, breaking ball usage rate, and how effective each pitch has been recently',
-            'The batter\'s historical performance against that specific pitch type is factored in — some batters are genuinely elite against breaking balls but weak against velocity',
-            'Pitcher strikeout rate and walk rate trends drive pitcher prop projections',
+            'FIP (Fielding Independent Pitching) is used instead of ERA for pitcher evaluation. ERA includes defensive support which the pitcher does not control — FIP isolates strikeouts, walks, and home runs allowed, which are the outcomes the pitcher actually determines. A pitcher with a good ERA but a worse FIP is weaker than his numbers suggest.',
+            'Pitch mix analysis: fastball velocity trend over the last 5 starts (velocity decline is a warning sign), breaking ball usage rate, and whiff rate per pitch type are all measured. The specific batter\'s historical whiff rate against that pitch type is applied as a multiplier — some hitters are genuinely elite against breaking balls and terrible against velocity.',
+            'The matchup produces a projected strikeout rate and hits-allowed rate for the pitcher, which directly drives the opposing batter\'s hit and total bases projections.',
           ],
         },
         {
           icon: '🌤️',
-          title: 'Game Environment',
+          title: 'Environmental Coefficients',
           items: [
-            'Wind speed and direction are pulled for tonight\'s game — wind blowing out at 15+ mph at Wrigley materially increases home run probability and that shows up in projections',
-            'Temperature affects how far the ball travels — cold games suppress offense and the model adjusts accordingly',
-            'Umpire tendencies are tracked — some umpires run tight zones that increase walks and suppress strikeouts. This directly affects pitcher strikeout props.',
-            'Ballpark dimensions and altitude are applied — Coors Field at elevation plays very differently from every other park in baseball',
+            'Wind speed and direction are pulled from tonight\'s venue forecast. Wind blowing out at 15+ mph applies a home run multiplier derived from historical run environment data at that specific park under those conditions. Wind in suppresses offense — the coefficient of restitution of a baseball changes with temperature and the formula accounts for it.',
+            'Temperature factor: cold games below 50°F apply a downward multiplier to all offensive projections based on measured historical differences in ball carry at temperature. This is not a rough estimate — it is a coefficient derived from Statcast exit velocity data segmented by game-time temperature.',
+            'Umpire zone tendencies: every active umpire has a measured called-strike-rate vs league average. A tight-zone umpire who calls 4% fewer strikes than average directly suppresses strikeout props for starting pitchers and increases walk props. The umpire factor is applied as a multiplier to all pitcher strikeout projections before edge detection.',
           ],
         },
         {
           icon: '🎯',
-          title: 'Edge Detection',
+          title: 'Edge and Confidence',
           items: [
-            'Hit props need a minimum 0.3 edge. Total bases need 0.5. Home runs need 0.2. Each threshold was set based on the variance of that stat — lower variance stats need bigger edges to be reliable.',
-            'Pitcher strikeout minimum edge of 0.8 — strikeout props have high variance so the model requires a larger cushion to qualify',
-            'All lines pulled live at 4 AM before the model runs',
+            'Each stat has a minimum edge threshold set by its variance: Hits +0.3, Total Bases +0.5, Home Runs +0.2, Strikeouts (pitcher) +0.8. The strikeout threshold is highest because variance is highest — a single bad inning can move a strikeout total by 2 or 3 units so the model requires a larger cushion.',
+            'All lines are pulled live at 4 AM before the model runs. Overnight line movement from sharp action is captured — a line that has moved significantly from open is flagged and the edge is recalculated against the current number.',
+            'Confidence follows the same ratio structure: edge divided by minimum threshold, converted to percentage, clamped between 60% and 95%.',
           ],
         },
       ],
     },
     team: {
-      intro: 'Run line and total picks combine pitching quality, offensive depth, bullpen fatigue, and environmental factors into a single projected score for each team.',
+      intro: 'Run line and total picks combine starting pitcher quality, bullpen depth, offensive run scoring rate, and environmental factors into a projected final score for each team. The market sets the line — the model has to beat it by a minimum margin to generate a pick.',
       sections: [
         {
           icon: '📊',
-          title: 'Run Projection',
+          title: 'The Weighted Base',
           items: [
-            'Starting pitcher ERA and recent form drives the opposing team\'s run projection — a pitcher on a hot streak suppresses offense measurably',
-            'Bullpen fatigue is tracked — a team that burned their best relievers yesterday is more vulnerable in tight games tonight',
-            'Team runs scored per game weighted by recent form on both sides of the ball',
+            'Starting pitcher FIP drives the opposing team\'s run projection. A pitcher with a recent FIP of 3.1 is a meaningfully stronger suppressor than one at 4.4 and the formula weights both the season FIP and the last-5-starts FIP with a recency coefficient.',
+            'Bullpen fatigue is tracked at the individual reliever level — a closer or setup man who threw 30+ pitches yesterday has a reduced availability and effectiveness coefficient for tonight. The team\'s bullpen depth rating is adjusted dynamically based on who is likely unavailable.',
+            'Team runs scored per game uses the same weighted rolling window as player props — 5 and 15-game windows with recent form carrying a higher coefficient. Offensive variance in baseball is high enough that season averages mislead more than they help.',
           ],
         },
         {
           icon: '🌤️',
-          title: 'Park and Weather',
+          title: 'Park and Environment',
           items: [
-            'Every ballpark has a run factor that adjusts the projected total — a game at Coors projects higher than the same matchup at Petco Park',
-            'Wind and temperature applied to the total projection for tonight specifically — not a seasonal average',
-            'Umpire run environment tendencies factored in — some umpires consistently produce high or low scoring games based on zone tendencies',
+            'Every MLB ballpark has a run factor coefficient built into the model — Coors Field at elevation projects 12-15% more runs than the same matchup at Petco Park or Oracle Park. The coefficient is derived from multi-year run environment data at each venue, not from generic park factor tables.',
+            'Wind and temperature are applied to the total projection for tonight specifically. A hot game at a hitter-friendly park with wind blowing out produces a different total than the same matchup on a cold night with wind in — the formula handles both.',
+            'Umpire run environment tendencies are applied at the game level. Some umpires consistently produce high or low scoring environments across their career — these tendencies are measured and applied as a multiplier to the total projection.',
           ],
         },
         {
           icon: '🎯',
-          title: 'Edge Detection',
+          title: 'Edge and Confidence',
           items: [
-            'Projected run margin vs the run line (-1.5) — minimum 0.5 run edge required to generate a pick',
-            'Projected total vs the over/under — minimum 1.0 run edge required',
-            'Most games produce no qualifying team picks. When one does appear it has a real, data-backed reason behind it.',
+            'Projected run margin versus the run line (-1.5): minimum 0.5-run edge required. A team projected to win by 2.3 runs has a +0.8 edge — that clears the threshold.',
+            'Projected combined total versus the over/under: minimum 1.0-run edge required. Baseball total variance is high enough that anything inside 1 run is indistinguishable from noise.',
+            'Most games produce no qualifying team picks. The model runs every game and produces projections for all of them — but the vast majority sit too close to the line to qualify. When a team pick appears, it cleared a real threshold.',
           ],
         },
       ],
@@ -295,7 +294,7 @@ function ModelContent({ league, type }) {
       <View style={styles.edgeNote}>
         <Text style={styles.edgeNoteIcon}>🎯</Text>
         <Text style={styles.edgeNoteText}>
-          On a typical night the model runs projections for hundreds of players and games across all three sports. A fraction of those become picks. The ones that do have passed every filter and cleared a real minimum edge. That is the only reason they are here.
+          On a typical night the model evaluates hundreds of players across every game on the slate. Each one runs through the full formula. A fraction clear every filter and produce a real edge over the market line. The ones that do are here because the math said so — not because a human picked them.
         </Text>
       </View>
     </View>
