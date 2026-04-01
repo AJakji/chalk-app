@@ -341,7 +341,7 @@ function ModelContent({ league, type }) {
 
       <View style={acc.note}>
         <View style={acc.mascotWrap}>
-          <ChalkyMascot size={72} />
+          <ChalkyMascot size={100} />
         </View>
         <View style={acc.noteBody}>
           <Text style={acc.noteText}>
@@ -444,7 +444,7 @@ const acc = StyleSheet.create({
     marginTop: 20,
   },
   mascotWrap: {
-    width: 56,
+    width: 80,
     alignItems: 'center',
     flexShrink: 0,
   },
