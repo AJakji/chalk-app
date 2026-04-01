@@ -21,7 +21,7 @@ const LEAGUE_TAB_LABELS = { Soccer: 'World Cup' };
 const STAT_PILLS = {
   NBA:    ['PTS', 'REB', 'AST', '3PM', 'STL', 'BLK'],
   MLB:    ['AVG', 'HR', 'RBI', 'ERA', 'K'],
-  NHL:    ['G', 'A', 'PTS', '+/-', 'SOG'],
+  NHL:    ['G', 'A', 'PTS'],
   Soccer: ['G', 'A', 'SOT', 'MIN'],
   WNBA:   [],
 };
