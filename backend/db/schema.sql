@@ -581,3 +581,18 @@ CREATE TABLE IF NOT EXISTS research_reports (
   created_at      TIMESTAMP NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_rr_status_date ON research_reports (status, created_at DESC);
+
+-- RevenueCat subscription tracking
+CREATE TABLE IF NOT EXISTS subscriptions (
+  id             SERIAL PRIMARY KEY,
+  user_id        TEXT NOT NULL UNIQUE,
+  plan           TEXT,
+  status         TEXT NOT NULL DEFAULT 'active',
+  purchase_date  TIMESTAMPTZ,
+  expiry_date    TIMESTAMPTZ,
+  revenue_cat_id TEXT,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_subscriptions_user ON subscriptions (user_id);

@@ -92,6 +92,7 @@ app.use('/api/weather',  weatherRouter);
 app.use('/api/nhl/goalies', goalieRouter);
 app.use('/api/reports',   require('./routes/reports'));
 app.use('/api/ufc',       require('./routes/ufc'));
+app.use('/api/webhooks',  require('./routes/webhooks'));
 
 // Health check — Railway and monitoring tools hit this
 app.get('/health', (req, res) => {

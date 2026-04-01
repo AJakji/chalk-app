@@ -1,6 +1,7 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import Purchases from 'react-native-purchases';
 import { ENTITLEMENT } from '../services/purchases';
+// ENTITLEMENT = 'crew' — must match the identifier in RevenueCat dashboard
 
 const RevenueCatContext = createContext(null);
 
