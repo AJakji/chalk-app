@@ -74,7 +74,7 @@ function ChalkysPicksHeader({ date }) {
   return (
     <View style={styles.chalkysHeader}>
       <View style={styles.chalkysAvatarRow}>
-        <ChalkyFace size={40} style={styles.chalkysAvatar} />
+        <ChalkyFace size={52} style={styles.chalkysAvatar} />
         <View style={styles.chalkysHeaderText}>
           <Text style={styles.chalkysTitle}>Today's Best 7</Text>
           <Text style={styles.chalkysDate}>{date}</Text>
@@ -411,7 +411,7 @@ const styles = StyleSheet.create({
   chalkysAvatarRow: {
     flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.xs,
   },
-  chalkysAvatar: { width: 40, height: 40, borderRadius: 20 },
+  chalkysAvatar: { width: 52, height: 52, borderRadius: 26 },
   chalkysHeaderText: { flex: 1 },
   chalkysTitle: { fontSize: 15, fontWeight: '800', color: colors.offWhite },
   chalkysDate: { fontSize: 11, color: colors.grey, marginTop: 1 },

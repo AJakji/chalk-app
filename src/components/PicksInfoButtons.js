@@ -620,9 +620,9 @@ const styles = StyleSheet.create({
   },
   infoBtnText: {
     flex: 1,
-    color: '#888888',
+    color: '#FFD700',
     fontSize: 11,
-    fontWeight: '500',
+    fontWeight: '600',
   },
 
   // Modal shell
