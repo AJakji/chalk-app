@@ -872,6 +872,18 @@ async function storePicks(picks) {
         const leagueKeyMap = { NBA: 'basketball_nba', MLB: 'baseball_mlb', NHL: 'icehockey_nhl', NFL: 'americanfootball_nfl' };
         pick.sportKey = leagueKeyMap[pick.league] || 'basketball_nba';
       }
+      // Always derive league from sportKey — sportKey is authoritative (comes from The Odds API).
+      // This prevents Claude hallucinating the wrong league (e.g. NHL game tagged as MLB).
+      const SPORT_KEY_TO_LEAGUE = {
+        'basketball_nba':          'NBA',
+        'icehockey_nhl':           'NHL',
+        'baseball_mlb':            'MLB',
+        'americanfootball_nfl':    'NFL',
+        'mma_mixed_martial_arts':  'UFC',
+      };
+      if (pick.sportKey && SPORT_KEY_TO_LEAGUE[pick.sportKey]) {
+        pick.league = SPORT_KEY_TO_LEAGUE[pick.sportKey];
+      }
       if (!pick.pickType)    pick.pickType  = 'Moneyline';
       if (!pick.gameTime)    pick.gameTime  = 'Tonight';
       if (!pick.awayTeam)    pick.awayTeam  = pick.homeTeam  || 'TBD';
