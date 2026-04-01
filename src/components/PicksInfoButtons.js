@@ -340,12 +340,12 @@ function ModelContent({ league, type }) {
       ))}
 
       <View style={acc.note}>
-        <ChalkyMascot size={48} />
+        <ChalkyMascot size={72} />
         <View style={acc.noteBody}>
           <Text style={acc.noteText}>
-            <Text style={acc.noteQuote}>{'\u201C'}</Text>
+            <Text style={acc.noteQuote}>{'\u201C '}</Text>
             {data.note}
-            <Text style={acc.noteQuote}>{'\u201D'}</Text>
+            <Text style={acc.noteQuote}>{' \u201D'}</Text>
           </Text>
         </View>
       </View>
