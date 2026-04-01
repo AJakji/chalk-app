@@ -354,6 +354,50 @@ export async function fetchMe(clerkToken) {
 
 // ── Normalizers ───────────────────────────────────────────────────────────────
 
+// Extract model projection value from whichever location it was stored.
+// Priority: explicit DB column → key_stats → analysis → keyStats array
+function extractProjValue(row, analysis) {
+  if (row.proj_value != null) return parseFloat(row.proj_value);
+  const ks = row.key_stats || {};
+  if (ks.proj_total != null) return parseFloat(ks.proj_total);
+  const an = row.analysis || {};
+  if (an.proj_total != null) return parseFloat(an.proj_total);
+  if (an.spread_projection != null) return parseFloat(an.spread_projection);
+  // Prop picks store it in keyStats array
+  const stat = (analysis?.keyStats || []).find(k => k.label === 'Model Projection');
+  if (stat) return parseFloat(stat.value);
+  return null;
+}
+
+// Extract the sportsbook line (market line) from whichever location it was stored.
+function extractPropLine(row, analysis) {
+  if (row.prop_line != null) return parseFloat(row.prop_line);
+  const ks = row.key_stats || {};
+  if (ks.posted_total != null) return parseFloat(ks.posted_total);
+  const an = row.analysis || {};
+  if (an.posted_total != null) return parseFloat(an.posted_total);
+  // Spread picks store the line in odds_data.homeSpread
+  const od = row.odds_data || {};
+  if (od.homeSpread != null) return parseFloat(od.homeSpread);
+  if (od.total != null) return parseFloat(od.total);
+  // Prop picks store it in keyStats array
+  const stat = (analysis?.keyStats || []).find(k => k.label === 'Market Line');
+  if (stat) return parseFloat(stat.value);
+  return null;
+}
+
+// Extract the model edge value from whichever location it was stored.
+function extractChalkEdge(row, analysis) {
+  if (row.chalk_edge != null) return parseFloat(row.chalk_edge);
+  if (row.edge != null) return parseFloat(row.edge);
+  const ks = row.key_stats || {};
+  if (ks.edge != null) return parseFloat(ks.edge);
+  // Prop picks store it in keyStats array
+  const stat = (analysis?.keyStats || []).find(k => k.label === 'Edge');
+  if (stat) return parseFloat(stat.value);
+  return null;
+}
+
 function normalizePick(row) {
   const odds = row.odds_data || {};
   const analysis = normalizeAnalysis(row.analysis);
@@ -382,10 +426,13 @@ function normalizePick(row) {
     playerPosition: row.player_position ?? null,
     matchupText:    row.matchup_text    ?? null,
     headshotUrl:    row.headshot_url    ?? null,
-    // Model stats for pick card display
-    proj_value:     row.proj_value      ?? null,
-    prop_line:      row.prop_line       ?? null,
-    chalk_edge:     row.chalk_edge      ?? row.edge ?? null,
+    // Model stats for pick card display.
+    // These columns don't exist in the picks table — values are buried in
+    // analysis/key_stats jsonb. Extract them here in priority order so both
+    // PickCard (game) and PropPickCard (prop) can read pick.proj_value etc.
+    proj_value:     extractProjValue(row, analysis),
+    prop_line:      extractPropLine(row, analysis),
+    chalk_edge:     extractChalkEdge(row, analysis),
     confidence_score: row.confidence_score ?? row.confidence ?? null,
     // Source tag: 'chalk_model' = backed by projection model, 'ai_game' = AI only, 'ai_prop' = AI prop
     pick_source:    row.pick_source     ?? 'ai_game',
