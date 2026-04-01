@@ -6,7 +6,6 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import ChalkyMascot from './ChalkyMascot';
-import { LinearGradient } from 'expo-linear-gradient';
 
 // Enable LayoutAnimation on Android
 if (Platform.OS === 'android') {
@@ -477,37 +476,23 @@ export default function PicksInfoButtons() {
     <>
       <View style={styles.buttonRow}>
         <TouchableOpacity
-          style={styles.infoBtnOuter}
+          style={styles.infoBtn}
           onPress={() => setScheduleVisible(true)}
           activeOpacity={0.75}
         >
-          <LinearGradient
-            colors={['#2a1d00', '#0f0f0f', '#2a1d00']}
-            start={{ x: 0, y: 0 }}
-            end={{ x: 1, y: 0 }}
-            style={styles.infoBtn}
-          >
-            <Ionicons name="time-outline" size={14} color="#C8960C" />
-            <Text style={styles.infoBtnText}>How picks are made</Text>
-            <Ionicons name="chevron-forward" size={12} color="#C8960C" />
-          </LinearGradient>
+          <Ionicons name="time-outline" size={14} color="#C8960C" />
+          <Text style={styles.infoBtnText}>How picks are made</Text>
+          <Ionicons name="chevron-forward" size={12} color="#C8960C" />
         </TouchableOpacity>
 
         <TouchableOpacity
-          style={styles.infoBtnOuter}
+          style={styles.infoBtn}
           onPress={() => setModelVisible(true)}
           activeOpacity={0.75}
         >
-          <LinearGradient
-            colors={['#2a1d00', '#0f0f0f', '#2a1d00']}
-            start={{ x: 0, y: 0 }}
-            end={{ x: 1, y: 0 }}
-            style={styles.infoBtn}
-          >
-            <Ionicons name="analytics-outline" size={14} color="#C8960C" />
-            <Text style={styles.infoBtnText}>What goes into a pick</Text>
-            <Ionicons name="chevron-forward" size={12} color="#C8960C" />
-          </LinearGradient>
+          <Ionicons name="analytics-outline" size={14} color="#C8960C" />
+          <Text style={styles.infoBtnText}>What goes into a pick</Text>
+          <Ionicons name="chevron-forward" size={12} color="#C8960C" />
         </TouchableOpacity>
       </View>
 
@@ -621,17 +606,15 @@ const styles = StyleSheet.create({
     gap: 10,
     marginBottom: 8,
   },
-  infoBtnOuter: {
-    flex: 1,
-    borderWidth: 1,
-    borderColor: '#3a2800',
-    borderRadius: 10,
-    overflow: 'hidden',
-  },
   infoBtn: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
+    backgroundColor: '#0f0c00',
+    borderWidth: 1,
+    borderColor: '#3a2800',
+    borderRadius: 10,
     paddingVertical: 10,
     paddingHorizontal: 12,
   },
