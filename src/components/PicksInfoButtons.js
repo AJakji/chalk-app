@@ -5,7 +5,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 
-// ── Data ──────────────────────────────────────────────────────────────────────
+// ── Schedule data (unchanged) ─────────────────────────────────────────────────
 
 const SCHEDULE_STEPS = [
   {
@@ -45,114 +45,279 @@ const SCHEDULE_STEPS = [
   },
 ];
 
-const MODEL_SECTIONS = [
-  {
-    sport: 'NBA',
-    color: '#C9082A',
-    categories: [
-      {
-        title: 'Player Performance',
-        items: [
-          'Weighted game log average (L5, L10, L20, full season)',
-          'Home vs away splits',
-          'Back-to-back and rest day adjustments',
-          'Minutes and usage trends',
-          'True shooting efficiency',
-        ],
-      },
-      {
-        title: 'Matchup Factors',
-        items: [
-          'Opponent position defense rating — how many points, rebounds, assists that position allows per game',
-          'Pace of play adjustment — faster games mean more possessions and more stats',
-          'Game total and projected score environment',
-          'Injury impact — teammate absences shift usage',
-        ],
-      },
-      {
-        title: 'Market Analysis',
-        items: [
-          'Live prop line from multiple sportsbooks',
-          'Edge = projection minus line',
-          'Minimum edge threshold per prop type',
-          'Confidence score tied directly to edge size',
-        ],
-      },
-    ],
-  },
-  {
-    sport: 'NHL',
-    color: '#003087',
-    categories: [
-      {
-        title: 'Player Performance',
-        items: [
-          'Even strength vs power play production splits',
-          'Time on ice trends',
-          'Linemate quality and line combinations',
-          'Recent form (L5 games)',
-        ],
-      },
-      {
-        title: 'Matchup Factors',
-        items: [
-          'Opposing goalie — save percentage and recent form',
-          'Opponent goals allowed per game',
-          'Home vs away performance',
-          'Back-to-back fatigue adjustment',
-        ],
-      },
-      {
-        title: 'Goalie Detection',
-        items: [
-          'Confirmed starter pulled from morning skate reports',
-          'Backup goalie detected — confidence boosted automatically on shooter props',
-          'Goalie stats vs league average save percentage',
-        ],
-      },
-    ],
-  },
-  {
-    sport: 'MLB',
-    color: '#002D72',
-    categories: [
-      {
-        title: 'Batter Analysis',
-        items: [
-          'Platoon splits — left vs right handed pitcher',
-          'Season batting average, slugging, and OBP',
-          'Hard hit rate and exit velocity from Statcast',
-          'Ballpark factors — dimensions and altitude',
-          'Recent form vs historical baseline',
-        ],
-      },
-      {
-        title: 'Pitcher Analysis',
-        items: [
-          'Pitch arsenal — fastball velocity, breaking ball usage, and effectiveness',
-          'Strikeout rate and walk rate trends',
-          'Opponent batting average vs specific pitch types',
-          'Bullpen fatigue and usage patterns',
-        ],
-      },
-      {
-        title: 'Game Context',
-        items: [
-          'Weather — wind speed, direction, and temperature',
-          'Umpire tendencies — strike zone size affects strikeout totals',
-          'Home vs away splits',
-          'Day vs night game performance history',
-        ],
-      },
-    ],
-  },
-];
+// ── Model data (tabbed) ───────────────────────────────────────────────────────
 
-// ── Component ─────────────────────────────────────────────────────────────────
+const MODEL_DATA = {
+  NBA: {
+    player: {
+      intro: 'Every NBA player prop runs through a full projection before it reaches the app.',
+      sections: [
+        {
+          icon: '📊',
+          title: 'Recent Form',
+          items: [
+            'Weighted average across last 5, 10, and 20 games',
+            'Full season baseline for stability',
+            'Home and away splits',
+          ],
+        },
+        {
+          icon: '🏀',
+          title: 'Matchup',
+          items: [
+            "Opponent's position defense rating — how many points, rebounds, assists that position allows per game",
+            'Pace of play — faster games create more opportunities',
+            'Rest and back-to-back adjustments',
+          ],
+        },
+        {
+          icon: '⚡',
+          title: 'Player Context',
+          items: [
+            'Usage and efficiency trends',
+            'Teammate absences that shift usage',
+            'Minutes projection for tonight',
+          ],
+        },
+        {
+          icon: '📈',
+          title: 'Market Analysis',
+          items: [
+            'Live line pulled from multiple sportsbooks',
+            'Edge = projection minus the posted line',
+            'Only picks clearing the minimum edge threshold reach the app',
+          ],
+        },
+      ],
+    },
+    team: {
+      intro: 'Spread and total picks are built on team-level projection models.',
+      sections: [
+        {
+          icon: '📊',
+          title: 'Offensive Output',
+          items: [
+            'Team points per game weighted by recent form',
+            'Pace and possessions per game',
+            'Home court advantage adjustment',
+          ],
+        },
+        {
+          icon: '🛡️',
+          title: 'Defensive Matchup',
+          items: [
+            'Opponent defensive rating',
+            'Points allowed per 100 possessions',
+            'Pace suppression tendencies',
+          ],
+        },
+        {
+          icon: '📈',
+          title: 'Market Analysis',
+          items: [
+            'Projected margin vs the spread',
+            'Projected total vs the posted over/under',
+            'Edge must clear 1.5 points for spread picks',
+          ],
+        },
+      ],
+    },
+  },
+  NHL: {
+    player: {
+      intro: 'NHL player props account for ice time, line combinations, and goalie quality.',
+      sections: [
+        {
+          icon: '📊',
+          title: 'Recent Form',
+          items: [
+            'Last 5 games weighted most heavily',
+            'Even strength vs power play production split',
+            'Time on ice trends',
+          ],
+        },
+        {
+          icon: '🥅',
+          title: 'Goalie Matchup',
+          items: [
+            'Confirmed starter pulled from morning skate',
+            'Goalie save percentage vs league average',
+            'Backup detected — shooter props get a confidence boost',
+          ],
+        },
+        {
+          icon: '🏒',
+          title: 'Team Context',
+          items: [
+            'Linemate quality — team goals per game',
+            'Opponent goals allowed per game',
+            'Home and away splits',
+          ],
+        },
+        {
+          icon: '📈',
+          title: 'Market Analysis',
+          items: [
+            'Live prop line across major books',
+            'Minimum edge of 0.3 goals for player props',
+            'Shots on goal minimum edge of 0.8',
+          ],
+        },
+      ],
+    },
+    team: {
+      intro: 'Puck line and total picks are built on team goal projection models.',
+      sections: [
+        {
+          icon: '📊',
+          title: 'Goal Projection',
+          items: [
+            'Team goals scored and allowed per game',
+            'Home and away splits',
+            'Recent form weighting',
+          ],
+        },
+        {
+          icon: '🥅',
+          title: 'Goalie Factor',
+          items: [
+            "Starting goalie save percentage vs league",
+            "Backup goalie detection boosts opposing team's goal projection",
+            'Goalie factor capped to prevent outliers',
+          ],
+        },
+        {
+          icon: '📈',
+          title: 'Market Analysis',
+          items: [
+            'Projected goal differential vs the puck line',
+            'Projected total vs the over/under',
+            'Minimum edge of 0.4 goals for puck line picks',
+          ],
+        },
+      ],
+    },
+  },
+  MLB: {
+    player: {
+      intro: 'MLB props factor in pitching matchups, ballpark conditions, and lineup context.',
+      sections: [
+        {
+          icon: '⚾',
+          title: 'Batter Analysis',
+          items: [
+            'Season batting average, slugging, and on-base percentage',
+            'Platoon splits — performance vs left and right-handed pitching',
+            'Hard hit rate and exit velocity from Statcast',
+          ],
+        },
+        {
+          icon: '🔥',
+          title: 'Pitcher Matchup',
+          items: [
+            "Starting pitcher's strikeout rate and recent form",
+            'Pitch arsenal — fastball velocity, breaking ball usage',
+            'Opponent batting average vs that pitch type',
+          ],
+        },
+        {
+          icon: '🌤️',
+          title: 'Game Environment',
+          items: [
+            'Wind speed and direction — affects home run props',
+            'Temperature — cold weather suppresses offense',
+            'Umpire tendencies — strike zone size affects strikeout totals',
+            'Ballpark dimensions and altitude',
+          ],
+        },
+        {
+          icon: '📈',
+          title: 'Market Analysis',
+          items: [
+            'Live prop line from major sportsbooks',
+            'Minimum edge of 0.3 hits, 0.5 total bases',
+            'Pitcher strikeouts minimum edge of 0.8',
+          ],
+        },
+      ],
+    },
+    team: {
+      intro: 'Run line and total picks combine pitching quality, offense, and park factors.',
+      sections: [
+        {
+          icon: '📊',
+          title: 'Run Projection',
+          items: [
+            'Team runs scored and allowed per game',
+            'Starting pitcher ERA and recent form',
+            'Bullpen fatigue and usage patterns',
+          ],
+        },
+        {
+          icon: '🌤️',
+          title: 'Game Environment',
+          items: [
+            'Ballpark run factor — some parks suppress scoring significantly',
+            'Wind and temperature adjustments',
+            'Umpire run environment tendencies',
+          ],
+        },
+        {
+          icon: '📈',
+          title: 'Market Analysis',
+          items: [
+            'Projected run margin vs the run line (-1.5)',
+            'Projected total vs the over/under',
+            'Minimum edge of 0.5 runs for run line picks',
+          ],
+        },
+      ],
+    },
+  },
+};
+
+// ── ModelContent subcomponent ─────────────────────────────────────────────────
+
+function ModelContent({ league, type }) {
+  const data = MODEL_DATA[league]?.[type];
+  if (!data) return null;
+
+  return (
+    <View style={styles.contentWrapper}>
+      <Text style={styles.intro}>{data.intro}</Text>
+
+      {data.sections.map((section, i) => (
+        <View key={i} style={styles.section}>
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionIcon}>{section.icon}</Text>
+            <Text style={styles.sectionTitle}>{section.title}</Text>
+          </View>
+          {section.items.map((item, j) => (
+            <View key={j} style={styles.itemRow}>
+              <View style={styles.dot} />
+              <Text style={styles.itemText}>{item}</Text>
+            </View>
+          ))}
+        </View>
+      ))}
+
+      <View style={styles.edgeNote}>
+        <Text style={styles.edgeNoteIcon}>🎯</Text>
+        <Text style={styles.edgeNoteText}>
+          Most projections never become picks. Only the ones with a genuine edge make it through.
+        </Text>
+      </View>
+    </View>
+  );
+}
+
+// ── Main component ────────────────────────────────────────────────────────────
 
 export default function PicksInfoButtons() {
   const [scheduleVisible, setScheduleVisible] = useState(false);
   const [modelVisible, setModelVisible] = useState(false);
+  const [league, setLeague] = useState('NBA');
+  const [propType, setPropType] = useState('player');
 
   return (
     <>
@@ -231,40 +396,47 @@ export default function PicksInfoButtons() {
             </TouchableOpacity>
           </View>
 
-          <ScrollView style={styles.modalScroll} showsVerticalScrollIndicator={false}>
-            <Text style={styles.modalIntro}>
-              Every pick is the result of dozens of data points running through Chalky's projection model. Here is what actually gets analyzed.
-            </Text>
-
-            {MODEL_SECTIONS.map((section, i) => (
-              <View key={i} style={styles.modelSection}>
-                <View style={styles.modelSectionHeader}>
-                  <View style={[styles.sportDot, { backgroundColor: section.color }]} />
-                  <Text style={styles.modelSportLabel}>{section.sport}</Text>
-                </View>
-
-                {section.categories.map((cat, j) => (
-                  <View key={j} style={styles.categoryBlock}>
-                    <Text style={styles.categoryTitle}>{cat.title}</Text>
-                    {cat.items.map((item, k) => (
-                      <View key={k} style={styles.itemRow}>
-                        <View style={styles.itemDot} />
-                        <Text style={styles.itemText}>{item}</Text>
-                      </View>
-                    ))}
-                  </View>
-                ))}
-              </View>
+          {/* League switcher */}
+          <View style={styles.leagueSwitcher}>
+            {['NBA', 'NHL', 'MLB'].map((l) => (
+              <TouchableOpacity
+                key={l}
+                style={[styles.leagueBtn, league === l && styles.leagueBtnActive]}
+                onPress={() => setLeague(l)}
+                activeOpacity={0.75}
+              >
+                <Text style={[styles.leagueBtnText, league === l && styles.leagueBtnTextActive]}>
+                  {l}
+                </Text>
+              </TouchableOpacity>
             ))}
+          </View>
 
-            <View style={styles.bottomNote}>
-              <Ionicons name="shield-checkmark-outline" size={16} color="#00E87A" />
-              <Text style={styles.bottomNoteText}>
-                Every pick must clear a minimum edge threshold before it reaches the app. Most projections never become picks.
+          {/* Player / Team toggle */}
+          <View style={styles.typeToggle}>
+            <TouchableOpacity
+              style={[styles.typeBtn, propType === 'player' && styles.typeBtnActive]}
+              onPress={() => setPropType('player')}
+              activeOpacity={0.75}
+            >
+              <Text style={[styles.typeBtnText, propType === 'player' && styles.typeBtnTextActive]}>
+                Player Props
               </Text>
-            </View>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.typeBtn, propType === 'team' && styles.typeBtnActive]}
+              onPress={() => setPropType('team')}
+              activeOpacity={0.75}
+            >
+              <Text style={[styles.typeBtnText, propType === 'team' && styles.typeBtnTextActive]}>
+                Team Picks
+              </Text>
+            </TouchableOpacity>
+          </View>
 
-            <View style={styles.bottomPad} />
+          {/* Dynamic content */}
+          <ScrollView style={styles.contentArea} showsVerticalScrollIndicator={false}>
+            <ModelContent league={league} type={propType} />
           </ScrollView>
         </SafeAreaView>
       </Modal>
@@ -275,6 +447,7 @@ export default function PicksInfoButtons() {
 // ── Styles ────────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
+  // Buttons
   buttonRow: {
     flexDirection: 'row',
     gap: 10,
@@ -368,44 +541,106 @@ const styles = StyleSheet.create({
     lineHeight: 20,
   },
 
-  // Model sections
-  modelSection: {
-    marginBottom: 32,
+  // League switcher
+  leagueSwitcher: {
+    flexDirection: 'row',
+    gap: 8,
+    paddingHorizontal: 20,
+    paddingTop: 20,
+    paddingBottom: 12,
   },
-  modelSectionHeader: {
+  leagueBtn: {
+    flex: 1,
+    paddingVertical: 10,
+    alignItems: 'center',
+    backgroundColor: '#0f0f0f',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#1e1e1e',
+  },
+  leagueBtnActive: {
+    backgroundColor: '#00E87A',
+    borderColor: '#00E87A',
+  },
+  leagueBtnText: {
+    color: '#888888',
+    fontSize: 13,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+  },
+  leagueBtnTextActive: {
+    color: '#080808',
+  },
+
+  // Player / Team toggle
+  typeToggle: {
+    flexDirection: 'row',
+    marginHorizontal: 20,
+    backgroundColor: '#0f0f0f',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#1e1e1e',
+    padding: 3,
+    marginBottom: 4,
+  },
+  typeBtn: {
+    flex: 1,
+    paddingVertical: 8,
+    alignItems: 'center',
+    borderRadius: 8,
+  },
+  typeBtnActive: {
+    backgroundColor: '#1a1a1a',
+  },
+  typeBtnText: {
+    color: '#888888',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  typeBtnTextActive: {
+    color: '#F5F5F0',
+    fontWeight: '700',
+  },
+
+  // Content area
+  contentArea: {
+    flex: 1,
+  },
+  contentWrapper: {
+    paddingHorizontal: 20,
+    paddingTop: 16,
+    paddingBottom: 40,
+  },
+  intro: {
+    color: '#888888',
+    fontSize: 13,
+    lineHeight: 20,
+    marginBottom: 20,
+  },
+  section: {
+    marginBottom: 20,
+  },
+  sectionHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    marginBottom: 16,
-  },
-  sportDot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-  },
-  modelSportLabel: {
-    color: '#F5F5F0',
-    fontSize: 16,
-    fontWeight: '800',
-    letterSpacing: 1,
-  },
-  categoryBlock: {
-    marginBottom: 20,
-  },
-  categoryTitle: {
-    color: '#F5F5F0',
-    fontSize: 13,
-    fontWeight: '700',
     marginBottom: 10,
-    letterSpacing: 0.3,
+  },
+  sectionIcon: {
+    fontSize: 16,
+  },
+  sectionTitle: {
+    color: '#F5F5F0',
+    fontSize: 14,
+    fontWeight: '700',
   },
   itemRow: {
     flexDirection: 'row',
     alignItems: 'flex-start',
     gap: 10,
-    marginBottom: 8,
+    marginBottom: 7,
   },
-  itemDot: {
+  dot: {
     width: 4,
     height: 4,
     borderRadius: 2,
@@ -419,25 +654,27 @@ const styles = StyleSheet.create({
     fontSize: 13,
     lineHeight: 20,
   },
-
-  // Bottom note
-  bottomNote: {
+  edgeNote: {
     flexDirection: 'row',
     alignItems: 'flex-start',
     gap: 10,
     backgroundColor: '#0f0f0f',
-    borderWidth: 1,
-    borderColor: '#00E87A',
     borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#1e1e1e',
     padding: 14,
     marginTop: 8,
   },
-  bottomNoteText: {
+  edgeNoteIcon: {
+    fontSize: 16,
+  },
+  edgeNoteText: {
     flex: 1,
     color: '#888888',
     fontSize: 13,
     lineHeight: 20,
   },
+
   bottomPad: {
     height: 40,
   },
