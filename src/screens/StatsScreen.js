@@ -376,6 +376,44 @@ function StandingsRow({ team, sport, rank, onPress }) {
   );
 }
 
+function sortTeamsForSport(teams, sport) {
+  const copy = [...teams];
+  if (sport === 'NHL') {
+    copy.sort((a, b) => (b.pts || 0) - (a.pts || 0) || (b.wins || 0) - (a.wins || 0));
+  } else {
+    copy.sort((a, b) => {
+      const pA = (a.wins + a.losses) > 0 ? a.wins / (a.wins + a.losses) : 0;
+      const pB = (b.wins + b.losses) > 0 ? b.wins / (b.wins + b.losses) : 0;
+      return pB - pA || (b.wins - a.wins);
+    });
+  }
+  return copy;
+}
+
+// Conference view block — flat team list, no division breakdown
+function ConferenceTeamsBlock({ conf, sport, onPressTeam }) {
+  const cols     = COLS[sport] || COLS.NBA;
+  const flatTeams = sortTeamsForSport(
+    (conf.divisions || []).flatMap(div => div.teams),
+    sport
+  );
+  return (
+    <View style={s.divBlock}>
+      <View style={s.divHeader}>
+        <Text style={[s.divName, { flex: 1 }]}>{conf.name}</Text>
+        <View style={s.divColHeaders}>
+          {cols.map(col => (
+            <Text key={col.key} style={[s.divColText, { width: col.w }]}>{col.label}</Text>
+          ))}
+        </View>
+      </View>
+      {flatTeams.map((team, i) => (
+        <StandingsRow key={team.id || i} team={team} sport={sport} rank={i + 1} onPress={onPressTeam} />
+      ))}
+    </View>
+  );
+}
+
 function DivisionBlock({ division, sport, onPressTeam }) {
   const cols = COLS[sport] || COLS.NBA;
   return (
@@ -436,36 +474,6 @@ function TeamsSection() {
   }, [sport]);
 
   const onRefresh = () => { setRefreshing(true); fetchStandings(sport); };
-
-  // ── Filter helpers ────────────────────────────────────────────────────────────
-
-  const getLeagueFlat = () => {
-    const all = [];
-    (standings || []).forEach(conf => conf.divisions.forEach(div => all.push(...div.teams)));
-    if (sport === 'NHL') {
-      all.sort((a, b) => (b.pts || 0) - (a.pts || 0) || (b.wins || 0) - (a.wins || 0));
-    } else {
-      all.sort((a, b) => {
-        const pA = (a.wins + a.losses) > 0 ? a.wins / (a.wins + a.losses) : 0;
-        const pB = (b.wins + b.losses) > 0 ? b.wins / (b.wins + b.losses) : 0;
-        return pB - pA || (b.wins - a.wins);
-      });
-    }
-    return all;
-  };
-
-  const getFilteredConferences = () => {
-    if (!standings) return [];
-    if (filterLevel === 'conference' && selectedConference) {
-      return standings.filter(c => c.name === selectedConference);
-    }
-    if (filterLevel === 'division' && selectedDivision) {
-      return standings
-        .map(c => ({ ...c, divisions: c.divisions.filter(d => d.name === selectedDivision) }))
-        .filter(c => c.divisions.length > 0);
-    }
-    return standings;
-  };
 
   const playoffCutoff = LEAGUE_PLAYOFF_CUTOFF[sport] || 10;
   const cols = COLS[sport] || COLS.NBA;
@@ -566,9 +574,12 @@ function TeamsSection() {
             <Text style={s.legendText}>{sport === 'NBA' ? 'Play-in' : 'Wildcard'}</Text>
           </View>
 
-          {/* ── League flat list ── */}
+          {/* ── LEAGUE: flat sorted list of all teams ── */}
           {filterLevel === 'league' && (() => {
-            const allTeams = getLeagueFlat();
+            const allTeams = sortTeamsForSport(
+              (standings || []).flatMap(conf => conf.divisions.flatMap(div => div.teams)),
+              sport
+            );
             return (
               <View>
                 <View style={s.divHeader}>
@@ -593,26 +604,42 @@ function TeamsSection() {
             );
           })()}
 
-          {/* ── Conference / Division grouped view ── */}
-          {filterLevel !== 'league' && (() => {
-            const filtered = getFilteredConferences();
-            if (!filtered.length) return (
+          {/* ── CONFERENCE: flat team list per conference, no division headers ── */}
+          {filterLevel === 'conference' && (() => {
+            const confs = selectedConference
+              ? (standings || []).filter(c => c.name === selectedConference)
+              : (standings || []);
+            if (!confs.length) return (
               <View style={s.emptyState}>
                 <Text style={s.emptyTitle}>Could not load standings</Text>
                 <Text style={s.emptyBody}>Pull to refresh or check your connection.</Text>
               </View>
             );
-            return filtered.map((conf, ci) => (
+            return confs.map((conf, ci) => (
               <View key={ci} style={s.confBlock}>
-                {/* Hide conference header when showing a single filtered division */}
-                {!(filterLevel === 'division' && selectedDivision) && (
-                  <View style={s.confHeader}>
-                    <Text style={s.confName}>{conf.name}</Text>
-                  </View>
-                )}
-                {conf.divisions.map((div, di) => (
-                  <DivisionBlock key={di} division={div} sport={sport} onPressTeam={setSelectedTeam} />
-                ))}
+                <ConferenceTeamsBlock conf={conf} sport={sport} onPressTeam={setSelectedTeam} />
+              </View>
+            ));
+          })()}
+
+          {/* ── DIVISION: teams grouped by division with division headers ── */}
+          {filterLevel === 'division' && (() => {
+            let confs = standings || [];
+            if (selectedConference) confs = confs.filter(c => c.name === selectedConference);
+            const allDivs = confs.flatMap(conf =>
+              conf.divisions
+                .filter(div => !selectedDivision || div.name === selectedDivision)
+                .map(div => ({ ...div, conferenceName: conf.name }))
+            );
+            if (!allDivs.length) return (
+              <View style={s.emptyState}>
+                <Text style={s.emptyTitle}>Could not load standings</Text>
+                <Text style={s.emptyBody}>Pull to refresh or check your connection.</Text>
+              </View>
+            );
+            return allDivs.map((div, di) => (
+              <View key={di} style={s.confBlock}>
+                <DivisionBlock division={div} sport={sport} onPressTeam={setSelectedTeam} />
               </View>
             ));
           })()}

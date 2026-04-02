@@ -446,71 +446,46 @@ const MLB_CONF_DIV = {
 // ── Standings helpers ──────────────────────────────────────────────────────────
 
 async function getNBAStandings() {
+  // BDL standings endpoint returns real wins/losses for the current season
   const season = (() => {
     const y = new Date().getFullYear(), m = new Date().getMonth() + 1;
-    const s = m < 7 ? y - 1 : y;
-    return `${s}-${String(s + 1).slice(2)}`;
+    return m < 7 ? y - 1 : y;
   })();
 
-  // Get team structure from BDL (includes conference + division)
-  const allTeams = await bdl.getTeams();
+  const raw = await bdl.getStandings(season);
 
-  // W-L from team_game_logs
-  let wlMap = {};
-  try {
-    const rows = await db.query(
-      `SELECT team_id::text,
-              SUM(CASE WHEN result='W' THEN 1 ELSE 0 END) AS wins,
-              SUM(CASE WHEN result='L' THEN 1 ELSE 0 END) AS losses
-       FROM team_game_logs WHERE sport='NBA' AND season=$1 GROUP BY team_id`,
-      [season]
-    );
-    rows.rows.forEach(r => { wlMap[r.team_id] = { wins: +r.wins, losses: +r.losses }; });
-  } catch {}
-
-  let teams = (allTeams || []).map(t => {
-    const wl  = wlMap[String(t.id)] || {};
-    const w   = wl.wins   ?? 0;
-    const l   = wl.losses ?? 0;
-    const gp  = w + l;
+  const teams = (raw || []).map(item => {
+    const t  = item.team || {};
+    const w  = item.wins   ?? 0;
+    const l  = item.losses ?? 0;
+    const gp = w + l;
     return {
-      id:           String(t.id),
-      name:         t.full_name,
-      espnAbbr:     NBA_ESPN_MAP[t.abbreviation] || t.abbreviation?.toLowerCase() || '',
-      conference:   t.conference,   // 'East' or 'West'
-      division:     t.division,     // 'Atlantic', 'Central', etc.
-      wins: w, losses: l,
-      pct:  gp > 0 ? (w / gp).toFixed(3).replace('0.', '.') : '—',
-      gb:   '—', gp: null, otl: null, pts: null,
-      divisionRank: 0, conferenceRank: 0, playoffStatus: 'missed',
+      id:             String(t.id),
+      name:           t.full_name || '',
+      espnAbbr:       NBA_ESPN_MAP[t.abbreviation] || t.abbreviation?.toLowerCase() || '',
+      conference:     t.conference,   // 'East' or 'West'
+      division:       t.division,
+      wins:           w,
+      losses:         l,
+      pct:            gp > 0 ? (w / gp).toFixed(3).replace('0.', '.') : '—',
+      gb:             '—',
+      gp: null, otl: null, pts: null,
+      divisionRank:   item.division_rank   ?? 0,
+      conferenceRank: item.conference_rank ?? 0,
+      playoffStatus:  (item.conference_rank ?? 99) <= 6  ? 'playoff'
+                    : (item.conference_rank ?? 99) <= 10 ? 'playin' : 'missed',
     };
   });
 
-  // Division ranks
-  const divGroups = {};
-  teams.forEach(t => {
-    const k = `${t.conference}_${t.division}`;
-    (divGroups[k] = divGroups[k] || []).push(t);
-  });
-  Object.values(divGroups).forEach(g => {
-    g.sort((a, b) => b.wins - a.wins || a.losses - b.losses);
-    g.forEach((t, i) => { t.divisionRank = i + 1; });
-  });
-
-  // Conference ranks + playoff status
+  // GB vs conference leader (using conferenceRank already set by API)
   ['East', 'West'].forEach(conf => {
-    const ct = teams.filter(t => t.conference === conf).sort((a, b) => b.wins - a.wins || a.losses - b.losses);
-    ct.forEach((t, i) => {
-      t.conferenceRank = i + 1;
-      t.playoffStatus  = i < 6 ? 'playoff' : i < 10 ? 'playin' : 'missed';
-    });
-    // GB vs leader
+    const ct = teams.filter(t => t.conference === conf).sort((a, b) => a.conferenceRank - b.conferenceRank);
     const leader = ct[0];
     if (leader) {
       ct.forEach(t => {
         if (t.id === leader.id) { t.gb = '—'; return; }
         const diff = ((leader.wins - leader.losses) - (t.wins - t.losses)) / 2;
-        t.gb = diff % 1 === 0 ? String(diff) : String(diff.toFixed(1));
+        t.gb = diff % 1 === 0 ? String(diff) : diff.toFixed(1);
       });
     }
   });

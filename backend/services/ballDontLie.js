@@ -247,6 +247,17 @@ async function getTeams() {
   return data;
 }
 
+async function getStandings(season = 2024) {
+  const key = `standings:${season}`;
+  const cached = cacheGet(key);
+  if (cached) return cached;
+
+  const json = await bdlFetch('/standings', { season });
+  const data = json?.data || [];
+  cacheSet(key, data, TTL.STANDINGS);
+  return data;
+}
+
 /**
  * Get team season averages.
  * Cache: 1hr
@@ -419,6 +430,7 @@ module.exports = {
   getPlayerStats,
   getAdvancedStats,
   getTeams,
+  getStandings,
   getTeamStats,
   getGames,
   getLiveBoxScores,
