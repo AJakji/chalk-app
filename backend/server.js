@@ -269,16 +269,17 @@ function runPythonScript(scriptName, args = []) {
 //   1:00 AM / 05:00 UTC — computePositionDefense.py
 //   1:15 AM / 05:15 UTC — MLB sub-collectors in parallel (bullpen/matchup/splits/umpire)
 //
-//  EARLY MORNING — ODDS + PROJECTIONS:
+//  EARLY MORNING — DATA PREP:
 //   4:00 AM / 08:00 UTC — odds + early prop lines + roster + weather
-//   4:30 AM / 08:30 UTC — NBA + MLB + NHL projection models (parallel)
-//   5:30 AM / 09:30 UTC — edge detection (all sports: prop edges + team bets)
-//   6:00 AM / 10:00 UTC — pick generation (all sports via Claude)
-//   6:45 AM / 10:45 UTC — pre-delivery verification (zero picks = critical alert)
-//   7:00 AM / 11:00 UTC — picks live + NHL goalie confirmation scheduling
+//   4:30 AM / 08:30 UTC — NBA + MLB + NHL projection models (full run)
 //
-//  MORNING — SAFETY NET:
-//   9:15 AM / 13:15 UTC — re-fetch prop lines + props-only re-run + edges + prop picks
+//  DELIVERY — ALL PICKS AT 10 AM:
+//   9:00 AM / 13:00 UTC — refresh prop lines (books now have full lines for all sports)
+//   9:00 AM / 13:00 UTC — props-only model re-run against fresh lines (parallel)
+//   9:20 AM / 13:20 UTC — edge detection (all sports: prop edges + team bets)
+//   9:40 AM / 13:40 UTC — generate all picks (model + game + prop via Claude)
+//   9:55 AM / 13:55 UTC — pre-delivery verification (zero picks = critical alert)
+//  10:00 AM / 14:00 UTC — picks live + NHL goalie confirmation scheduling
 //  12:00 PM / 16:00 UTC — pick grader (grades yesterday's picks)
 //
 //  NHL SPECIAL: goalie confirmation jobs scheduled dynamically at 7:00 AM,
@@ -288,8 +289,9 @@ function runPythonScript(scriptName, args = []) {
 //  statcastCollector.py + computeLeagueAverages.py (parallel)
 //
 //  NOTE: mlbLineupFetcher.py exists but is NOT scheduled.
-//  MLB picks are generated at 4:30 AM using lineup fallbacks.
-//  Lineups post 10 AM–4 PM ET — after picks are already live at 7 AM.
+//  MLB picks use lineup fallbacks from the 4:30 AM model run.
+//  Confirmed lineups post 10 AM–4 PM ET — same window as pick delivery,
+//  so lineup data is refreshed via the 9:00 AM props-only re-run when available.
 
 // ── Pipeline helper: wraps each step with timing + error isolation ────────────
 // A failure in one step logs clearly and continues — the pipeline never crashes.
@@ -461,9 +463,33 @@ if (true) { // crons always run in production — MOCK_MODE removed
     }
   }, { timezone: 'America/New_York' });
 
-  // ── 5:30 AM ET (9:30 UTC) — Edge detection (all sports) ──────────────────────
-  cron.schedule('30 5 * * *', async () => {
-    console.log('\n⏰ [5:30 AM ET] Edge detection — NBA + MLB + NHL…');
+  // ── 9:00 AM ET (13:00 UTC) — Refresh prop lines + props-only model re-run ──────
+  // By 9 AM all three books have posted full player prop menus for the day.
+  // Re-fetch lines and re-run each model in props-only mode against fresh data.
+  cron.schedule('0 9 * * *', async () => {
+    const today = getTodayET();
+    console.log(`\n⏰ [9:00 AM ET] Refreshing prop lines + props-only model re-run (${today})…`);
+
+    const { writePropLinesToDB } = require('./services/oddsService');
+    try {
+      await writePropLinesToDB('NBA', today);
+      await writePropLinesToDB('NHL', today);
+      await writePropLinesToDB('MLB', today);
+      console.log(`✅ [9:00 AM ET] Prop lines refreshed`);
+    } catch (err) {
+      console.error('[9:00 AM ET] writePropLinesToDB error:', err.message);
+    }
+
+    await Promise.allSettled([
+      runPipeline('NBA Props-Only Model', () => runPythonScript('nbaProjectionModel.py', ['--date', today, '--props-only'])),
+      runPipeline('MLB Props-Only Model', () => runPythonScript('mlbProjectionModel.py', ['--date', today, '--props-only'])),
+      runPipeline('NHL Props-Only Model', () => runPythonScript('nhlProjectionModel.py', ['--date', today, '--props-only'])),
+    ]);
+  }, { timezone: 'America/New_York' });
+
+  // ── 9:20 AM ET (13:20 UTC) — Edge detection (all sports) ─────────────────────
+  cron.schedule('20 9 * * *', async () => {
+    console.log('\n⏰ [9:20 AM ET] Edge detection — NBA + MLB + NHL…');
     await Promise.allSettled([
       runPipeline('NBA Prop Edges',  () => detectEdges()),
       runPipeline('MLB Prop Edges',  () => detectEdgesForSport('MLB')),
@@ -474,11 +500,11 @@ if (true) { // crons always run in production — MOCK_MODE removed
     ]);
   }, { timezone: 'America/New_York' });
 
-  // ── 6:00 AM ET (10:00 UTC) — Generate Chalky's picks via Claude (all sports) ──
-  // Must finish by 6:45 AM. Typically 20–30 min for a full slate.
-  cron.schedule('0 6 * * *', async () => {
+  // ── 9:40 AM ET (13:40 UTC) — Generate all picks via Claude ───────────────────
+  // Model picks + game picks + prop picks all generated here. Picks go live at 10 AM.
+  cron.schedule('40 9 * * *', async () => {
     const startTime = new Date().toISOString();
-    console.log(`\n⏰ [6:00 AM ET] Generating Chalky's picks (all sports)…`);
+    console.log(`\n⏰ [9:40 AM ET] Generating Chalky's picks (all sports)…`);
     console.log(`🎯 aiPicks.js started: ${startTime}`);
 
     let totalCount = 0;
@@ -507,10 +533,10 @@ if (true) { // crons always run in production — MOCK_MODE removed
     console.log(`🎯 Total picks generated: ${totalCount}`);
   }, { timezone: 'America/New_York' });
 
-  // ── 6:45 AM ET (10:45 UTC) — Pre-delivery verification ───────────────────────
-  // Zero picks at this point = critical alert before users wake up.
-  cron.schedule('45 6 * * *', async () => {
-    console.log('\n⏰ [6:45 AM ET] Pre-delivery verification…');
+  // ── 9:55 AM ET (13:55 UTC) — Pre-delivery verification ───────────────────────
+  // Zero picks at this point = critical alert before 10 AM drop.
+  cron.schedule('55 9 * * *', async () => {
+    console.log('\n⏰ [9:55 AM ET] Pre-delivery verification…');
     try {
       const db = require('./db');
       const today = getTodayET();
@@ -532,23 +558,23 @@ if (true) { // crons always run in production — MOCK_MODE removed
         console.error(`Time: ${new Date().toISOString()}`);
         console.error(`Check Railway logs immediately. Manual intervention required.`);
         console.error(`  — Did 4:30 AM ET model run complete?`);
-        console.error(`  — Did BDL API return games? (check BALLDONTLIE_API_KEY)`);
-        console.error(`  — Did 5:30 AM ET edge detection find edges?`);
-        console.error(`  — Did 6:00 AM ET aiPicks.js run without crash?`);
+        console.error(`  — Did 9:00 AM ET prop lines refresh succeed?`);
+        console.error(`  — Did 9:20 AM ET edge detection find edges?`);
+        console.error(`  — Did 9:40 AM ET aiPicks.js run without crash?`);
       } else {
-        console.log(`✅ [6:45 AM ET] ${totalPicks} picks live for ${today}:`);
+        console.log(`✅ [9:55 AM ET] ${totalPicks} picks ready for 10 AM drop (${today}):`);
         rows.forEach(row => console.log(`   ${row.league}: ${row.count} picks`));
       }
     } catch (err) {
-      console.error('🚨 [6:45 AM ET] Verification failed:', err.message);
+      console.error('🚨 [9:55 AM ET] Verification failed:', err.message);
     }
   }, { timezone: 'America/New_York' });
 
-  // ── 7:00 AM ET (11:00 UTC) — Picks go live + NHL goalie confirmation ──────────
-  // Picks are now available to users. Schedule per-game goalie confirmation jobs
-  // (run 90 min before each puck drop) so starting goalies are confirmed before bets.
-  cron.schedule('0 7 * * *', async () => {
-    console.log('\n⏰ [7:00 AM ET] Picks live! Scheduling NHL goalie confirmations…');
+  // ── 10:00 AM ET (14:00 UTC) — Picks live + NHL goalie confirmation ────────────
+  // All picks are now available to users. Schedule per-game goalie confirmation
+  // jobs (run 90 min before each puck drop) so starting goalies are confirmed.
+  cron.schedule('0 10 * * *', async () => {
+    console.log('\n⏰ [10:00 AM ET] Picks live! Scheduling NHL goalie confirmations…');
 
     await runPipeline('NHL Goalie Scheduling', async () => {
       _goalieCheckJobs.forEach(j => j.stop());
@@ -571,46 +597,6 @@ if (true) { // crons always run in production — MOCK_MODE removed
         _goalieCheckJobs.push(job);
       }
       console.log(`  Scheduled ${_goalieCheckJobs.length} NHL goalie checks`);
-    });
-  }, { timezone: 'America/New_York' });
-
-  // ── 9:15 AM ET (13:15 UTC) — Safety net: re-fetch prop lines + props-only re-run
-  // Sportsbooks post most player prop lines by 9–10 AM ET. This pass re-fetches all
-  // lines, re-runs projections against them, re-runs edge detection, and appends any
-  // new player prop picks that weren't available at 6 AM.
-  cron.schedule('15 9 * * *', async () => {
-    const today = getTodayET();
-    console.log(`\n⏰ [9:15 AM ET] Safety net — re-fetch prop lines + props-only re-run (${today})…`);
-
-    // Step 1: refresh prop lines now that books have posted them
-    const { writePropLinesToDB } = require('./services/oddsService');
-    try {
-      await writePropLinesToDB('NBA', today);
-      await writePropLinesToDB('NHL', today);
-      await writePropLinesToDB('MLB', today);
-      console.log(`✅ [9:15 AM ET] Prop lines refreshed`);
-    } catch (err) {
-      console.error('[9:15 AM ET] writePropLinesToDB error:', err.message);
-    }
-
-    // Step 2: re-run projection models (props-only) against fresh lines
-    await Promise.allSettled([
-      runPipeline('NBA Props-Only Model', () => runPythonScript('nbaProjectionModel.py', ['--date', today, '--props-only'])),
-      runPipeline('MLB Props-Only Model', () => runPythonScript('mlbProjectionModel.py', ['--date', today, '--props-only'])),
-      runPipeline('NHL Props-Only Model', () => runPythonScript('nhlProjectionModel.py', ['--date', today, '--props-only'])),
-    ]);
-
-    // Step 3: re-run edge detection so new projections get confidence scores
-    await Promise.allSettled([
-      runPipeline('NBA Prop Edges (safety)', () => detectEdges()),
-      runPipeline('MLB Prop Edges (safety)', () => detectEdgesForSport('MLB')),
-      runPipeline('NHL Prop Edges (safety)', () => detectEdgesForSport('NHL')),
-    ]);
-
-    // Step 4: generate player prop picks from the newly-detected edges
-    await runPipeline('Player Prop Picks (safety)', async () => {
-      const picks = await generatePropPicks();
-      console.log(`  Player prop picks added: ${picks.length}`);
     });
   }, { timezone: 'America/New_York' });
 
