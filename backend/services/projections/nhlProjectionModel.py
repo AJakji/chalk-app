@@ -209,7 +209,7 @@ def get_nhl_position_def_factors(conn, opp_team: str, pos_code: str) -> dict:
                     if lg_assists > 0 and row['reb_allowed'] is not None:
                         result['assists_def_f'] = cap(float(row['reb_allowed'])  / lg_assists, 0.75, 1.30)
                     if lg_sog > 0 and row['ast_allowed'] is not None:
-                        result['sog_def_f']     = cap(float(row['ast_allowed'])  / lg_sog,     0.80, 1.25)
+                        result['sog_def_f']     = cap(float(row['ast_allowed'])  / lg_sog,     0.85, 1.12)
                     break  # found data — don't fall through to ALL
     except Exception as e:
         log.debug(f'[position_def_ratings] {opp_team} {pos_code}: {e}')
@@ -275,9 +275,9 @@ def rolling_avg(rows: list, col: str, n: int) -> float:
 
 def weighted_avg(rows: list, col: str) -> float:
     """
-    Per spec: L5×0.40 + L10×0.30 + L20×0.20 + season×0.10
-    L5 weighted most heavily because hockey hot/cold streaks are the most
-    predictive short-term signal in the sport.
+    Equal weight across all windows: L5×0.25 + L10×0.25 + L20×0.25 + season×0.25.
+    Previously L5×0.40 overweighted hot streaks, pushing projections 20-35% above
+    market lines for players on outlier runs (same calibration issue fixed in NBA model).
     """
     n = len(rows)
     if n == 0:
@@ -288,11 +288,11 @@ def weighted_avg(rows: list, col: str) -> float:
     szn = rolling_avg(rows, col, n)
 
     if n >= 20:
-        return l5 * 0.40 + l10 * 0.30 + l20 * 0.20 + szn * 0.10
+        return l5 * 0.25 + l10 * 0.25 + l20 * 0.25 + szn * 0.25
     elif n >= 10:
-        return l5 * 0.50 + l10 * 0.35 + szn * 0.15
+        return l5 * 0.35 + l10 * 0.35 + szn * 0.30
     elif n >= 5:
-        return l5 * 0.65 + szn * 0.35
+        return l5 * 0.55 + szn * 0.45
     else:
         return szn
 
@@ -735,7 +735,13 @@ def project_shots_on_goal(logs: list, opp_team_logs: list,
         sog_per_min = sum(sog_l10_vals[:n]) / sum(toi_l10_vals[:n])
     else:
         sog_per_min = LEAGUE['sog_per_min']
-    rate_f = cap(sog_per_min / LEAGUE['sog_per_min'], 0.50, 1.80)
+    # rate_f clamp tightened from [0.50, 1.80] to [0.85, 1.15].
+    # The weighted base already captures a player's historical SOG rate (elite
+    # shooters have higher bases). Using sog_per_min / league_avg with a wide
+    # clamp double-counts their above-average rate, compounding 1.7× on top of
+    # a base that already reflects it. Keep only a ±15% adjustment for recent
+    # rate deviations vs their own typical rate.
+    rate_f = cap(sog_per_min / LEAGUE['sog_per_min'], 0.85, 1.15)
 
     # 3. PP TOI factor (boost for PP specialists)
     pp_toi_l10 = get_avg_pp_toi(logs, 10)
@@ -763,8 +769,15 @@ def project_shots_on_goal(logs: list, opp_team_logs: list,
     toi_l20  = get_avg_toi(logs, 20)
     line_f   = line_position_factor(toi_l20)
 
-    proj = base * toi_f * rate_f * (1.0 + sog_pp_boost) * opp_shot_f * \
-           game_script_f * ha_f * b2b_f * line_f
+    # Cap the combined factor product to ±22% vs base.
+    # Individual factors (PP specialist, hot rate, good matchup, home ice, etc.)
+    # are each reasonable, but they compound to 2-3× when all positive — the base
+    # already captures the player's historical SOG rate, so we limit total context
+    # adjustment to prevent systematic over-projection.
+    combined_f = toi_f * rate_f * (1.0 + sog_pp_boost) * opp_shot_f * \
+                 game_script_f * ha_f * b2b_f * line_f
+    combined_f = cap(combined_f, 0.78, 1.22)
+    proj = base * combined_f
 
     factors = {
         'base':            round(base, 3),

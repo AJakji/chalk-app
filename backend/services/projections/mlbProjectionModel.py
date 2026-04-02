@@ -479,8 +479,8 @@ def rolling_avg(rows: list, col: str, n: int) -> float:
 
 def new_weighted_avg(rows: list, col: str) -> float:
     """
-    L5 × 0.35  +  L10 × 0.30  +  L20 × 0.20  +  season × 0.15
-    Gracefully degrades with fewer games.
+    Equal weight across all windows: L5×0.25 + L10×0.25 + L20×0.25 + season×0.25.
+    Previously L5×0.35 overweighted recent outlier games (same fix applied to NBA/NHL).
     """
     n = len(rows)
     if n == 0:
@@ -490,11 +490,11 @@ def new_weighted_avg(rows: list, col: str) -> float:
     l20 = rolling_avg(rows, col, min(20, n))
     szn = rolling_avg(rows, col, n)
     if n >= 20:
-        return l5 * 0.35 + l10 * 0.30 + l20 * 0.20 + szn * 0.15
+        return l5 * 0.25 + l10 * 0.25 + l20 * 0.25 + szn * 0.25
     if n >= 10:
-        return l5 * 0.45 + l10 * 0.35 + szn * 0.20
+        return l5 * 0.35 + l10 * 0.35 + szn * 0.30
     if n >= 5:
-        return l5 * 0.60 + szn * 0.40
+        return l5 * 0.55 + szn * 0.45
     return szn
 
 
