@@ -322,6 +322,40 @@ const COLS = {
   MLB: [{ key:'wins', label:'W', w:28 }, { key:'losses', label:'L', w:28 }, { key:'pct', label:'PCT', w:44 }, { key:'gb', label:'GB', w:32 }],
 };
 
+// Filter labels per sport — must match API response conference/division names
+const FILTER_LABELS = {
+  NBA: {
+    conferences: ['Eastern Conference', 'Western Conference'],
+    divisions: {
+      'Eastern Conference': ['Atlantic', 'Central', 'Southeast'],
+      'Western Conference': ['Northwest', 'Pacific', 'Southwest'],
+    },
+  },
+  NHL: {
+    conferences: ['Eastern Conference', 'Western Conference'],
+    divisions: {
+      'Eastern Conference': ['Atlantic', 'Metropolitan'],
+      'Western Conference': ['Central', 'Pacific'],
+    },
+  },
+  MLB: {
+    conferences: ['American League', 'National League'],
+    divisions: {
+      'American League': ['AL East', 'AL Central', 'AL West'],
+      'National League': ['NL East', 'NL Central', 'NL West'],
+    },
+  },
+};
+
+// How many teams make the postseason (used for playoff line in league view)
+const LEAGUE_PLAYOFF_CUTOFF = { NBA: 10, NHL: 16, MLB: 12 };
+
+function getDivisionsForSport(sport, conference) {
+  const divMap = FILTER_LABELS[sport]?.divisions || {};
+  if (conference) return divMap[conference] || [];
+  return Object.values(divMap).flat();
+}
+
 function StandingsRow({ team, sport, rank, onPress }) {
   const statusColor = STATUS_COLORS[team.playoffStatus] || 'transparent';
   const cols = COLS[sport] || COLS.NBA;
@@ -370,6 +404,18 @@ function TeamsSection() {
   const [refreshing, setRefreshing] = useState(false);
   const [selectedTeam, setSelectedTeam] = useState(null);
 
+  // Filter state
+  const [filterLevel, setFilterLevel]               = useState('conference');
+  const [selectedConference, setSelectedConference] = useState(null);
+  const [selectedDivision, setSelectedDivision]     = useState(null);
+
+  // Reset filters when sport changes
+  useEffect(() => {
+    setFilterLevel('conference');
+    setSelectedConference(null);
+    setSelectedDivision(null);
+  }, [sport]);
+
   const fetchStandings = useCallback(async (sp) => {
     try {
       const res  = await fetch(`${API_URL}/api/stats/standings/${sp}`);
@@ -391,15 +437,118 @@ function TeamsSection() {
 
   const onRefresh = () => { setRefreshing(true); fetchStandings(sport); };
 
-  const playoffLegend = () => {
-    if (sport === 'NBA') return '● Playoff  ○ Play-in';
-    if (sport === 'NHL') return '● Division leader  ○ Wildcard';
-    return '● Division winner  ○ Wildcard';
+  // ── Filter helpers ────────────────────────────────────────────────────────────
+
+  const getLeagueFlat = () => {
+    const all = [];
+    (standings || []).forEach(conf => conf.divisions.forEach(div => all.push(...div.teams)));
+    if (sport === 'NHL') {
+      all.sort((a, b) => (b.pts || 0) - (a.pts || 0) || (b.wins || 0) - (a.wins || 0));
+    } else {
+      all.sort((a, b) => {
+        const pA = (a.wins + a.losses) > 0 ? a.wins / (a.wins + a.losses) : 0;
+        const pB = (b.wins + b.losses) > 0 ? b.wins / (b.wins + b.losses) : 0;
+        return pB - pA || (b.wins - a.wins);
+      });
+    }
+    return all;
   };
+
+  const getFilteredConferences = () => {
+    if (!standings) return [];
+    if (filterLevel === 'conference' && selectedConference) {
+      return standings.filter(c => c.name === selectedConference);
+    }
+    if (filterLevel === 'division' && selectedDivision) {
+      return standings
+        .map(c => ({ ...c, divisions: c.divisions.filter(d => d.name === selectedDivision) }))
+        .filter(c => c.divisions.length > 0);
+    }
+    return standings;
+  };
+
+  const playoffCutoff = LEAGUE_PLAYOFF_CUTOFF[sport] || 10;
+  const cols = COLS[sport] || COLS.NBA;
 
   return (
     <View style={{ flex: 1 }}>
       <SportSwitcher sport={sport} setSport={setSport} />
+
+      {/* ── Filter bar: League | Conference | Division ── */}
+      <View style={s.filterBar}>
+        <TouchableOpacity
+          style={[s.filterPill, filterLevel === 'league' && s.filterPillActive]}
+          onPress={() => { setFilterLevel('league'); setSelectedConference(null); setSelectedDivision(null); }}
+          activeOpacity={0.75}
+        >
+          <Text style={[s.filterPillText, filterLevel === 'league' && s.filterPillTextActive]}>League</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[s.filterPill, filterLevel === 'conference' && s.filterPillActive]}
+          onPress={() => { setFilterLevel('conference'); setSelectedDivision(null); }}
+          activeOpacity={0.75}
+        >
+          <Text style={[s.filterPillText, filterLevel === 'conference' && s.filterPillTextActive]}>
+            {selectedConference
+              ? selectedConference.replace(' Conference', '').replace(' League', '')
+              : 'Conference'}
+          </Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[s.filterPill, filterLevel === 'division' && s.filterPillActive]}
+          onPress={() => setFilterLevel('division')}
+          activeOpacity={0.75}
+        >
+          <Text style={[s.filterPillText, filterLevel === 'division' && s.filterPillTextActive]}>
+            {selectedDivision || 'Division'}
+          </Text>
+        </TouchableOpacity>
+      </View>
+
+      {/* ── Secondary selector row ── */}
+      {filterLevel === 'conference' && (
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={s.subFilter}
+          contentContainerStyle={s.subFilterContent}
+        >
+          {FILTER_LABELS[sport]?.conferences.map(conf => (
+            <TouchableOpacity
+              key={conf}
+              style={[s.subFilterPill, selectedConference === conf && s.subFilterPillActive]}
+              onPress={() => setSelectedConference(selectedConference === conf ? null : conf)}
+              activeOpacity={0.75}
+            >
+              <Text style={[s.subFilterText, selectedConference === conf && s.subFilterTextActive]}>
+                {conf.replace(' Conference', '').replace(' League', '')}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+      )}
+
+      {filterLevel === 'division' && (
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={s.subFilter}
+          contentContainerStyle={s.subFilterContent}
+        >
+          {getDivisionsForSport(sport, selectedConference).map(div => (
+            <TouchableOpacity
+              key={div}
+              style={[s.subFilterPill, selectedDivision === div && s.subFilterPillActive]}
+              onPress={() => setSelectedDivision(selectedDivision === div ? null : div)}
+              activeOpacity={0.75}
+            >
+              <Text style={[s.subFilterText, selectedDivision === div && s.subFilterTextActive]}>{div}</Text>
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+      )}
 
       {loading ? (
         <View style={s.centerPad}><ActivityIndicator size="large" color={colors.green} /></View>
@@ -417,30 +566,56 @@ function TeamsSection() {
             <Text style={s.legendText}>{sport === 'NBA' ? 'Play-in' : 'Wildcard'}</Text>
           </View>
 
-          {(standings || []).map((conf, ci) => (
-            <View key={ci} style={s.confBlock}>
-              {/* Conference header */}
-              <View style={s.confHeader}>
-                <Text style={s.confName}>{conf.name}</Text>
+          {/* ── League flat list ── */}
+          {filterLevel === 'league' && (() => {
+            const allTeams = getLeagueFlat();
+            return (
+              <View>
+                <View style={s.divHeader}>
+                  <Text style={[s.divName, { flex: 1 }]}>{sport} — Overall</Text>
+                  <View style={s.divColHeaders}>
+                    {cols.map(col => (
+                      <Text key={col.key} style={[s.divColText, { width: col.w }]}>{col.label}</Text>
+                    ))}
+                  </View>
+                </View>
+                {allTeams.map((team, i) => (
+                  <React.Fragment key={team.id || i}>
+                    {i === playoffCutoff && (
+                      <View style={s.playoffLine}>
+                        <Text style={s.playoffLineText}>── Playoff Line ──</Text>
+                      </View>
+                    )}
+                    <StandingsRow team={team} sport={sport} rank={i + 1} onPress={setSelectedTeam} />
+                  </React.Fragment>
+                ))}
               </View>
-              {/* Divisions */}
-              {(conf.divisions || []).map((div, di) => (
-                <DivisionBlock
-                  key={di}
-                  division={div}
-                  sport={sport}
-                  onPressTeam={setSelectedTeam}
-                />
-              ))}
-            </View>
-          ))}
+            );
+          })()}
 
-          {(!standings || standings.length === 0) && (
-            <View style={s.emptyState}>
-              <Text style={s.emptyTitle}>Could not load standings</Text>
-              <Text style={s.emptyBody}>Pull to refresh or check your connection.</Text>
-            </View>
-          )}
+          {/* ── Conference / Division grouped view ── */}
+          {filterLevel !== 'league' && (() => {
+            const filtered = getFilteredConferences();
+            if (!filtered.length) return (
+              <View style={s.emptyState}>
+                <Text style={s.emptyTitle}>Could not load standings</Text>
+                <Text style={s.emptyBody}>Pull to refresh or check your connection.</Text>
+              </View>
+            );
+            return filtered.map((conf, ci) => (
+              <View key={ci} style={s.confBlock}>
+                {/* Hide conference header when showing a single filtered division */}
+                {!(filterLevel === 'division' && selectedDivision) && (
+                  <View style={s.confHeader}>
+                    <Text style={s.confName}>{conf.name}</Text>
+                  </View>
+                )}
+                {conf.divisions.map((div, di) => (
+                  <DivisionBlock key={di} division={div} sport={sport} onPressTeam={setSelectedTeam} />
+                ))}
+              </View>
+            ));
+          })()}
         </ScrollView>
       )}
 
@@ -778,4 +953,83 @@ const s = StyleSheet.create({
   injuryDesc:     { fontSize: 11, color: '#888888', marginTop: 2 },
   injuryBadge:    { borderRadius: 6, paddingHorizontal: 8, paddingVertical: 3, borderWidth: 1 },
   injuryBadgeText:{ fontSize: 11, fontWeight: '700' },
+
+  // ── Filter bar ──────────────────────────────────────────────────────────────
+  filterBar: {
+    flexDirection: 'row',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    gap: 8,
+  },
+  filterPill: {
+    flex: 1,
+    paddingVertical: 8,
+    alignItems: 'center',
+    backgroundColor: '#0f0f0f',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#1e1e1e',
+  },
+  filterPillActive: {
+    backgroundColor: '#00E87A',
+    borderColor: '#00E87A',
+  },
+  filterPillText: {
+    color: '#888888',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  filterPillTextActive: {
+    color: '#080808',
+    fontWeight: '800',
+  },
+  subFilter: {
+    maxHeight: 44,
+    flexGrow: 0,
+  },
+  subFilterContent: {
+    paddingHorizontal: 16,
+    gap: 8,
+    paddingBottom: 8,
+    alignItems: 'center',
+  },
+  subFilterPill: {
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    backgroundColor: '#0f0f0f',
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: '#1e1e1e',
+  },
+  subFilterPillActive: {
+    backgroundColor: '#1a1a1a',
+    borderColor: '#00E87A',
+  },
+  subFilterText: {
+    color: '#888888',
+    fontSize: 12,
+    fontWeight: '500',
+  },
+  subFilterTextActive: {
+    color: '#00E87A',
+    fontWeight: '700',
+  },
+
+  // ── Playoff line (league view) ───────────────────────────────────────────────
+  playoffLine: {
+    paddingVertical: 6,
+    paddingHorizontal: spacing.md,
+    backgroundColor: '#0a0a0a',
+    borderTopWidth: 1,
+    borderBottomWidth: 1,
+    borderColor: colors.green + '44',
+    alignItems: 'center',
+  },
+  playoffLineText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: colors.green,
+    letterSpacing: 0.5,
+    textTransform: 'uppercase',
+  },
 });

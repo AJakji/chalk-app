@@ -562,7 +562,7 @@ async function getNHLStandings() {
   });
 
   return ['Eastern','Western'].map(conf => ({
-    name: `${conf}ern Conference`,
+    name: `${conf} Conference`,
     divisions: (conf === 'Eastern' ? ['Atlantic','Metropolitan'] : ['Central','Pacific']).map(div => ({
       name: div,
       teams: teams.filter(t => t.division === div).sort((a, b) => a.divisionRank - b.divisionRank),
