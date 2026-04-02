@@ -441,18 +441,9 @@ function TeamsSection() {
   const [loading, setLoading]       = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [selectedTeam, setSelectedTeam] = useState(null);
+  const [filterLevel, setFilterLevel]   = useState('conference');
 
-  // Filter state
-  const [filterLevel, setFilterLevel]               = useState('conference');
-  const [selectedConference, setSelectedConference] = useState(null);
-  const [selectedDivision, setSelectedDivision]     = useState(null);
-
-  // Reset filters when sport changes
-  useEffect(() => {
-    setFilterLevel('conference');
-    setSelectedConference(null);
-    setSelectedDivision(null);
-  }, [sport]);
+  useEffect(() => { setFilterLevel('conference'); }, [sport]);
 
   const fetchStandings = useCallback(async (sp) => {
     try {
@@ -486,7 +477,7 @@ function TeamsSection() {
       <View style={s.filterBar}>
         <TouchableOpacity
           style={[s.filterPill, filterLevel === 'league' && s.filterPillActive]}
-          onPress={() => { setFilterLevel('league'); setSelectedConference(null); setSelectedDivision(null); }}
+          onPress={() => setFilterLevel('league')}
           activeOpacity={0.75}
         >
           <Text style={[s.filterPillText, filterLevel === 'league' && s.filterPillTextActive]}>League</Text>
@@ -494,14 +485,10 @@ function TeamsSection() {
 
         <TouchableOpacity
           style={[s.filterPill, filterLevel === 'conference' && s.filterPillActive]}
-          onPress={() => { setFilterLevel('conference'); setSelectedDivision(null); }}
+          onPress={() => setFilterLevel('conference')}
           activeOpacity={0.75}
         >
-          <Text style={[s.filterPillText, filterLevel === 'conference' && s.filterPillTextActive]}>
-            {selectedConference
-              ? selectedConference.replace(' Conference', '').replace(' League', '')
-              : 'Conference'}
-          </Text>
+          <Text style={[s.filterPillText, filterLevel === 'conference' && s.filterPillTextActive]}>Conference</Text>
         </TouchableOpacity>
 
         <TouchableOpacity
@@ -509,54 +496,9 @@ function TeamsSection() {
           onPress={() => setFilterLevel('division')}
           activeOpacity={0.75}
         >
-          <Text style={[s.filterPillText, filterLevel === 'division' && s.filterPillTextActive]}>
-            {selectedDivision || 'Division'}
-          </Text>
+          <Text style={[s.filterPillText, filterLevel === 'division' && s.filterPillTextActive]}>Division</Text>
         </TouchableOpacity>
       </View>
-
-      {/* ── Secondary selector row ── */}
-      {filterLevel === 'conference' && (
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          style={s.subFilter}
-          contentContainerStyle={s.subFilterContent}
-        >
-          {FILTER_LABELS[sport]?.conferences.map(conf => (
-            <TouchableOpacity
-              key={conf}
-              style={[s.subFilterPill, selectedConference === conf && s.subFilterPillActive]}
-              onPress={() => setSelectedConference(selectedConference === conf ? null : conf)}
-              activeOpacity={0.75}
-            >
-              <Text style={[s.subFilterText, selectedConference === conf && s.subFilterTextActive]}>
-                {conf.replace(' Conference', '').replace(' League', '')}
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </ScrollView>
-      )}
-
-      {filterLevel === 'division' && (
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          style={s.subFilter}
-          contentContainerStyle={s.subFilterContent}
-        >
-          {getDivisionsForSport(sport, selectedConference).map(div => (
-            <TouchableOpacity
-              key={div}
-              style={[s.subFilterPill, selectedDivision === div && s.subFilterPillActive]}
-              onPress={() => setSelectedDivision(selectedDivision === div ? null : div)}
-              activeOpacity={0.75}
-            >
-              <Text style={[s.subFilterText, selectedDivision === div && s.subFilterTextActive]}>{div}</Text>
-            </TouchableOpacity>
-          ))}
-        </ScrollView>
-      )}
 
       {loading ? (
         <View style={s.centerPad}><ActivityIndicator size="large" color={colors.green} /></View>
@@ -606,9 +548,7 @@ function TeamsSection() {
 
           {/* ── CONFERENCE: flat team list per conference, no division headers ── */}
           {filterLevel === 'conference' && (() => {
-            const confs = selectedConference
-              ? (standings || []).filter(c => c.name === selectedConference)
-              : (standings || []);
+            const confs = standings || [];
             if (!confs.length) return (
               <View style={s.emptyState}>
                 <Text style={s.emptyTitle}>Could not load standings</Text>
@@ -624,11 +564,8 @@ function TeamsSection() {
 
           {/* ── DIVISION: teams grouped by division with division headers ── */}
           {filterLevel === 'division' && (() => {
-            let confs = standings || [];
-            if (selectedConference) confs = confs.filter(c => c.name === selectedConference);
-            const allDivs = confs.flatMap(conf =>
+            const allDivs = (standings || []).flatMap(conf =>
               conf.divisions
-                .filter(div => !selectedDivision || div.name === selectedDivision)
                 .map(div => ({ ...div, conferenceName: conf.name }))
             );
             if (!allDivs.length) return (

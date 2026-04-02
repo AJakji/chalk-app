@@ -596,21 +596,30 @@ router.get('/standings/:sport', async (req, res) => {
     return res.status(400).json({ error: 'Sport must be NBA, NHL, or MLB' });
   }
 
-  const cacheKey = `standings_${sport}`;
+  // v2 cache key — busts any stale cached zeros from previous code
+  const cacheKey = `standings_v2_${sport}`;
   const cached   = cacheGet(cacheKey);
-  if (cached) return res.json(cached);
+  if (cached) {
+    console.log(`[standings] ${sport} served from cache`);
+    return res.json(cached);
+  }
 
   try {
+    console.log(`[standings] fetching ${sport} from API...`);
     let conferences;
     if (sport === 'NBA')      conferences = await getNBAStandings();
     else if (sport === 'NHL') conferences = await getNHLStandings();
     else                      conferences = await getMLBStandings();
 
+    // Log first team from first division for diagnostics
+    const sample = conferences?.[0]?.divisions?.[0]?.teams?.[0];
+    console.log(`[standings] ${sport} OK — conferences: ${conferences?.length}, sample team:`, JSON.stringify(sample));
+
     const data = { sport, conferences, updated: new Date().toISOString() };
     cacheSet(cacheKey, data, TTL.TEAMS);
     res.json(data);
   } catch (err) {
-    console.error(`[stats] standings/${sport}:`, err.message);
+    console.error(`[standings] ${sport} error:`, err.message, err.stack);
     res.status(500).json({ error: err.message });
   }
 });
