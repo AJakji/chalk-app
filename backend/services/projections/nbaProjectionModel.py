@@ -517,11 +517,13 @@ def rolling_avg(logs: list[dict], stat: str, n: int) -> float:
 
 
 def weighted_base(logs: list[dict], season_avg: float, stat: str) -> float:
-    """L5×0.35 + L10×0.30 + L20×0.20 + season×0.15"""
+    """Equal weight across all windows — L5×0.25 + L10×0.25 + L20×0.25 + season×0.25.
+    Previously L5×0.35/L10×0.30/L20×0.20/season×0.15 overweighted hot streaks,
+    pushing projections 20-35% above market lines for star players on outlier runs."""
     l5  = rolling_avg(logs, stat, 5)
     l10 = rolling_avg(logs, stat, 10)
     l20 = rolling_avg(logs, stat, 20)
-    return l5*0.35 + l10*0.30 + l20*0.20 + season_avg*0.15
+    return l5*0.25 + l10*0.25 + l20*0.25 + season_avg*0.25
 
 
 def weighted_base_threes(logs: list[dict], season_avg: float) -> float:
@@ -760,7 +762,10 @@ def project_player(
     # Fix: use one blended factor that takes the SMALLER of the two deviations to avoid
     # amplification when both are simultaneously high (e.g. Jokic = 1.279× → 1.022×).
     ts_deviation_rel = (ts_pct - ts_lg) / ts_lg   # relative to league avg TS%
-    combined_eff_f   = 1.0 + min(ts_deviation_rel * 0.15, usage_deviation * 0.10)
+    # Coefficients halved (was 0.15/0.10) — efficiency is already embedded in the
+    # weighted base (elite scorers average more points because they're efficient).
+    # Large coefficients added a compounding bonus on top of what the base already captures.
+    combined_eff_f   = 1.0 + min(ts_deviation_rel * 0.08, usage_deviation * 0.05)
     combined_eff_f   = clamp(combined_eff_f, 0.90, 1.15)
 
     # Injury/role boost is applied separately — it represents a genuine change from
@@ -812,17 +817,24 @@ def project_player(
 
     # Implied total factor (team scoring context)
     # league avg ~225, each team scores ~112.5
+    # Narrowed clamp range [0.95, 1.07] — was [0.90, 1.12] which allowed large compounding boosts.
+    # Scoring context is a small contextual adjustment, not a major amplifier.
     implied_team_pts  = implied_total / 2.0
-    total_f           = clamp(implied_total / LEAGUE_AVG['game_total'], 0.92, 1.10)
-    scoring_context_f = clamp(implied_team_pts / 112.5, 0.90, 1.12)
+    total_f           = clamp(implied_total / LEAGUE_AVG['game_total'], 0.94, 1.07)
+    scoring_context_f = clamp(implied_team_pts / 112.5, 0.95, 1.07)
 
-    # Spread / game script
-    # Large spread → starter rests → lower counting stats for favorite
-    abs_spread = abs(spread)
+    # Spread / game script — differentiate favorite vs underdog.
+    # `spread` is always the home team's spread (negative = home is favorite).
+    # For away players, flip the sign so we're judging their team's position.
+    # Favorites rest starters in blowouts → their stats are suppressed.
+    # Underdogs chase the game → stars play more minutes and attempt more shots.
+    player_spread = spread if is_home else -spread
+    abs_spread    = abs(player_spread)
+    is_underdog   = player_spread > 0  # player's team is getting points
     if abs_spread > 12:
-        game_script_f = 0.90
+        game_script_f = 1.05 if is_underdog else 0.90
     elif abs_spread > 8:
-        game_script_f = 0.95
+        game_script_f = 1.02 if is_underdog else 0.95
     else:
         game_script_f = 1.00
 
