@@ -92,7 +92,7 @@ function ChatBubble({ message, onSend, onReport }) {
       ]}
     >
       {!isUser && (
-        <ChalkyFace size={28} style={styles.chalkyAvatar} />
+        <ChalkyFace size={56} style={styles.chalkyAvatar} />
       )}
       <View style={styles.bubbleColumn}>
         <View style={[styles.bubble, isUser ? styles.bubbleUser : styles.bubbleAssistant]}>
@@ -155,7 +155,7 @@ function TypingIndicator() {
 
   return (
     <View style={styles.bubbleRow}>
-      <Image source={CHALKY_PNG} style={styles.chalkyAvatar} resizeMode="cover" />
+      <ChalkyFace size={28} style={styles.chalkyAvatar} />
       <View style={[styles.bubble, styles.bubbleAssistant, styles.typingBubble]}>
         {[dot1, dot2, dot3].map((anim, i) => (
           <Animated.View key={i} style={[styles.typingDot, { opacity: anim }]} />
@@ -366,7 +366,7 @@ export default function ResearchScreen() {
             showsVerticalScrollIndicator={false}
             keyboardShouldPersistTaps="handled"
           >
-            <ChalkyMascot size={80} style={styles.emptyAvatar} />
+            <ChalkyMascot size={180} style={styles.emptyAvatar} />
             <Text style={styles.emptyTitle}>Research</Text>
             <Text style={styles.emptySubtitle}>
               Stats, trends, matchups, and betting lines. Ask about any player, team, or game.
