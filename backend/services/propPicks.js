@@ -108,7 +108,7 @@ async function generatePropPicks() {
   try {
     message = await client.messages.create({
       model: 'claude-sonnet-4-6',
-      max_tokens: 4096,
+      max_tokens: 16000,
       system: PROP_SYSTEM_PROMPT,
       messages: [{ role: 'user', content: userContent }],
     });
