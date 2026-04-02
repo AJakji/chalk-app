@@ -609,7 +609,7 @@ if (true) { // crons always run in production — MOCK_MODE removed
 
     // Step 4: generate player prop picks from the newly-detected edges
     await runPipeline('Player Prop Picks (safety)', async () => {
-      const picks = await generateModelPicks();
+      const picks = await generatePropPicks();
       console.log(`  Player prop picks added: ${picks.length}`);
     });
   }, { timezone: 'America/New_York' });
