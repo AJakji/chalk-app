@@ -173,10 +173,10 @@ router.get('/', async (req, res) => {
 
     let query, params;
     if (sport) {
-      query  = `SELECT * FROM picks WHERE pick_date = $1 AND league = $2 AND pick_type NOT IN ('Moneyline') ORDER BY confidence DESC LIMIT $3`;
+      query  = `SELECT * FROM picks WHERE pick_date = $1 AND league = $2 ORDER BY confidence DESC LIMIT $3`;
       params = [today, sport, limit];
     } else {
-      query  = `SELECT * FROM picks WHERE pick_date = $1 AND pick_type NOT IN ('Moneyline') ORDER BY confidence DESC LIMIT $2`;
+      query  = `SELECT * FROM picks WHERE pick_date = $1 ORDER BY confidence DESC LIMIT $2`;
       params = [today, limit];
     }
 
@@ -299,7 +299,6 @@ router.get('/recent', async (req, res) => {
       ({ rows } = await db.query(
         `SELECT * FROM picks
          WHERE league = $1
-           AND pick_type NOT IN ('Moneyline')
            AND pick_date = (
              SELECT MAX(pick_date) FROM picks WHERE league = $1
            )
@@ -311,7 +310,6 @@ router.get('/recent', async (req, res) => {
       ({ rows } = await db.query(
         `SELECT * FROM picks
          WHERE pick_date = (SELECT MAX(pick_date) FROM picks)
-           AND pick_type NOT IN ('Moneyline')
          ORDER BY confidence DESC
          LIMIT $1`,
         [limit]
