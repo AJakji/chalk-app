@@ -10,6 +10,7 @@ const nhlApi      = require('./nhlApi');
 const mlbStats    = require('./mlbStats');
 const oddsService = require('./oddsService');
 const weather     = require('./weatherService');
+const db          = require('../db');
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -1035,6 +1036,173 @@ async function get_comparative_stats({ sport, stat_category, scope }) {
 
 // ── Tool dispatcher ───────────────────────────────────────────────────────────
 
+// ── Player vs Team ────────────────────────────────────────────────────────────
+
+const TEAM_ALIASES = {
+  NBA: {
+    celtics:'BOS',boston:'BOS',lakers:'LAL',warriors:'GSW','golden state':'GSW',
+    nuggets:'DEN',denver:'DEN',heat:'MIA',miami:'MIA',bucks:'MIL',milwaukee:'MIL',
+    knicks:'NYK','new york knicks':'NYK',nets:'BKN',brooklyn:'BKN',sixers:'PHI',
+    '76ers':'PHI',philadelphia:'PHI',suns:'PHX',phoenix:'PHX',clippers:'LAC',
+    thunder:'OKC',oklahoma:'OKC',raptors:'TOR',toronto:'TOR',bulls:'CHI',
+    chicago:'CHI',cavaliers:'CLE',cavs:'CLE',cleveland:'CLE',hawks:'ATL',
+    atlanta:'ATL',magic:'ORL',orlando:'ORL',pacers:'IND',indiana:'IND',
+    pistons:'DET',detroit:'DET',hornets:'CHA',charlotte:'CHA',wizards:'WAS',
+    washington:'WAS',grizzlies:'MEM',memphis:'MEM',pelicans:'NOP','new orleans':'NOP',
+    spurs:'SAS','san antonio':'SAS',mavericks:'DAL',mavs:'DAL',dallas:'DAL',
+    rockets:'HOU',houston:'HOU',jazz:'UTA',utah:'UTA',kings:'SAC',sacramento:'SAC',
+    'trail blazers':'POR',blazers:'POR',portland:'POR',wolves:'MIN',
+    timberwolves:'MIN',minnesota:'MIN',
+  },
+  NHL: {
+    bruins:'BOS',boston:'BOS','maple leafs':'TOR',leafs:'TOR',toronto:'TOR',
+    rangers:'NYR',penguins:'PIT',pittsburgh:'PIT',blackhawks:'CHI',chicago:'CHI',
+    kings:'LAK',jets:'WPG',winnipeg:'WPG',oilers:'EDM',edmonton:'EDM',
+    flames:'CGY',calgary:'CGY',canucks:'VAN',vancouver:'VAN',avalanche:'COL',
+    colorado:'COL',lightning:'TBL','tampa bay':'TBL',panthers:'FLA',florida:'FLA',
+    hurricanes:'CAR',carolina:'CAR',wild:'MIN',blues:'STL','st louis':'STL',
+    stars:'DAL',ducks:'ANA',anaheim:'ANA',sharks:'SJS','san jose':'SJS',
+    senators:'OTT',ottawa:'OTT',sabres:'BUF',buffalo:'BUF','red wings':'DET',
+    islanders:'NYI',devils:'NJD','new jersey':'NJD',flyers:'PHI',
+    capitals:'WSH',predators:'NSH',nashville:'NSH',kraken:'SEA',seattle:'SEA',
+    'golden knights':'VGK',vegas:'VGK',utah:'UTA',
+  },
+  MLB: {
+    yankees:'NYY','new york yankees':'NYY','red sox':'BOS',boston:'BOS',
+    dodgers:'LAD',cubs:'CHC','white sox':'CWS',astros:'HOU',houston:'HOU',
+    braves:'ATL',atlanta:'ATL',mets:'NYM','new york mets':'NYM',phillies:'PHI',
+    cardinals:'STL','st louis':'STL',giants:'SFG','san francisco':'SFG',
+    padres:'SDP','san diego':'SDP',mariners:'SEA',seattle:'SEA',rangers:'TEX',
+    texas:'TEX',rays:'TBR','tampa bay':'TBR','blue jays':'TOR',toronto:'TOR',
+    orioles:'BAL',baltimore:'BAL',tigers:'DET',detroit:'DET',twins:'MIN',
+    minnesota:'MIN',royals:'KCR','kansas city':'KCR',guardians:'CLE',
+    indians:'CLE',cleveland:'CLE',angels:'LAA',athletics:'OAK',oakland:'OAK',
+    pirates:'PIT',pittsburgh:'PIT',brewers:'MIL',milwaukee:'MIL',reds:'CIN',
+    cincinnati:'CIN',marlins:'MIA',miami:'MIA',rockies:'COL',colorado:'COL',
+    diamondbacks:'ARI',dbacks:'ARI',arizona:'ARI',nationals:'WSN',
+  },
+};
+
+function resolveTeam(input, sport) {
+  const key = input.toLowerCase().trim();
+  return (TEAM_ALIASES[sport] || {})[key] || input;
+}
+
+function safeN(v) { const n = parseFloat(v); return isNaN(n) ? 0 : n; }
+
+function buildVsSummary(rows, sport) {
+  const n = rows.length;
+  if (!n) return null;
+  const mean = (col) => (rows.reduce((s, r) => s + safeN(r[col]), 0) / n);
+
+  if (sport === 'NBA') {
+    return {
+      games: n,
+      avg_pts:  mean('points').toFixed(1),
+      avg_reb:  mean('rebounds').toFixed(1),
+      avg_ast:  mean('assists').toFixed(1),
+      avg_stl:  mean('steals').toFixed(1),
+      avg_blk:  mean('blocks').toFixed(1),
+      avg_3pm:  mean('three_made').toFixed(1),
+      best_pts: Math.max(...rows.map(r => safeN(r.points))),
+    };
+  }
+  if (sport === 'NHL') {
+    return {
+      games: n,
+      total_goals:   rows.reduce((s, r) => s + safeN(r.points), 0),   // goals stored in points col
+      total_assists: rows.reduce((s, r) => s + safeN(r.assists), 0),
+      total_points:  rows.reduce((s, r) => s + safeN(r.points) + safeN(r.assists), 0),
+      avg_goals:     mean('points').toFixed(2),
+      avg_assists:   mean('assists').toFixed(2),
+      pts_per_game:  (mean('points') + mean('assists')).toFixed(2),
+    };
+  }
+  if (sport === 'MLB') {
+    const hits = rows.reduce((s, r) => s + safeN(r.fg_made), 0);   // hits mapped to fg_made
+    const ab   = rows.reduce((s, r) => s + safeN(r.fg_att), 0);    // at-bats mapped to fg_att
+    const hrs  = rows.reduce((s, r) => s + safeN(r.rebounds), 0);  // HR mapped to rebounds
+    const rbi  = rows.reduce((s, r) => s + safeN(r.assists), 0);   // RBI mapped to assists
+    return {
+      games: n,
+      batting_avg: ab > 0 ? (hits / ab).toFixed(3).replace('0.', '.') : '.000',
+      total_hits:  hits,
+      total_hrs:   hrs,
+      total_rbi:   rbi,
+      avg_hits:    (hits / n).toFixed(1),
+    };
+  }
+  return { games: n };
+}
+
+async function get_player_vs_team({ player_name, opponent_team, sport = 'NBA' }) {
+  const resolved = resolveTeam(opponent_team, sport);
+  const season   = sport === 'NHL'
+    ? (() => { const y = new Date().getFullYear(), m = new Date().getMonth()+1; return m < 7 ? `${y-1}-${y}` : `${y}-${y+1}`; })()
+    : sport === 'NBA'
+    ? (() => { const y = new Date().getFullYear(), m = new Date().getMonth()+1; return m < 7 ? `${y-1}-${String(y).slice(2)}` : `${y}-${String(y+1).slice(2)}`; })()
+    : String(new Date().getFullYear());
+
+  const result = await db.query(
+    `SELECT player_name, game_date, opponent, home_away,
+            points, rebounds, assists, steals, blocks, three_made,
+            fg_made, fg_att, minutes, plus_minus
+     FROM player_game_logs
+     WHERE player_name ILIKE $1
+       AND sport = $2
+       AND (opponent ILIKE $3 OR opponent ILIKE $4)
+     ORDER BY game_date DESC
+     LIMIT 20`,
+    [`%${player_name}%`, sport, `%${resolved}%`, `%${opponent_team}%`]
+  );
+
+  const rows = result.rows;
+  if (!rows.length) {
+    return `NO VS HISTORY: No games found for ${player_name} vs ${opponent_team} (${sport}) in the database. The sample may be too small or the matchup hasn't occurred this season.`;
+  }
+
+  const summary = buildVsSummary(rows, sport);
+  const name    = rows[0].player_name;
+
+  let out = `PLAYER VS TEAM — ${name.toUpperCase()} vs ${opponent_team.toUpperCase()} (${sport})\n`;
+  out += `Games found: ${rows.length} | Season: ${season}\n\n`;
+
+  if (sport === 'NBA') {
+    out += `CAREER VS AVERAGES (${rows.length} games):\n`;
+    out += `PPG: ${summary.avg_pts} | RPG: ${summary.avg_reb} | APG: ${summary.avg_ast} | SPG: ${summary.avg_stl} | BPG: ${summary.avg_blk} | 3PM: ${summary.avg_3pm}\n`;
+    out += `Best scoring game vs this opponent: ${summary.best_pts} pts\n\n`;
+    out += `GAME LOG (most recent first):\n`;
+    rows.slice(0, 8).forEach(r => {
+      const d = r.game_date ? String(r.game_date).slice(0, 10) : '?';
+      out += `${d} ${r.home_away === 'home' ? 'vs' : '@'} ${r.opponent}: ${safeN(r.points)}pts ${safeN(r.rebounds)}reb ${safeN(r.assists)}ast ${safeN(r.three_made)}3pm (${Math.round(safeN(r.minutes))}min)\n`;
+    });
+  } else if (sport === 'NHL') {
+    out += `CAREER VS TOTALS (${rows.length} games):\n`;
+    out += `Goals: ${summary.total_goals} | Assists: ${summary.total_assists} | Points: ${summary.total_points}\n`;
+    out += `Per game: ${summary.avg_goals}G / ${summary.avg_assists}A / ${summary.pts_per_game}P\n\n`;
+    out += `GAME LOG (most recent first):\n`;
+    rows.slice(0, 8).forEach(r => {
+      const d = r.game_date ? String(r.game_date).slice(0, 10) : '?';
+      out += `${d} ${r.home_away === 'home' ? 'vs' : '@'} ${r.opponent}: ${safeN(r.points)}G ${safeN(r.assists)}A\n`;
+    });
+  } else if (sport === 'MLB') {
+    out += `CAREER VS TOTALS (${rows.length} games):\n`;
+    out += `AVG: ${summary.batting_avg} | Hits: ${summary.total_hits} | HR: ${summary.total_hrs} | RBI: ${summary.total_rbi}\n`;
+    out += `Hits/game: ${summary.avg_hits}\n\n`;
+    out += `GAME LOG (most recent first):\n`;
+    rows.slice(0, 8).forEach(r => {
+      const d = r.game_date ? String(r.game_date).slice(0, 10) : '?';
+      out += `${d} ${r.home_away === 'home' ? 'vs' : '@'} ${r.opponent}: ${safeN(r.fg_made)}H ${safeN(r.rebounds)}HR ${safeN(r.assists)}RBI\n`;
+    });
+  }
+
+  if (rows.length < 5) {
+    out += `\n⚠️ SMALL SAMPLE: Only ${rows.length} game(s) found. Treat averages as limited data, not a reliable pattern.`;
+  }
+
+  return out;
+}
+
 async function executeTool(name, input) {
   console.log(`[tool] ${name}(${JSON.stringify(input)})`);
   const handlers = {
@@ -1047,6 +1215,7 @@ async function executeTool(name, input) {
     get_nhl_player_stats,
     get_mlb_player_stats,
     get_comparative_stats,
+    get_player_vs_team,
   };
   const fn = handlers[name];
   if (!fn) return `Unknown tool: ${name}`;

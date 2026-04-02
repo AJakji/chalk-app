@@ -155,6 +155,29 @@ const TOOLS = [
     },
   },
   {
+    name: 'get_player_vs_team',
+    description: 'Get a player\'s historical stats against a specific opponent team from the database. ALWAYS use this when the user asks how a player has performed against a team — phrases like "vs", "against", "history vs", "record against", "how has X done vs Y". Works for NBA, NHL, and MLB. Never answer this from training knowledge.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        player_name: {
+          type: 'string',
+          description: 'Full or partial player name (e.g. "Jokic", "McDavid", "Ohtani")',
+        },
+        opponent_team: {
+          type: 'string',
+          description: 'Team name, city, nickname, or abbreviation (e.g. "Celtics", "Boston", "BOS")',
+        },
+        sport: {
+          type: 'string',
+          enum: ['NBA', 'NHL', 'MLB'],
+          description: 'The sport',
+        },
+      },
+      required: ['player_name', 'opponent_team', 'sport'],
+    },
+  },
+  {
     name: 'get_comparative_stats',
     description: 'Get a ranked comparison of all players on tonight\'s slate for a specific stat. Use for questions like "who\'s the best scorer tonight", "which goalie has the best save percentage", "best value plays on the NBA slate", "who\'s running hot right now", or any question asking to compare multiple players.',
     input_schema: {
@@ -209,6 +232,14 @@ WHAT YOU CAN ANSWER WITH REAL DATA:
 - Team pace, position defense, bullpen usage
 - Weather, injuries, starting pitchers, goalie starters
 - Comparative edges across tonight's slate
+- Player historical stats vs a specific opponent — ALWAYS call get_player_vs_team for "vs" questions
+
+VS TEAM QUESTIONS — NON-NEGOTIABLE:
+When the user asks how a player has done against a team ("Jokic vs Celtics", "McDavid against Toronto", "Ohtani vs Yankees", "how has X done vs Y") — ALWAYS call get_player_vs_team FIRST. Never answer from training knowledge. The DB has real game log data.
+When presenting vs-team results:
+- Lead with games found and the key averages
+- List the last 3-5 individual games
+- If sample < 5 games, note it but still give the numbers
 
 HOW TO READ TOOL RESULTS — every section exists for a reason:
 - HOME vs AWAY: use it for home/away questions. Never say split is unavailable if this section is present.
@@ -376,6 +407,23 @@ best = the book with the better odds for each side (higher number = better).
     {"label":"Over 26.5","dk":"-115","fd":"-112","best":"FanDuel"},
     {"label":"Under 26.5","dk":"-105","fd":"-108","best":"DraftKings"}
   ]
+}}
+
+────────────────────────────────────────
+WHEN get_player_vs_team was called:
+────────────────────────────────────────
+
+Use type "last10_grid" with the games from the GAME LOG section.
+Set propLine to the season average for that stat (or null if unavailable).
+For NBA: value = pts. For NHL: value = points (G+A). For MLB: value = hits.
+
+{"type":"last10_grid","data":{
+  "playerName":"Nikola Jokic","statLabel":"Points vs BOS","propLine":null,
+  "games":[
+    {"date":"03/15","opp":"BOS","value":34,"overLine":true},
+    {"date":"01/08","opp":"BOS","value":28,"overLine":true}
+  ],
+  "average":31.0,"overCount":2,"underCount":0
 }}
 
 ────────────────────────────────────────

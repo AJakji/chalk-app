@@ -88,6 +88,7 @@ app.use('/api/posts',    require('./routes/posts'));
 app.use('/api/research', require('./routes/research'));
 app.use('/api/nba',      require('./routes/nba'));
 app.use('/api/players',  require('./routes/players'));
+app.use('/api/stats',    require('./routes/stats'));
 app.use('/api/weather',  weatherRouter);
 app.use('/api/nhl/goalies', goalieRouter);
 app.use('/api/reports',   require('./routes/reports'));

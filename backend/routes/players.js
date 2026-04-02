@@ -1155,6 +1155,87 @@ router.get('/search', async (req, res) => {
   res.json({ players: [] });
 });
 
+// GET /api/players/tonight?sport=NBA  (optional sport filter)
+router.get('/tonight', async (req, res) => {
+  const { sport } = req.query;
+  const cacheKey  = `tonight_${sport || 'all'}`;
+  const cached    = cacheGet(cacheKey);
+  if (cached) return res.json(cached);
+
+  try {
+    const todayStr = today();
+    const params   = [todayStr];
+    let query = `
+      SELECT player_id, player_name, team, sport, position,
+             is_confirmed_playing, injury_status
+      FROM nightly_roster
+      WHERE game_date = $1
+    `;
+    if (sport) {
+      query += ` AND sport = $2`;
+      params.push(sport);
+    }
+    query += ` ORDER BY sport, team, player_name`;
+
+    const result = await db.query(query, params);
+    const data   = { players: result.rows, date: todayStr, count: result.rows.length };
+    cacheSet(cacheKey, data, TTL.TONIGHT);
+    res.json(data);
+  } catch (err) {
+    console.error('tonight route error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/players/vs?player=X&opponent=Y&sport=NBA
+router.get('/vs', async (req, res) => {
+  const { player, opponent, sport = 'NBA' } = req.query;
+  if (!player || !opponent) return res.status(400).json({ error: 'player and opponent are required' });
+
+  try {
+    const result = await db.query(
+      `SELECT player_name, game_date, opponent, home_away,
+              points, rebounds, assists, steals, blocks, three_made,
+              fg_made, fg_att, minutes, plus_minus
+       FROM player_game_logs
+       WHERE player_name ILIKE $1 AND sport = $2
+         AND (opponent ILIKE $3 OR opponent ILIKE $4)
+       ORDER BY game_date DESC LIMIT 20`,
+      [`%${player}%`, sport, `%${opponent}%`, `%${opponent.substring(0, 3)}%`]
+    );
+    const rows = result.rows;
+    if (!rows.length) return res.json({ player, opponent, sport, games: [], summary: null });
+
+    const n = rows.length;
+    const mean = (col) => rows.reduce((s, r) => s + (parseFloat(r[col]) || 0), 0) / n;
+    let summary = { games: n };
+
+    if (sport === 'NBA') {
+      summary = { ...summary,
+        avg_pts: mean('points').toFixed(1), avg_reb: mean('rebounds').toFixed(1),
+        avg_ast: mean('assists').toFixed(1), avg_stl: mean('steals').toFixed(1),
+        avg_blk: mean('blocks').toFixed(1), avg_3pm: mean('three_made').toFixed(1),
+      };
+    } else if (sport === 'NHL') {
+      const tG = rows.reduce((s,r) => s+(parseFloat(r.points)||0), 0);
+      const tA = rows.reduce((s,r) => s+(parseFloat(r.assists)||0), 0);
+      summary = { ...summary, total_goals: tG, total_assists: tA, total_points: tG+tA,
+        avg_goals: (tG/n).toFixed(2), avg_assists: (tA/n).toFixed(2) };
+    } else if (sport === 'MLB') {
+      const h=rows.reduce((s,r)=>s+(parseFloat(r.fg_made)||0),0);
+      const ab=rows.reduce((s,r)=>s+(parseFloat(r.fg_att)||0),0);
+      summary = { ...summary, batting_avg: ab>0?(h/ab).toFixed(3).replace('0.','.'):'.000',
+        total_hits: h, total_hrs: rows.reduce((s,r)=>s+(parseFloat(r.rebounds)||0),0),
+        total_rbi: rows.reduce((s,r)=>s+(parseFloat(r.assists)||0),0) };
+    }
+
+    res.json({ player: rows[0].player_name, opponent, sport, games_found: n, summary, games: rows });
+  } catch (err) {
+    console.error('vs route error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/players/:id?league=NBA
 router.get('/:id', async (req, res) => {
   const { id }              = req.params;

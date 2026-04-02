@@ -49,7 +49,7 @@ export default function PaywallModal({ visible, onClose }) {
       if (customerInfo.entitlements.active['crew']) {
         Alert.alert(
           "Welcome to Chalky's Crew! 🎉",
-          'You now have full access to all picks and unlimited Research.',
+          "You now have full access to all of Chalky's premium picks.",
           [{ text: "Let's Go", onPress: onClose }]
         );
       }

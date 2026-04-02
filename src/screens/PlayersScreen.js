@@ -194,10 +194,6 @@ export default function PlayersScreen({ navigation }) {
     });
   };
 
-  const handleAskChalky = (message) => {
-    navigation?.navigate('Research', { prefillMessage: message });
-  };
-
   const pills = STAT_PILLS[league] || STAT_PILLS.NBA;
 
   return (
@@ -335,7 +331,7 @@ export default function PlayersScreen({ navigation }) {
         playerName={profilePlayer?.name}
         playerLeague={profilePlayer?.league || 'NBA'}
         onClose={() => setProfilePlayer(null)}
-        onAskChalky={handleAskChalky}
+        onAskChalky={null}
       />
     </SafeAreaView>
   );
