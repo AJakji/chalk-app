@@ -34,6 +34,8 @@ Respond with ONLY a JSON object in this EXACT format — no markdown, no text ou
       "pick": "<same as statLine>",
       "direction": "over" | "under",
       "line": <number>,
+      "chalkProjection": <number — Chalk model projection for this stat>,
+      "chalkEdge": <number — difference between projection and line, signed (positive=over, negative=under)>,
       "statCategory": "<Points|Rebounds|Assists|Threes|Steals|Blocks|Goals|Assists|Shots|ERA|Strikeouts|Hits|RBI|HomeRuns>",
       "matchupText": "<e.g. 'vs BOS · Tonight 7:30 PM ET'>",
       "confidence": <integer 65–88>,
@@ -328,8 +330,9 @@ async function storePropPicks(props, gameTimeMap = {}) {
           (league, sport_key, pick_type, pick_category,
            player_name, player_team, player_position,
            away_team, home_team, game_time, game_id, matchup_text,
-           pick_value, confidence, short_reason, analysis, odds_data, pick_source)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+           pick_value, confidence, short_reason, analysis, odds_data, pick_source,
+           proj_value, prop_line, chalk_edge)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
          ON CONFLICT (game_id, pick_type, COALESCE(player_name, '')) DO NOTHING`,
         [
           prop.league,
@@ -350,6 +353,9 @@ async function storePropPicks(props, gameTimeMap = {}) {
           JSON.stringify(prop.analysis || {}),
           JSON.stringify(prop.odds || {}),
           'ai_prop',
+          prop.chalkProjection != null ? parseFloat(prop.chalkProjection) : null,
+          prop.line            != null ? parseFloat(prop.line)            : null,
+          prop.chalkEdge       != null ? parseFloat(prop.chalkEdge)       : null,
         ]
       );
     } catch (err) {
