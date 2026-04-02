@@ -425,4 +425,219 @@ async function fetchInjuries(sport, teamId, teamName) {
   return [];
 }
 
+// ── Standings constants ────────────────────────────────────────────────────────
+
+// BDL abbreviation → ESPN CDN abbreviation (only exceptions from lowercase rule)
+const NBA_ESPN_MAP = {
+  ATL:'atl', BOS:'bos', BKN:'bkn', CHA:'cha', CHI:'chi', CLE:'cle',
+  DAL:'dal', DEN:'den', DET:'det', GSW:'gsw', HOU:'hou', IND:'ind',
+  LAC:'lac', LAL:'lal', MEM:'mem', MIA:'mia', MIL:'mil', MIN:'min',
+  NOP:'nop', NYK:'nyk', OKC:'okc', ORL:'orl', PHI:'phi', PHX:'phx',
+  POR:'por', SAC:'sac', SAS:'sas', TOR:'tor', UTA:'uta', WAS:'wsh',
+};
+
+const NBA_DIV_ORDER  = { East: ['Atlantic','Central','Southeast'], West: ['Northwest','Pacific','Southwest'] };
+const NHL_DIV_TO_CONF = { Atlantic:'Eastern', Metropolitan:'Eastern', Central:'Western', Pacific:'Western' };
+const MLB_CONF_DIV = {
+  'American League': ['AL East','AL Central','AL West'],
+  'National League': ['NL East','NL Central','NL West'],
+};
+
+// ── Standings helpers ──────────────────────────────────────────────────────────
+
+async function getNBAStandings() {
+  const season = (() => {
+    const y = new Date().getFullYear(), m = new Date().getMonth() + 1;
+    const s = m < 7 ? y - 1 : y;
+    return `${s}-${String(s + 1).slice(2)}`;
+  })();
+
+  // Get team structure from BDL (includes conference + division)
+  const allTeams = await bdl.getTeams();
+
+  // W-L from team_game_logs
+  let wlMap = {};
+  try {
+    const rows = await db.query(
+      `SELECT team_id::text,
+              SUM(CASE WHEN result='W' THEN 1 ELSE 0 END) AS wins,
+              SUM(CASE WHEN result='L' THEN 1 ELSE 0 END) AS losses
+       FROM team_game_logs WHERE sport='NBA' AND season=$1 GROUP BY team_id`,
+      [season]
+    );
+    rows.rows.forEach(r => { wlMap[r.team_id] = { wins: +r.wins, losses: +r.losses }; });
+  } catch {}
+
+  let teams = (allTeams || []).map(t => {
+    const wl  = wlMap[String(t.id)] || {};
+    const w   = wl.wins   ?? 0;
+    const l   = wl.losses ?? 0;
+    const gp  = w + l;
+    return {
+      id:           String(t.id),
+      name:         t.full_name,
+      espnAbbr:     NBA_ESPN_MAP[t.abbreviation] || t.abbreviation?.toLowerCase() || '',
+      conference:   t.conference,   // 'East' or 'West'
+      division:     t.division,     // 'Atlantic', 'Central', etc.
+      wins: w, losses: l,
+      pct:  gp > 0 ? (w / gp).toFixed(3).replace('0.', '.') : '—',
+      gb:   '—', gp: null, otl: null, pts: null,
+      divisionRank: 0, conferenceRank: 0, playoffStatus: 'missed',
+    };
+  });
+
+  // Division ranks
+  const divGroups = {};
+  teams.forEach(t => {
+    const k = `${t.conference}_${t.division}`;
+    (divGroups[k] = divGroups[k] || []).push(t);
+  });
+  Object.values(divGroups).forEach(g => {
+    g.sort((a, b) => b.wins - a.wins || a.losses - b.losses);
+    g.forEach((t, i) => { t.divisionRank = i + 1; });
+  });
+
+  // Conference ranks + playoff status
+  ['East', 'West'].forEach(conf => {
+    const ct = teams.filter(t => t.conference === conf).sort((a, b) => b.wins - a.wins || a.losses - b.losses);
+    ct.forEach((t, i) => {
+      t.conferenceRank = i + 1;
+      t.playoffStatus  = i < 6 ? 'playoff' : i < 10 ? 'playin' : 'missed';
+    });
+    // GB vs leader
+    const leader = ct[0];
+    if (leader) {
+      ct.forEach(t => {
+        if (t.id === leader.id) { t.gb = '—'; return; }
+        const diff = ((leader.wins - leader.losses) - (t.wins - t.losses)) / 2;
+        t.gb = diff % 1 === 0 ? String(diff) : String(diff.toFixed(1));
+      });
+    }
+  });
+
+  // Organize by conference → division
+  return ['East', 'West'].map(conf => ({
+    name: conf === 'East' ? 'Eastern Conference' : 'Western Conference',
+    divisions: (NBA_DIV_ORDER[conf] || []).map(div => ({
+      name: div,
+      teams: teams.filter(t => t.conference === conf && t.division === div)
+                  .sort((a, b) => a.divisionRank - b.divisionRank),
+    })),
+  }));
+}
+
+async function getNHLStandings() {
+  const raw  = await nhl.getStandings();
+  const list = Array.isArray(raw) ? raw : (raw?.standings || []);
+
+  const teams = list.map(t => {
+    const abbr = t.teamAbbrev?.default || t.teamAbbrev || '';
+    const name = t.teamName?.default   || t.teamName   || '';
+    const div  = t.divisionName || '';
+    return {
+      id: abbr, name, espnAbbr: abbr.toLowerCase(),
+      conference:   NHL_DIV_TO_CONF[div] || 'Eastern',
+      division:     div,
+      wins:  t.wins         ?? 0,
+      losses:t.losses       ?? 0,
+      gp:    t.gamesPlayed  ?? 0,
+      otl:   t.otLosses     ?? 0,
+      pts:   t.points       ?? 0,
+      pct: null, gb: null, divisionRank: 0, conferenceRank: 0, playoffStatus: 'missed',
+    };
+  }).filter(t => t.name);
+
+  // Division ranks (by points)
+  ['Atlantic','Metropolitan','Central','Pacific'].forEach(div => {
+    const dt = teams.filter(t => t.division === div).sort((a, b) => b.pts - a.pts || b.wins - a.wins);
+    dt.forEach((t, i) => { t.divisionRank = i + 1; if (i < 3) t.playoffStatus = 'playoff'; });
+  });
+
+  // Wildcard: top 2 non-playoff per conference
+  ['Eastern','Western'].forEach(conf => {
+    const ct = teams.filter(t => t.conference === conf).sort((a, b) => b.pts - a.pts);
+    ct.forEach((t, i) => { t.conferenceRank = i + 1; });
+    ct.filter(t => t.playoffStatus !== 'playoff').sort((a, b) => b.pts - a.pts)
+      .forEach((t, i) => { t.playoffStatus = i < 2 ? 'wildcard' : 'missed'; });
+  });
+
+  return ['Eastern','Western'].map(conf => ({
+    name: `${conf}ern Conference`,
+    divisions: (conf === 'Eastern' ? ['Atlantic','Metropolitan'] : ['Central','Pacific']).map(div => ({
+      name: div,
+      teams: teams.filter(t => t.division === div).sort((a, b) => a.divisionRank - b.divisionRank),
+    })),
+  }));
+}
+
+async function getMLBStandings() {
+  const season = new Date().getFullYear();
+  const raw    = await mlb.getStandings(season);
+  const divs   = Array.isArray(raw) ? raw : (raw?.records || []);
+
+  const teams = [];
+  divs.forEach(div => {
+    const divName = div.division?.name || div.division?.nameShort || '';
+    const conf = divName.startsWith('A') ? 'American League' : 'National League';
+    (div.teamRecords || []).forEach((tr, i) => {
+      const abbr = (tr.team?.abbreviation || '').toLowerCase();
+      teams.push({
+        id:     String(tr.team?.id),
+        name:   tr.team?.name || '',
+        espnAbbr: abbr,
+        conference: conf, division: divName,
+        wins:   tr.wins   ?? 0,
+        losses: tr.losses ?? 0,
+        pct:    tr.winningPercentage ? parseFloat(tr.winningPercentage).toFixed(3).replace('0.','.') : '—',
+        gb:     tr.gamesBack === 0 ? '—' : String(tr.gamesBack ?? '—'),
+        gp: null, otl: null, pts: null,
+        divisionRank: i + 1, conferenceRank: 0, playoffStatus: i === 0 ? 'playoff' : 'missed',
+      });
+    });
+  });
+
+  // Wildcard: top 3 non-division-winner per league
+  ['American League','National League'].forEach(conf => {
+    const ct = teams.filter(t => t.conference === conf).sort((a, b) => b.wins - a.wins || a.losses - b.losses);
+    ct.forEach((t, i) => { t.conferenceRank = i + 1; });
+    ct.filter(t => t.playoffStatus !== 'playoff').sort((a, b) => b.wins - a.wins)
+      .forEach((t, i) => { t.playoffStatus = i < 3 ? 'wildcard' : 'missed'; });
+  });
+
+  return ['American League','National League'].map(conf => ({
+    name: conf,
+    divisions: (MLB_CONF_DIV[conf] || []).map(div => ({
+      name: div,
+      teams: teams.filter(t => t.division === div).sort((a, b) => a.divisionRank - b.divisionRank),
+    })),
+  }));
+}
+
+// ── GET /api/stats/standings/:sport ───────────────────────────────────────────
+
+router.get('/standings/:sport', async (req, res) => {
+  const { sport } = req.params;
+  if (!['NBA','NHL','MLB'].includes(sport)) {
+    return res.status(400).json({ error: 'Sport must be NBA, NHL, or MLB' });
+  }
+
+  const cacheKey = `standings_${sport}`;
+  const cached   = cacheGet(cacheKey);
+  if (cached) return res.json(cached);
+
+  try {
+    let conferences;
+    if (sport === 'NBA')      conferences = await getNBAStandings();
+    else if (sport === 'NHL') conferences = await getNHLStandings();
+    else                      conferences = await getMLBStandings();
+
+    const data = { sport, conferences, updated: new Date().toISOString() };
+    cacheSet(cacheKey, data, TTL.TEAMS);
+    res.json(data);
+  } catch (err) {
+    console.error(`[stats] standings/${sport}:`, err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;
