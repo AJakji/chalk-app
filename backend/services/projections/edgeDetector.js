@@ -574,22 +574,52 @@ async function getH2HStrong(playerId, opponentAbbr, propType, gameDate) {
  * Returns integer confidence score 62–87 if edge qualifies.
  */
 function calculateConfidence(edge, propType, sport, sampleSize = 10) {
-  const MIN_EDGES = {
-    points: 1.5, rebounds: 0.8, assists: 0.8, threes: 0.4,
-    pra: 2.0, pr: 1.5, pa: 1.5, ar: 1.2, blocks: 0.3, steals: 0.3,
-    spread: 1.5, total: 2.0,
-    shots_on_goal: 0.8, goals: 0.3,
-    puck_line: 0.4,
-    hits: 0.3, total_bases: 0.5, home_runs: 0.2, rbis: 0.4,
-    strikeouts: 0.8, earned_runs: 0.5,
-    run_line: 0.5,
-    moneyline: 0.05,  // 5% win-probability edge required for any moneyline pick
+  // Sport-aware minimum edges. These determine both the qualification threshold
+  // AND the scale of the confidence formula — a prop with edge = 4× minEdge = 87%.
+  // MLB values are intentionally larger to prevent 87% on every HR/hits UNDER
+  // (e.g. proj 0.20 HR vs line 1.50 is a huge edge in absolute terms but trivial).
+  const MIN_EDGES_BY_SPORT = {
+    NBA: {
+      points: 1.5, rebounds: 0.8, assists: 0.8, threes: 0.4,
+      pra: 2.0, pr: 1.5, pa: 1.5, ar: 1.2, blocks: 0.3, steals: 0.3,
+      spread: 1.5, total: 2.0,
+      moneyline: 0.05,
+    },
+    MLB: {
+      hits:          0.35,   // ~28% of typical 1.5 line
+      total_bases:   0.60,   // ~24% of typical 2.5 line
+      home_runs:     0.35,   // raised from 0.08 — prevents 87% on any HR UNDER
+      strikeouts:    1.5,
+      earned_runs:   0.70,   // raised from 0.40
+      outs_recorded: 2.0,
+      walks:         0.40,
+      rbi:           0.40,
+      runs:          0.40,
+      stolen_bases:  0.15,
+      run_line:      0.5,
+      total:         1.5,
+      moneyline:     0.05,
+      default:       0.50,
+    },
+    NHL: {
+      shots_on_goal: 0.8,
+      goals:         0.15,
+      assists:       0.20,
+      points:        0.25,
+      saves:         1.5,
+      hits:          0.50,
+      blocks:        0.40,
+      puck_line:     0.4,
+      total:         1.5,
+      moneyline:     0.05,
+      default:       0.25,
+    },
   }
-  const minEdge = MIN_EDGES[propType] || 1.0
+  const sportMap = MIN_EDGES_BY_SPORT[sport] || MIN_EDGES_BY_SPORT.NBA
+  const minEdge  = sportMap[propType] ?? sportMap.default ?? 1.0
   if (Math.abs(edge) < minEdge) return null
   // 50 = minimum edge exactly met (barely qualifies — no real advantage over a coin flip).
   // 87 = exceptional edge (4× minimum threshold). Linear mapping across that range.
-  // Picks below minimum edge are filtered before reaching this function (return null above).
   const base = 50
   const edgeRatio = Math.abs(edge) / minEdge
   const edgeBonus = Math.min(37, Math.floor((edgeRatio - 1) * 12.33))
@@ -1199,8 +1229,19 @@ function validateProjectionConsistency(proj, sport = 'NBA') {
  *  - For combo props (pts_reb, pra, pts_ast): market line must be ≥ our projected points alone
  *    (you can't have a pts_reb line lower than points — the market would never post that)
  */
+// Max realistic per-game lines by sport+prop. Lines above these are multi-hit
+// SGP threshold markets that our per-game model can't meaningfully project.
+const MAX_LINE = {
+  MLB: { home_runs: 1.0, total_bases: 3.0, hits: 2.5, strikeouts: 9.5, earned_runs: 4.5, outs_recorded: 18.5, rbi: 3.5, stolen_bases: 1.5 },
+  NHL: { shots_on_goal: 5.5, goals: 1.5, assists: 1.5, points: 2.5 },
+};
+
 function validateLineConsistency(propType, line, projValue, proj, sport = 'NBA') {
-  if (sport !== 'NBA') return { ok: true };
+  // MLB / NHL: reject lines above per-game maximums (multi-hit threshold props)
+  const sportMaxLines = MAX_LINE[sport];
+  if (sportMaxLines && sportMaxLines[propType] !== undefined && line > sportMaxLines[propType]) {
+    return { ok: false, reason: `Line ${line} exceeds per-game max ${sportMaxLines[propType]} for ${propType} — likely a multi-hit threshold market` };
+  }
 
   const absEdge = Math.abs(projValue - line);
 
@@ -1212,6 +1253,8 @@ function validateLineConsistency(propType, line, projValue, proj, sport = 'NBA')
       reason: `Edge too large: |${(projValue - line).toFixed(1)}| is ${Math.round(absEdge / line * 100)}% of line ${line} — likely wrong projection column`,
     };
   }
+
+  if (sport !== 'NBA') return { ok: true };
 
   // Combo prop sanity: market line must be ≥ solo points projection
   const projPts = parseFloat(proj.proj_points) || 0;
@@ -2022,6 +2065,12 @@ async function detectEdgesForSport(sport, gameDate) {
         const propTypeInternal = Object.entries(propMap).find(([, v]) => v === marketKey)?.[0] || marketKey;
         const minEdge = getMinEdge(sport, propTypeInternal);
         if (Math.abs(edge) < minEdge) continue;
+
+        const lineCheck = validateLineConsistency(propTypeInternal, line, projValue, proj, sport);
+        if (!lineCheck.ok) {
+          console.log(`  SKIP (bad line): ${proj.player_name} ${propTypeInternal} line=${line} proj=${projValue.toFixed(2)} — ${lineCheck.reason}`);
+          continue;
+        }
 
         const direction = edge > 0 ? 'over' : 'under';
 
