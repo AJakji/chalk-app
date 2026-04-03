@@ -70,15 +70,15 @@ const MIN_EDGE_BY_SPORT = {
     default:       0.25,
   },
   NHL: {
-    goals:         0.12,
-    assists:       0.15,
-    points:        0.20,
-    shots_on_goal: 1.0,
+    goals:         0.15,
+    assists:       0.20,
+    points:        0.25,
+    shots_on_goal: 0.8,
     saves:         1.5,
     goals_against: 0.30,
     hits:          0.50,
     blocks:        0.40,
-    default:       0.20,
+    default:       0.25,
   },
 };
 
@@ -1245,9 +1245,11 @@ function validateLineConsistency(propType, line, projValue, proj, sport = 'NBA')
 
   const absEdge = Math.abs(projValue - line);
 
-  // Edge magnitude check: if edge > 40% of the line, it's almost certainly a wrong-column match
-  // (standard sportsbook lines are set near the player average; a 40%+ gap means something is wrong)
-  if (line > 0 && absEdge / line > 0.40) {
+  // Edge magnitude check: if edge is an outsized fraction of the line, it's likely a wrong-column
+  // match. NBA lines are large (10-40) so 40% is tight. MLB/NHL have binary props at 0.5/1.5
+  // where a 50% gap is perfectly normal, so use 65% for those sports.
+  const edgeThreshold = sport === 'NBA' ? 0.40 : 0.65;
+  if (line > 0 && absEdge / line > edgeThreshold) {
     return {
       ok: false,
       reason: `Edge too large: |${(projValue - line).toFixed(1)}| is ${Math.round(absEdge / line * 100)}% of line ${line} — likely wrong projection column`,
