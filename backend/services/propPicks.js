@@ -1,6 +1,7 @@
 // Chalk prop picks engine — powered by Claude + internal Chalk model projections + The Odds API
 // Flow: fetch today's edges from DB → fetch prop lines → enrich with last-5 stats → send to Claude → store
 
+require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
 const Anthropic = require('@anthropic-ai/sdk');
 const db = require('../db');
 
@@ -290,13 +291,57 @@ async function fetchProjections(date) {
   }
 }
 
+function slimPropLines(propLines) {
+  // Reduce raw Odds API response to only what Claude needs.
+  // Raw payload is ~500KB+ (38 games × all bookmakers × all markets × outcomes).
+  // Slim version is ~20KB — game ID, teams, player, market, line, odds per book.
+  const slim = [];
+  for (const game of propLines) {
+    const gameEntry = {
+      id:        game.id,
+      sport:     game.sport,
+      home_team: game.home_team,
+      away_team: game.away_team,
+      commence:  game.commence_time,
+      players:   [],
+    };
+
+    // Flatten bookmaker → market → outcome into per-player rows
+    const playerMap = {};
+    for (const bm of (game.bookmakers || [])) {
+      for (const market of (bm.markets || [])) {
+        for (const outcome of (market.outcomes || [])) {
+          const key = `${outcome.description}::${market.key}`;
+          if (!playerMap[key]) {
+            playerMap[key] = {
+              player: outcome.description,
+              market: market.key,
+              line:   outcome.point ?? null,
+              odds:   {},
+            };
+          }
+          // Store over odds per book (under is derivable)
+          if (outcome.name === 'Over') {
+            playerMap[key].odds[bm.key] = outcome.price;
+          }
+        }
+      }
+    }
+
+    gameEntry.players = Object.values(playerMap);
+    if (gameEntry.players.length > 0) slim.push(gameEntry);
+  }
+  return slim;
+}
+
 function buildPromptContent(propLines, projections, today) {
   const hasProj = Object.keys(projections).length > 0;
   const projSummary = hasProj
     ? `CHALK INTERNAL MODEL DATA (our own projections — use these numbers as the statistical baseline):\n${JSON.stringify(projections, null, 2)}\n\n---\n\n`
     : 'NOTE: No internal model projections available — rely on prop lines and recent form only.\n\n---\n\n';
 
-  return `${projSummary}Today is ${today}. Below are today's player prop betting lines from The Odds API. Cross-reference the Chalk model projections above to find the 5–8 biggest edges. For each pick, use the actual projection, line, edge, last-5 stats, and injury status from the model data above. Generate 5-8 prop picks in Chalky's voice:\n\n${JSON.stringify(propLines, null, 2)}`;
+  const slimLines = slimPropLines(propLines);
+  return `${projSummary}Today is ${today}. Below are today's player prop betting lines from The Odds API. Cross-reference the Chalk model projections above to find the 5–8 biggest edges. For each pick, use the actual projection, line, edge, last-5 stats, and injury status from the model data above. Generate 5-8 prop picks in Chalky's voice:\n\n${JSON.stringify(slimLines, null, 2)}`;
 }
 
 async function storePropPicks(props, gameTimeMap = {}) {
