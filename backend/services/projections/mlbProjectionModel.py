@@ -1406,6 +1406,9 @@ def project_hits(
     base = new_weighted_avg(batter_logs, 'fg_made') if batter_logs else LEAGUE_AVG['hits_per_game']
     if base <= 0:
         base = LEAGUE_AVG['hits_per_game']
+    # Hard cap: no player averages more than 1.40 hits/game over any meaningful window.
+    # Early-season small samples (e.g. one 5-hit game in 6) can push base above this.
+    base = min(base, 1.40)
 
     season_avg = compute_season_ba(batter_logs) if batter_logs else LEAGUE_AVG['ba']
 
@@ -1420,7 +1423,12 @@ def project_hits(
     dn_f    = day_night_f(splits, day_game, season_avg)
     ha_f    = home_away_factor_for_col(batter_logs, 'fg_made', home_away)
 
-    proj = base * pt_f * spq_f * spr_f * match_f * babip_f * pa_f * park_f * wx_f * dn_f * ha_f
+    # Cap combined context factor at ±28% vs base. Individual factors are each
+    # reasonable but they compound — platoon+bad pitcher+career matchup+home splits
+    # can stack to 3-4× the base, producing impossible hit totals (>2.5/game).
+    combined_f = pt_f * spq_f * spr_f * match_f * babip_f * pa_f * park_f * wx_f * dn_f * ha_f
+    combined_f = max(0.65, min(1.28, combined_f))
+    proj = base * combined_f
 
     factors = {
         'base': round(base, 3),
@@ -1472,6 +1480,9 @@ def project_total_bases(
             using_player_logs = True
     else:
         base = LEAGUE_AVG['tb_per_game']
+    # Hard cap: even elite power hitters average ~2.0 TB/game over a season.
+    # Early-season outlier games (5 hits, HR in same game) can push base above this.
+    base = min(base, 2.00)
 
     iso       = compute_iso(batter_logs, 20) if batter_logs else LEAGUE_AVG['iso']
     # iso_f only applied when base is league average; player logs already reflect power
@@ -1488,7 +1499,11 @@ def project_total_bases(
     ha_f      = home_away_factor_for_col(batter_logs, 'three_made', home_away) if batter_logs else 1.0
     arsen_f   = arsenal_tb_f(whiff_rate)
 
-    proj = base * iso_f * pt_slg_f * sp_hr_f * match_f * wind_f * temp_f * park_hr_f * alt_f * ha_f * arsen_f
+    # Cap combined context factor at ±40% vs base. Coors altitude + park HR +
+    # wind + platoon + career matchup all stacking can push TB to 3-4× base.
+    combined_f = iso_f * pt_slg_f * sp_hr_f * match_f * wind_f * temp_f * park_hr_f * alt_f * ha_f * arsen_f
+    combined_f = max(0.60, min(1.40, combined_f))
+    proj = base * combined_f
 
     factors = {
         'base': round(base, 3),
@@ -1731,7 +1746,10 @@ def project_stolen_bases(
 
     lp_f       = lineup_sb_factor(lineup_pos)
 
-    proj = base * sb_rate_f * obp_f * success_f * hold_f * catcher_f * gs_f * lp_f
+    # sb_rate_f is used only as a threshold filter above — do NOT multiply by base again.
+    # base already IS the player's per-game SB rate; multiplying by sb_rate_f (= base/league_avg)
+    # would square the player's steal rate, producing 2-5× inflation for fast players.
+    proj = base * obp_f * success_f * hold_f * catcher_f * gs_f * lp_f
 
     factors = {
         'base': round(base, 3),
