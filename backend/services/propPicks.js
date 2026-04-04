@@ -13,7 +13,7 @@ Your job: compare player projection data against actual betting lines to find th
 
 Rules:
 - Only pick props where your projection differs from the line by at least 10%.
-- Confidence range: 65–88. Never inflate.
+- CRITICAL: Use the EXACT "confidence" value from the model data for each prop. Do NOT change it. Do NOT round up. The model has already calculated confidence — your job is to use it, not override it. If the model says 72, output 72. If the model says 65, output 65.
 - Write in Chalky's voice: direct, confident, data-driven. Bloomberg meets sports bar.
 - Generate 5–8 props across available players.
 
@@ -336,12 +336,14 @@ function slimPropLines(propLines) {
 
 function buildPromptContent(propLines, projections, today) {
   const hasProj = Object.keys(projections).length > 0;
-  const projSummary = hasProj
-    ? `CHALK INTERNAL MODEL DATA (our own projections — use these numbers as the statistical baseline):\n${JSON.stringify(projections, null, 2)}\n\n---\n\n`
-    : 'NOTE: No internal model projections available — rely on prop lines and recent form only.\n\n---\n\n';
-
-  const slimLines = slimPropLines(propLines);
-  return `${projSummary}Today is ${today}. Below are today's player prop betting lines from The Odds API. Cross-reference the Chalk model projections above to find the 5–8 biggest edges. For each pick, use the actual projection, line, edge, last-5 stats, and injury status from the model data above. Generate 5-8 prop picks in Chalky's voice:\n\n${JSON.stringify(slimLines, null, 2)}`;
+  if (!hasProj) {
+    return `NOTE: No internal model projections available. Cannot generate prop picks today.`;
+  }
+  // The edge detector already captured lines + odds in player_props_history.
+  // Sending the full Odds API payload to Claude caused connection errors (payload too large).
+  // Everything Claude needs — projection, line, edge, confidence, odds, last-5 stats — is
+  // already in the projections object built from player_props_history.
+  return `Today is ${today}. Below is the Chalk internal model data for today's player props. Each player entry includes our projection, the sportsbook line, the edge, confidence, bookmaker odds, and last-5 game logs. Find the 5–8 biggest statistical edges and generate prop picks in Chalky's voice:\n\n${JSON.stringify(projections, null, 2)}`;
 }
 
 async function storePropPicks(props, gameTimeMap = {}) {
