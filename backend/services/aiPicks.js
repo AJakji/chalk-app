@@ -623,6 +623,25 @@ async function storeModelPicks(picks, headshotMap = {}) {
         if (gtRes.rows[0]?.game_time) utcGameTime = gtRes.rows[0].game_time;
       } catch { /* non-fatal, use Claude's time */ }
 
+      // Dedup: skip if this player already has a pick today with the same stat line.
+      // Normalize pick_value by stripping player name prefix so "Jokic Under 34.5 Points"
+      // and "Under 34.5 Points" are treated as the same pick.
+      const pickVal = pick.pick;
+      if (pick.playerName && pickVal) {
+        const normalized = pickVal.replace(new RegExp(pick.playerName + '\\s*', 'i'), '').trim();
+        const { rows: dupRows } = await db.query(
+          `SELECT id FROM picks
+           WHERE player_name = $1
+             AND (pick_value ILIKE $2 OR pick_value ILIKE $3)
+             AND DATE(created_at AT TIME ZONE 'America/New_York') = CURRENT_DATE AT TIME ZONE 'America/New_York'`,
+          [pick.playerName, pickVal, `%${normalized}`]
+        );
+        if (dupRows.length > 0) {
+          console.log(`  SKIP (duplicate): ${pick.playerName} ${pickVal}`);
+          continue;
+        }
+      }
+
       await db.query(
         `INSERT INTO picks
           (league, sport_key, pick_type, pick_category,
@@ -862,4 +881,34 @@ async function getTodaysPicks() {
   return rows;
 }
 
-module.exports = { generateModelPicks, generatePicks, getTodaysPicks };
+/**
+ * Remove duplicate picks for the same player on the same day.
+ * Keeps the higher-confidence pick when two picks share the same player
+ * and the same stat line (accounts for "Jokic Under 34.5 Points" vs "Under 34.5 Points").
+ */
+async function deduplicatePicks(date) {
+  const { rowCount } = await db.query(
+    `DELETE FROM picks
+     WHERE id IN (
+       SELECT a.id
+       FROM picks a
+       JOIN picks b
+         ON a.player_name = b.player_name
+        AND a.id <> b.id
+        AND DATE(a.created_at AT TIME ZONE 'America/New_York') = $1
+        AND DATE(b.created_at AT TIME ZONE 'America/New_York') = $1
+        AND (
+          a.pick_value ILIKE b.pick_value
+          OR b.pick_value ILIKE '%' || a.pick_value
+          OR a.pick_value ILIKE '%' || b.pick_value
+        )
+       WHERE DATE(a.created_at AT TIME ZONE 'America/New_York') = $1
+         AND a.player_name IS NOT NULL
+         AND (a.confidence < b.confidence OR (a.confidence = b.confidence AND a.id > b.id))
+     )`,
+    [date]
+  );
+  if (rowCount > 0) console.log(`  Dedup: removed ${rowCount} duplicate picks`);
+}
+
+module.exports = { generateModelPicks, generatePicks, getTodaysPicks, deduplicatePicks };

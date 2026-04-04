@@ -5,7 +5,7 @@ const cron      = require('node-cron');
 const { execFile } = require('child_process');
 const path      = require('path');
 const { clerkAuth }          = require('./middleware/auth');
-const { generatePicks, generateModelPicks } = require('./services/aiPicks');
+const { generatePicks, generateModelPicks, deduplicatePicks } = require('./services/aiPicks');
 const { generatePropPicks }  = require('./services/propPicks');
 const { detectEdges, detectEdgesForSport, detectTeamBetEdges, collectPropsLines, buildNightlyRoster, buildMLBRoster } = require('./services/projections/edgeDetector');
 const { gradeYesterdaysPicks, getModelAccuracy } = require('./services/projections/pickGrader');
@@ -528,6 +528,10 @@ if (true) { // crons always run in production — MOCK_MODE removed
       }),
     ]);
 
+    // Remove duplicate picks (same player, same stat line from model + prop generators)
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    await deduplicatePicks(today);
+
     const endTime = new Date().toISOString();
     console.log(`🎯 aiPicks.js completed: ${endTime}`);
     console.log(`🎯 Total picks generated: ${totalCount}`);
@@ -699,6 +703,8 @@ app.post('/api/admin/run-pipeline', async (req, res) => {
         console.log(`✅ Prop picks: ${propPicks.length}`);
         const [gamePicks] = await Promise.allSettled([generatePicks()]);
         console.log(`✅ Game picks: ${gamePicks.value?.length || 0}`);
+        const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+        await deduplicatePicks(today);
       }
       console.log('\n✅ [Admin] Pipeline complete');
     } catch (err) {

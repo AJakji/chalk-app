@@ -372,6 +372,22 @@ async function storePropPicks(props, gameTimeMap = {}) {
         continue;
       }
 
+      // Dedup: skip if this player already has a pick today with the same stat line.
+      // Model picks include the player name in pick_value ("Jokic Under 34.5 Points"),
+      // prop picks don't ("Under 34.5 Points") — normalize by stripping player name.
+      const normalizedPickVal = pickValue.replace(new RegExp(prop.playerName + '\\s*', 'i'), '').trim();
+      const { rows: existing } = await db.query(
+        `SELECT id FROM picks
+         WHERE player_name = $1
+           AND (pick_value ILIKE $2 OR pick_value ILIKE $3)
+           AND DATE(created_at AT TIME ZONE 'America/New_York') = CURRENT_DATE AT TIME ZONE 'America/New_York'`,
+        [prop.playerName, pickValue, `%${normalizedPickVal}`]
+      );
+      if (existing.length > 0) {
+        console.log(`  SKIP (duplicate): ${prop.playerName} ${pickValue}`);
+        continue;
+      }
+
       await db.query(
         `INSERT INTO picks
           (league, sport_key, pick_type, pick_category,
