@@ -384,7 +384,7 @@ async function storePropPicks(props, gameTimeMap = {}) {
         [
           prop.league,
           prop.sportKey,
-          'Player Prop',
+          'Prop',
           'prop',
           prop.playerName,
           prop.playerTeam,

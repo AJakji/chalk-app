@@ -54,7 +54,14 @@ function getTodayET() {
 // Different for each sport because scales differ (HR rate vs K count vs points)
 const MIN_EDGE_BY_SPORT = {
   NBA: {
-    default:  1.5,  // points/rebounds/assists
+    default:  1.5,
+    pra:      4.5,
+    pts_reb:  3.5,
+    pts_ast:  3.5,
+    ast_reb:  2.5,
+    pr:       3.0,
+    pa:       3.0,
+    ar:       2.0,
   },
   MLB: {
     hits:          0.25,
@@ -580,10 +587,18 @@ function calculateConfidence(edge, propType, sport, sampleSize = 10) {
   // (e.g. proj 0.20 HR vs line 1.50 is a huge edge in absolute terms but trivial).
   const MIN_EDGES_BY_SPORT = {
     NBA: {
-      points: 1.5, rebounds: 0.8, assists: 0.8, threes: 0.4,
-      pra: 2.0, pr: 1.5, pa: 1.5, ar: 1.2, blocks: 0.3, steals: 0.3,
-      spread: 1.5, total: 2.0,
-      moneyline: 0.05,
+      points:   1.5, rebounds: 0.8, assists: 0.8, threes: 0.4,
+      blocks:   0.3, steals:   0.3,
+      spread:   1.5, total:    2.0, moneyline: 0.05,
+      // Combo props have lines 2–3× larger than solo props — minEdge scales accordingly
+      // so a 4-pt edge on a 37.5 pts_ast line doesn't auto-score 87%
+      pra:      4.5,  // typical line ~35–45
+      pts_reb:  3.5,  // typical line ~20–35
+      pts_ast:  3.5,  // typical line ~18–32
+      ast_reb:  2.5,  // typical line ~12–20
+      pr:       3.0,  // pts+reb
+      pa:       3.0,  // pts+ast
+      ar:       2.0,  // ast+reb
     },
     MLB: {
       hits:          0.35,   // ~28% of typical 1.5 line
@@ -1232,6 +1247,8 @@ function validateProjectionConsistency(proj, sport = 'NBA') {
 // Max realistic per-game lines by sport+prop. Lines above these are multi-hit
 // SGP threshold markets that our per-game model can't meaningfully project.
 const MAX_LINE = {
+  // NBA: single-game per-game caps. Lines above these are cumulative/multi-game props
+  NBA: { points: 55.5, rebounds: 22.5, assists: 16.5, threes: 7.5, blocks: 5.5, steals: 5.5 },
   MLB: { home_runs: 1.0, total_bases: 3.0, hits: 2.5, strikeouts: 9.5, earned_runs: 4.5, outs_recorded: 18.5, rbi: 3.5, stolen_bases: 1.5 },
   NHL: { shots_on_goal: 5.5, goals: 1.5, assists: 1.5, points: 2.5 },
 };
