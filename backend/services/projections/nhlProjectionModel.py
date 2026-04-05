@@ -773,7 +773,7 @@ def project_shots_on_goal(logs: list, opp_team_logs: list,
     away_avg = home_away_avg(logs, 'fg_made', 'away')
     if home_avg > 0 and away_avg > 0:
         ha_f = cap((home_avg if home_away == 'home' else away_avg) /
-                   ((home_avg + away_avg) / 2), 0.88, 1.12)
+                   ((home_avg + away_avg) / 2), 0.94, 1.06)  # tightened from [0.88,1.12]
     else:
         ha_f = 1.00
 
@@ -874,15 +874,15 @@ def project_goals(logs: list, opp_goalie_logs: list, opp_team_logs: list,
 
     # 3. Opponent goals allowed factor
     opp_ga_l10 = rolling_avg(opp_team_logs, 'points_allowed', 10) or LEAGUE['team_ga_pg']
-    opp_ga_f   = cap(opp_ga_l10 / LEAGUE['team_ga_pg'], 0.80, 1.30)
+    opp_ga_f   = cap(opp_ga_l10 / LEAGUE['team_ga_pg'], 0.82, 1.25)  # tightened from [0.80,1.30]
 
     # Opponent goals allowed trend (L5 vs L20)
     opp_ga_l5  = rolling_avg(opp_team_logs, 'points_allowed', 5)
     opp_ga_l20 = rolling_avg(opp_team_logs, 'points_allowed', 20)
     if opp_ga_l5 > opp_ga_l20 + 0.3:
-        opp_ga_trend_f = 1.05   # opp letting more in recently
+        opp_ga_trend_f = 1.04   # tightened from 1.05
     elif opp_ga_l5 < opp_ga_l20 - 0.3:
-        opp_ga_trend_f = 0.95
+        opp_ga_trend_f = 0.96   # tightened from 0.95
     else:
         opp_ga_trend_f = 1.00
 
@@ -895,7 +895,7 @@ def project_goals(logs: list, opp_goalie_logs: list, opp_team_logs: list,
     away_g = home_away_avg(logs, 'points', 'away')
     if home_g > 0 and away_g > 0:
         ha_f = cap((home_g if home_away == 'home' else away_g) /
-                   ((home_g + away_g) / 2), 0.88, 1.12)
+                   ((home_g + away_g) / 2), 0.94, 1.06)  # tightened from [0.88,1.12]
     else:
         ha_f = 1.00
 
@@ -959,7 +959,7 @@ def project_assists(logs: list, opp_team_logs: list, own_team_logs: list,
 
     # 4. Opponent GA factor
     opp_ga_l10 = rolling_avg(opp_team_logs, 'points_allowed', 10) or LEAGUE['team_ga_pg']
-    opp_ga_f   = cap(opp_ga_l10 / LEAGUE['team_ga_pg'], 0.80, 1.30)
+    opp_ga_f   = cap(opp_ga_l10 / LEAGUE['team_ga_pg'], 0.82, 1.25)  # tightened from [0.80,1.30]
 
     # 5. Injury cascading (most important for assists)
     fwds_out = injury_ctx.get('forwards_out', 0)
@@ -969,11 +969,11 @@ def project_assists(logs: list, opp_team_logs: list, own_team_logs: list,
     if fwds_out == 0:
         injury_f = 1.00   # Scenario D: no injuries
     elif pg_out and pp_toi_l10 > 2.0:
-        injury_f = 1.22   # Scenario B: PG out, this player takes role
+        injury_f = 1.18   # Scenario B: tightened from 1.22 — role bump is real but not that large
     elif star_out:
-        injury_f = 0.85   # Scenario A: primary scorer out (fewer assists)
+        injury_f = 0.87   # Scenario A: tightened from 0.85 — star out hurts but team adjusts
     elif fwds_out >= 2:
-        injury_f = 0.91   # Scenario C: multiple forwards out
+        injury_f = 0.93   # Scenario C: tightened from 0.91 — multi fwds out, moderate drag
     else:
         injury_f = 1.00
 
@@ -990,7 +990,7 @@ def project_assists(logs: list, opp_team_logs: list, own_team_logs: list,
     away_a = home_away_avg(logs, 'three_made', 'away')
     if home_a > 0 and away_a > 0:
         ha_f = cap((home_a if home_away == 'home' else away_a) /
-                   ((home_a + away_a) / 2), 0.88, 1.12)
+                   ((home_a + away_a) / 2), 0.94, 1.06)  # tightened from [0.88,1.12]
     else:
         ha_f = 1.00
 
@@ -1822,6 +1822,32 @@ def upsert_player_projection(conn, player_id: int, player_name: str,
         log.warning(f'[upsert_player_projection] {player_name} {prop_type}: {e}')
 
 
+def write_team_chalk_pick(conn, team: str, opponent: str, sport: str, game_date,
+                           prop_type: str, proj_value: float, confidence: int = 65) -> None:
+    """Write a qualifying team edge to chalk_projections with player_id = NULL.
+    Only call this after the caller has verified edge >= minimum threshold."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO chalk_projections
+                       (player_id, player_name, team, opponent, sport, game_date,
+                        prop_type, proj_value, confidence_score, model_version, updated_at)
+                   VALUES (NULL, NULL, %s, %s, %s, %s, %s, %s, %s, 'v2.0', NOW())
+                   ON CONFLICT (team, game_date, prop_type) WHERE player_id IS NULL
+                   DO UPDATE SET
+                       proj_value       = EXCLUDED.proj_value,
+                       opponent         = EXCLUDED.opponent,
+                       confidence_score = EXCLUDED.confidence_score,
+                       updated_at       = NOW()""",
+                (team, opponent, sport, str(game_date), prop_type, round(proj_value, 3), confidence)
+            )
+        conn.commit()
+        log.info(f'  [team chalk pick] {team} {prop_type}={proj_value:.3f} → chalk_projections')
+    except Exception as exc:
+        conn.rollback()
+        log.warning(f'[write_team_chalk_pick] {team} {prop_type}: {exc}')
+
+
 def upsert_team_projection(conn, team_name: str, opponent: str, game_date: date,
                             prop_type: str, proj_value: float,
                             factors: dict, confidence: int = 65) -> None:
@@ -2271,6 +2297,17 @@ def main():
         upsert_team_projection(conn, home, away, game_date, 'total',           proj_total, total_f, team_conf)
         upsert_team_projection(conn, home, away, game_date, 'puck_line_cover',  home_cover, hl_f,   team_conf)
         upsert_team_projection(conn, away, home, game_date, 'puck_line_cover',  away_cover, al_f,   team_conf)
+
+        # Write qualifying team edges to chalk_projections (player_name = NULL)
+        # Total: edge = abs(proj_total - posted_total) >= 0.75 goals
+        if abs(proj_total - posted_total) >= 0.75:
+            write_team_chalk_pick(conn, home, away, 'NHL', game_date, 'total', proj_total, team_conf)
+        # Puck line: edge = abs(cover_prob - 0.5) >= 0.45 (cover_prob >= 0.95 or <= 0.05)
+        best_cover = home_cover if abs(home_cover - 0.5) >= abs(away_cover - 0.5) else away_cover
+        best_team  = home       if abs(home_cover - 0.5) >= abs(away_cover - 0.5) else away
+        best_opp   = away       if best_team == home else home
+        if abs(best_cover - 0.5) >= 0.45:
+            write_team_chalk_pick(conn, best_team, best_opp, 'NHL', game_date, 'puck_line', best_cover, team_conf)
 
         log.info(
             f'    Total={proj_total:.2f} (over={total_f["over_probability"]:.1%}) '

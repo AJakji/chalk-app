@@ -66,13 +66,13 @@ CURRENT_SEASON = '2026'
 
 # ── League-average baselines (2024 MLB) ─────────────────────────────────────────
 LEAGUE_AVG = {
-    # Batter per-game averages
-    'hits_per_game':      0.87,
+    # Batter per-game averages (updated from 2025 DB actuals 2026-04-05)
+    'hits_per_game':      0.87,   # DB: 0.830 (4.6% off — under threshold, kept)
     'tb_per_game':        1.30,
-    'hr_per_game':        0.147,
-    'rbi_per_game':       0.50,
+    'hr_per_game':        0.120,  # DB: 0.117 — was 0.147, updated (18% off)
+    'rbi_per_game':       0.43,   # DB: 0.426 — was 0.50, updated (14% off)
     'runs_per_game':      0.50,
-    'sb_per_game':        0.09,
+    'sb_per_game':        0.07,   # DB: 0.068 — was 0.09, updated (24% off)
     # Batter rates
     'ba':                 0.248,
     'baa':                0.248,
@@ -102,7 +102,7 @@ LEAGUE_AVG = {
     'bb_per_game_team':   3.35,   # per team per game
     'risp_rbi_per_pa':    0.085,
     # SB
-    'sb_rate':            0.09,
+    'sb_rate':            0.07,   # DB: 0.068 — was 0.09, updated (24% off)
 }
 
 # Standard deviations for CDF calculations
@@ -934,13 +934,14 @@ def lineup_pa_factor(pos: int, confirmed: bool) -> float:
     """Plate-appearance rate by lineup position (per spec)."""
     if not confirmed:
         return 1.00
-    if pos == 1:              return 1.12
+    if pos == 1:              return 1.10  # tightened from 1.12
     if pos == 2:              return 1.08
     if pos == 3:              return 1.05
     if pos == 4:              return 1.03
     if pos == 5:              return 1.00
     if pos in (6, 7):         return 0.96
-    return 0.90  # 8-9
+    if pos == 8:              return 0.90
+    return 0.91  # pos 9 — slightly higher than 8 (9-hole gets more PA when lineup turns over)
 
 
 def lineup_rbi_factor(pos: int) -> float:
@@ -2563,6 +2564,32 @@ def upsert_player_projection(
     return rows_written
 
 
+def write_team_chalk_pick(conn, team: str, opponent: str, sport: str, game_date,
+                           prop_type: str, proj_value: float, confidence: int = 65) -> None:
+    """Write a qualifying team edge to chalk_projections with player_id = NULL.
+    Only call this after the caller has verified edge >= minimum threshold."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO chalk_projections
+                       (player_id, player_name, team, opponent, sport, game_date,
+                        prop_type, proj_value, confidence_score, model_version, updated_at)
+                   VALUES (NULL, NULL, %s, %s, %s, %s, %s, %s, %s, 'v3.1', NOW())
+                   ON CONFLICT (team, game_date, prop_type) WHERE player_id IS NULL
+                   DO UPDATE SET
+                       proj_value       = EXCLUDED.proj_value,
+                       opponent         = EXCLUDED.opponent,
+                       confidence_score = EXCLUDED.confidence_score,
+                       updated_at       = NOW()""",
+                (team, opponent, sport, str(game_date), prop_type, round(proj_value, 3), confidence)
+            )
+        conn.commit()
+        log.info(f'  [team chalk pick] {team} {prop_type}={proj_value:.3f} → chalk_projections')
+    except Exception as exc:
+        conn.rollback()
+        log.warning(f'[write_team_chalk_pick] {team} {prop_type}: {exc}')
+
+
 def upsert_team_projection(conn, team_name, opponent, game_date, proj) -> None:
     with conn.cursor() as cur:
         cur.execute(
@@ -3207,6 +3234,17 @@ def main():
             except Exception as exc:
                 log.warning(f'    Failed team {tname}: {exc}')
                 conn.rollback()
+
+        # Write qualifying team edges to chalk_projections (player_name = NULL)
+        # Run line: edge = abs(proj_run_diff) >= 0.55 runs
+        proj_run_diff = proj_home_r - proj_away_r
+        if abs(proj_run_diff) >= 0.55:
+            write_team_chalk_pick(conn, home_team, away_team, 'MLB', game_date,
+                                  'run_line', round(proj_run_diff, 3), team_conf)
+        # Total: edge = abs(proj_total_v - league_avg_total) >= 1.0 runs
+        if abs(proj_total_v - LEAGUE_AVG['game_total']) >= 1.0:
+            write_team_chalk_pick(conn, home_team, away_team, 'MLB', game_date,
+                                  'total', round(proj_total_v, 3), team_conf)
 
     conn.close()
     log.info('\n═══════════════════════════════════════════════════')

@@ -780,7 +780,7 @@ def project_player(
 
     # Injury/role boost is applied separately — it represents a genuine change from
     # a player's baseline (someone else is out), not a double-count of existing skill.
-    injury_boost_f = clamp(1.0 + usage_boost, 1.0, 1.20)
+    injury_boost_f = clamp(1.0 + usage_boost, 1.0, 1.15)  # tightened from 1.20
 
     # Archetype
     archetype = classify_archetype(
@@ -839,7 +839,7 @@ def project_player(
     # Narrowed clamp range [0.95, 1.07] — was [0.90, 1.12] which allowed large compounding boosts.
     # Scoring context is a small contextual adjustment, not a major amplifier.
     implied_team_pts  = implied_total / 2.0
-    total_f           = clamp(implied_total / LEAGUE_AVG['game_total'], 0.94, 1.07)
+    total_f           = clamp(implied_total / LEAGUE_AVG['game_total'], 0.95, 1.06)  # tightened from [0.94,1.07]
     scoring_context_f = clamp(implied_team_pts / 112.5, 0.95, 1.07)
 
     # Spread / game script — differentiate favorite vs underdog.
@@ -1477,6 +1477,32 @@ def upsert_player_projections(conn, proj: PlayerProjection) -> int:
     return written
 
 
+def write_team_chalk_pick(conn, team: str, opponent: str, sport: str, game_date: str,
+                           prop_type: str, proj_value: float, confidence: int = 65) -> None:
+    """Write a qualifying team edge to chalk_projections with player_id = NULL.
+    Only call this after the caller has verified edge >= minimum threshold."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO chalk_projections
+                       (player_id, player_name, team, opponent, sport, game_date,
+                        prop_type, proj_value, confidence_score, model_version, updated_at)
+                   VALUES (NULL, NULL, %s, %s, %s, %s, %s, %s, %s, 'v2.0', NOW())
+                   ON CONFLICT (team, game_date, prop_type) WHERE player_id IS NULL
+                   DO UPDATE SET
+                       proj_value       = EXCLUDED.proj_value,
+                       opponent         = EXCLUDED.opponent,
+                       confidence_score = EXCLUDED.confidence_score,
+                       updated_at       = NOW()""",
+                (team, opponent, sport, game_date, prop_type, round(proj_value, 3), confidence)
+            )
+        conn.commit()
+        log.info('  [team chalk pick] %s %s=%.3f → chalk_projections', team, prop_type, proj_value)
+    except Exception as exc:
+        conn.rollback()
+        log.warning('[write_team_chalk_pick] %s %s: %s', team, prop_type, exc)
+
+
 def upsert_team_props(conn, home_team: str, away_team: str, game_date: str, team_props: dict) -> None:
     """Writes total and spread to team_projections table (moneyline excluded)."""
 
@@ -1644,6 +1670,17 @@ def main() -> None:
                      team_props['total']['proj'],
                      team_props['total']['over_prob'],
                      team_props['spread'].get('expected_margin', 0.0))
+
+            # Write qualifying team edges to chalk_projections (player_name = NULL)
+            conf_team = int(team_props['total'].get('confidence', 65))
+            spread_margin = team_props['spread']['expected_margin']
+            if abs(spread_margin - spread) >= 1.8:
+                write_team_chalk_pick(conn, home, away, 'NBA', game_date,
+                                      'spread', spread_margin, conf_team)
+            proj_total = team_props['total']['proj']
+            if abs(proj_total - implied_total) >= 3.0:
+                write_team_chalk_pick(conn, home, away, 'NBA', game_date,
+                                      'total', proj_total, conf_team)
 
         # Player props
         for team, opponent, is_home in [(home, away, True), (away, home, False)]:

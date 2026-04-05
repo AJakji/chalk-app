@@ -1,7 +1,7 @@
+require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
 // Chalk prop picks engine — powered by Claude + internal Chalk model projections + The Odds API
 // Flow: fetch today's edges from DB → fetch prop lines → enrich with last-5 stats → send to Claude → store
 
-require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
 const Anthropic = require('@anthropic-ai/sdk');
 const db = require('../db');
 

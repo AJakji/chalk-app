@@ -351,6 +351,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_cp_player_date_prop
 
 CREATE INDEX IF NOT EXISTS idx_cp_date ON chalk_projections (game_date DESC);
 
+-- v5: allow team-level rows (player_id = NULL, player_name = NULL) in chalk_projections
+ALTER TABLE chalk_projections ALTER COLUMN player_id   DROP NOT NULL;
+ALTER TABLE chalk_projections ALTER COLUMN player_name DROP NOT NULL;
+-- Partial unique index for team rows (avoids conflict with per-player unique index)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cp_team_date_prop
+  ON chalk_projections (team, game_date, prop_type) WHERE player_id IS NULL;
+
 -- Our model's full team game projections
 CREATE TABLE IF NOT EXISTS team_projections (
   id                        BIGSERIAL PRIMARY KEY,
