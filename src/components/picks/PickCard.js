@@ -108,7 +108,7 @@ function ResultBadge({ result }) {
 
 // ── Main component ────────────────────────────────────────────────────────────
 
-export default function PickCard({ pick, onPress, isTopPick, isLocked, onLockedPress }) {
+export default function PickCard({ pick, onPress, isTopPick, isLocked, onLockedPress, rank }) {
   const getLogo = useTeamLogos();
   const scale = useRef(new Animated.Value(1)).current;
 
@@ -162,6 +162,11 @@ export default function PickCard({ pick, onPress, isTopPick, isLocked, onLockedP
               <Text style={styles.lockSub}>Tap to unlock all picks</Text>
             </View>
           </BlurView>
+          {rank != null && (
+            <View style={styles.rankBadge}>
+              <Text style={styles.rankText}>#{rank}</Text>
+            </View>
+          )}
         </Animated.View>
       </TouchableOpacity>
     );
@@ -247,6 +252,13 @@ export default function PickCard({ pick, onPress, isTopPick, isLocked, onLockedP
           </Text>
           <Ionicons name="chevron-forward" size={14} color={colors.green} />
         </TouchableOpacity>
+
+        {/* ── Rank badge ──────────────────────────────────────────────────────── */}
+        {rank != null && (
+          <View style={styles.rankBadge}>
+            <Text style={styles.rankText}>#{rank}</Text>
+          </View>
+        )}
 
       </Animated.View>
     </Pressable>
@@ -393,6 +405,24 @@ const styles = StyleSheet.create({
     flex: 1,
     color: colors.green,
     fontSize: 13,
+    fontWeight: '700',
+  },
+
+  // Rank badge — absolute top-left corner of the card
+  rankBadge: {
+    position: 'absolute',
+    top: 12,
+    left: 12,
+    backgroundColor: '#141414',
+    borderWidth: 1,
+    borderColor: '#2a2a2a',
+    borderRadius: 6,
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+  },
+  rankText: {
+    color: '#888888',
+    fontSize: 10,
     fontWeight: '700',
   },
 

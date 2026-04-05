@@ -21,10 +21,7 @@ import { usePaywall } from '../context/PaywallContext';
 import PicksInfoButtons from '../components/PicksInfoButtons';
 import { isBeforePicksTime, getPicksCountdown, getPicksReleaseTime } from '../utils/timeUtils';
 
-const TABS = ["Chalky's Picks", 'NBA', 'MLB', 'NHL', 'Soccer', 'WNBA'];
-
-// Display-only labels — internal values stay the same so data filters still work
-const TAB_LABELS = { Soccer: 'World Cup' };
+const TABS = ["Chalky's Picks", 'NBA', 'NHL', 'MLB'];
 
 // All picks are locked for non-Pro users on every tab.
 
@@ -209,7 +206,7 @@ export default function PicksScreen() {
                 styles.tabText,
                 isActive && (isChalky ? styles.tabTextActiveChalky : styles.tabTextActive),
               ]}>
-                {TAB_LABELS[tab] || tab}
+                {tab === "Chalky's Picks" ? "Chalky's" : tab}
               </Text>
               {count != null && count > 0 && (
                 <Text style={[styles.tabCount, isActive && styles.tabCountActive]}>
@@ -222,15 +219,7 @@ export default function PicksScreen() {
       </ScrollView>
 
       {/* Content */}
-      {activeTab === 'WNBA' ? (
-        <View style={styles.centered}>
-          <ChalkyMascot size={200} style={styles.emptyImage} />
-          <Text style={styles.emptyTitle}>WNBA Coming Soon</Text>
-          <Text style={styles.emptyText}>
-            The WNBA season tips off in May. Chalky will have full coverage of picks, scores, and player stats when the season begins.
-          </Text>
-        </View>
-      ) : isBeforePicksTime() ? (
+      {isBeforePicksTime() ? (
         // ── Waiting screen: shown before 7 AM ET regardless of DB state ──────
         <View style={styles.centered}>
           <ChalkyMascot size={200} style={styles.emptyImage} />
@@ -276,9 +265,11 @@ export default function PicksScreen() {
           }
           renderItem={({ item, index }) => {
             const isLocked = !isPro;
+            const rank = index + 1;
             const card = item.pickCategory === 'prop' ? (
               <PropPickCard
                 pick={item}
+                rank={rank}
                 onPress={isLocked ? openPaywall : setSelectedPick}
                 isTopPick={item.id === topPickId}
                 isLocked={isLocked}
@@ -287,6 +278,7 @@ export default function PicksScreen() {
             ) : (
               <PickCard
                 pick={item}
+                rank={rank}
                 onPress={isLocked ? openPaywall : setSelectedPick}
                 isTopPick={item.id === topPickId}
                 isLocked={isLocked}
@@ -295,10 +287,7 @@ export default function PicksScreen() {
             );
             return (
               <StaggeredItem index={index}>
-                <View>
-                  <Text style={styles.pickRank}>#{index + 1}</Text>
-                  {card}
-                </View>
+                {card}
               </StaggeredItem>
             );
           }}
@@ -389,14 +378,6 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   tabCountActive: { color: colors.offWhite },
-  pickRank: {
-    fontSize: 11,
-    fontWeight: '800',
-    color: colors.grey,
-    letterSpacing: 0.5,
-    marginBottom: 4,
-    marginLeft: 2,
-  },
   // Chalky's Picks header card
   chalkysHeader: {
     backgroundColor: colors.surface,

@@ -154,29 +154,27 @@ const MOCK_PICKS = [
 ];
 
 // GET /api/picks
-// Returns today's picks (ET date) ordered by confidence DESC.
-// Uses getTodayET() — never new Date().toISOString() which flips at 8 PM ET.
-// Optional: ?sport=NBA  → only that sport (for league tabs), default LIMIT 5
-// No sport param → all sports (Chalky's Picks tab), default LIMIT 7
+// Chalky's Picks tab — top 7 across all sports by confidence, Moneyline excluded.
+// Optional: ?sport=NBA → top 5 for that sport (legacy query-param support).
 router.get('/', async (req, res) => {
   if (false) { // mock mode disabled in production
-    let mock = [...MOCK_PICKS].sort((a, b) => b.confidence - a.confidence);
+    let mock = [...MOCK_PICKS].filter(p => p.pick_type !== 'Moneyline').sort((a, b) => b.confidence - a.confidence);
     if (req.query.sport) mock = mock.filter(p => p.league === req.query.sport);
     const limit = parseInt(req.query.limit || (req.query.sport ? '5' : '7'), 10);
     return res.json({ picks: mock.slice(0, limit) });
   }
 
   try {
-    const today = getTodayET();
+    const today = req.query.date || getTodayET();
     const sport = req.query.sport || null;
     const limit = parseInt(req.query.limit || (sport ? '5' : '7'), 10);
 
     let query, params;
     if (sport) {
-      query  = `SELECT * FROM picks WHERE pick_date = $1 AND league = $2 ORDER BY confidence DESC LIMIT $3`;
+      query  = `SELECT * FROM picks WHERE pick_date = $1 AND league = $2 AND pick_type != 'Moneyline' ORDER BY confidence DESC LIMIT $3`;
       params = [today, sport, limit];
     } else {
-      query  = `SELECT * FROM picks WHERE pick_date = $1 ORDER BY confidence DESC LIMIT $2`;
+      query  = `SELECT * FROM picks WHERE pick_date = $1 AND pick_type != 'Moneyline' ORDER BY confidence DESC LIMIT $2`;
       params = [today, limit];
     }
 
@@ -189,29 +187,35 @@ router.get('/', async (req, res) => {
 });
 
 // GET /api/picks/counts
-// Returns how many picks exist per sport today, plus a CHALKY total (capped at 5).
-// Used to show count badges on league tabs.
+// Returns capped pick counts for today's tab badges.
+// Chalky's ≤7, each sport tab ≤5. Moneyline picks excluded.
 router.get('/counts', async (req, res) => {
   if (false) { // mock mode disabled in production
-    return res.json({ counts: { NBA: 4, CHALKY: 4 } });
+    return res.json({ counts: { CHALKY: 7, NBA: 5, NHL: 5, MLB: 5 } });
   }
 
   try {
-    const today = getTodayET();
+    const today = req.query.date || getTodayET();
     const { rows } = await db.query(
-      `SELECT league AS sport, COUNT(*) AS total
-         FROM picks
-        WHERE pick_date = $1
-        GROUP BY league
-        UNION ALL
-       SELECT 'CHALKY' AS sport, LEAST(COUNT(*), 7) AS total
-         FROM picks
-        WHERE pick_date = $1`,
+      `SELECT
+         LEAST(COUNT(*), 7)                                         AS chalky,
+         LEAST(COUNT(*) FILTER (WHERE league = 'NBA'), 5)           AS nba,
+         LEAST(COUNT(*) FILTER (WHERE league = 'NHL'), 5)           AS nhl,
+         LEAST(COUNT(*) FILTER (WHERE league = 'MLB'), 5)           AS mlb
+       FROM picks
+       WHERE pick_date = $1
+         AND pick_type != 'Moneyline'`,
       [today]
     );
-    const counts = {};
-    for (const row of rows) counts[row.sport] = parseInt(row.total, 10);
-    res.json({ counts });
+    const r = rows[0] || {};
+    res.json({
+      counts: {
+        CHALKY: parseInt(r.chalky, 10) || 0,
+        NBA:    parseInt(r.nba,    10) || 0,
+        NHL:    parseInt(r.nhl,    10) || 0,
+        MLB:    parseInt(r.mlb,    10) || 0,
+      }
+    });
   } catch (err) {
     console.error('Error fetching pick counts:', err);
     res.status(500).json({ counts: {} });
@@ -257,23 +261,29 @@ router.get('/today', async (req, res) => {
 // Used as fallback badge counts when today = 0.
 router.get('/counts/recent', async (req, res) => {
   if (false) { // mock mode disabled in production
-    return res.json({ counts: { NBA: 4, CHALKY: 4 } });
+    return res.json({ counts: { CHALKY: 7, NBA: 5, NHL: 5, MLB: 5 } });
   }
 
   try {
     const { rows } = await db.query(
-      `SELECT league AS sport, COUNT(*) AS total
-         FROM picks
-        WHERE pick_date = (SELECT MAX(pick_date) FROM picks)
-        GROUP BY league
-        UNION ALL
-       SELECT 'CHALKY' AS sport, LEAST(COUNT(*), 7) AS total
-         FROM picks
-        WHERE pick_date = (SELECT MAX(pick_date) FROM picks)`
+      `SELECT
+         LEAST(COUNT(*), 7)                                         AS chalky,
+         LEAST(COUNT(*) FILTER (WHERE league = 'NBA'), 5)           AS nba,
+         LEAST(COUNT(*) FILTER (WHERE league = 'NHL'), 5)           AS nhl,
+         LEAST(COUNT(*) FILTER (WHERE league = 'MLB'), 5)           AS mlb
+       FROM picks
+       WHERE pick_date = (SELECT MAX(pick_date) FROM picks WHERE pick_type != 'Moneyline')
+         AND pick_type != 'Moneyline'`
     );
-    const counts = {};
-    for (const row of rows) counts[row.sport] = parseInt(row.total, 10);
-    res.json({ counts });
+    const r = rows[0] || {};
+    res.json({
+      counts: {
+        CHALKY: parseInt(r.chalky, 10) || 0,
+        NBA:    parseInt(r.nba,    10) || 0,
+        NHL:    parseInt(r.nhl,    10) || 0,
+        MLB:    parseInt(r.mlb,    10) || 0,
+      }
+    });
   } catch (err) {
     console.error('Error fetching recent pick counts:', err);
     res.status(500).json({ counts: {} });
@@ -299,8 +309,9 @@ router.get('/recent', async (req, res) => {
       ({ rows } = await db.query(
         `SELECT * FROM picks
          WHERE league = $1
+           AND pick_type != 'Moneyline'
            AND pick_date = (
-             SELECT MAX(pick_date) FROM picks WHERE league = $1
+             SELECT MAX(pick_date) FROM picks WHERE league = $1 AND pick_type != 'Moneyline'
            )
          ORDER BY confidence DESC
          LIMIT $2`,
@@ -309,7 +320,8 @@ router.get('/recent', async (req, res) => {
     } else {
       ({ rows } = await db.query(
         `SELECT * FROM picks
-         WHERE pick_date = (SELECT MAX(pick_date) FROM picks)
+         WHERE pick_date = (SELECT MAX(pick_date) FROM picks WHERE pick_type != 'Moneyline')
+           AND pick_type != 'Moneyline'
          ORDER BY confidence DESC
          LIMIT $1`,
         [limit]
@@ -320,6 +332,47 @@ router.get('/recent', async (req, res) => {
   } catch (err) {
     console.error('Error fetching recent picks:', err);
     res.status(500).json({ picks: [] });
+  }
+});
+
+// GET /api/picks/:sport  (NBA | NHL | MLB | NFL | Soccer)
+// Sport tab — top 5 picks for that sport by confidence, Moneyline excluded.
+// Falls back to most recent date if today has 0 picks.
+const VALID_SPORT_TABS = new Set(['NBA', 'NHL', 'MLB', 'NFL', 'SOCCER', 'SOCCER']);
+router.get('/:sport', async (req, res, next) => {
+  const sport = req.params.sport.toUpperCase();
+  if (!VALID_SPORT_TABS.has(sport)) return next(); // fall through to /:id handler
+
+  try {
+    const today = getTodayET();
+    const { rows } = await db.query(
+      `SELECT * FROM picks
+       WHERE pick_date = $1
+         AND league = $2
+         AND pick_type != 'Moneyline'
+       ORDER BY confidence DESC
+       LIMIT 5`,
+      [today, req.params.sport.toUpperCase() === 'SOCCER' ? 'Soccer' : req.params.sport.toUpperCase()]
+    );
+
+    if (rows.length > 0) return res.json({ picks: rows });
+
+    // Fallback to most recent date with picks for this sport
+    const { rows: recent } = await db.query(
+      `SELECT * FROM picks
+       WHERE league = $1
+         AND pick_type != 'Moneyline'
+         AND pick_date = (
+           SELECT MAX(pick_date) FROM picks WHERE league = $1 AND pick_type != 'Moneyline'
+         )
+       ORDER BY confidence DESC
+       LIMIT 5`,
+      [req.params.sport.toUpperCase()]
+    );
+    res.json({ picks: recent });
+  } catch (err) {
+    console.error(`Error fetching ${sport} picks:`, err);
+    res.status(500).json({ error: 'Failed to load picks' });
   }
 });
 

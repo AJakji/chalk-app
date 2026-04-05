@@ -253,19 +253,19 @@ export async function fetchTodaysPicks() {
   return picks.map(normalizePick);
 }
 
-// Fetch top 5 picks for a specific tab, independently ranked.
-// tab = "Chalky's Picks" → top 5 across all sports
-// tab = "NBA" / "NHL" / etc. → top 5 for that sport, ranked 1–5 within it
-// If today has 0 picks (pipeline still running or missed), falls back to most recent date.
+// Fetch picks for a specific tab, ranked by confidence.
+// "Chalky's Picks" → GET /api/picks        → top 7 across all sports
+// "NBA" / "NHL" / "MLB" → GET /api/picks/NBA → top 5 for that sport
+// Falls back to most recent date if today has 0 picks.
 export async function fetchPicksForTab(tab, date) {
   const dateParam = date || new Date().toISOString().split('T')[0];
   const isChalky  = tab === "Chalky's Picks";
 
-  const buildUrl = (d) => isChalky
-    ? `${API_URL}/api/picks?date=${d}&limit=7`
-    : `${API_URL}/api/picks?date=${d}&sport=${encodeURIComponent(tab)}&limit=5`;
+  const primaryUrl = isChalky
+    ? `${API_URL}/api/picks?date=${dateParam}&limit=7`
+    : `${API_URL}/api/picks/${encodeURIComponent(tab)}`;
 
-  const res = await fetch(buildUrl(dateParam));
+  const res = await fetch(primaryUrl);
   if (!res.ok) throw new Error(`Picks API error: ${res.status}`);
   const { picks } = await res.json();
   if (picks.length > 0) return picks.map(normalizePick);
