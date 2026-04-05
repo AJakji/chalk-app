@@ -1260,13 +1260,28 @@ function validateLineConsistency(propType, line, projValue, proj, sport = 'NBA')
     return { ok: false, reason: `Line ${line} exceeds per-game max ${sportMaxLines[propType]} for ${propType} — likely a multi-hit threshold market` };
   }
 
+  // Line plausibility check (all sports): sportsbooks set standard over/unders near the
+  // player's expected value. If the line is MORE than 1.4× our projection, the book is
+  // posting a threshold/multi-game prop (e.g. "2+ hits" when the player averages 1.1/game,
+  // or a series total). Low lines (0.5 binary markets) are fine — players regularly get
+  // fewer hits than their average. Only block inflated lines.
+  // Exception: very small projections (< 0.5) where model uncertainty is high.
+  if (projValue > 0.5 && line > projValue * 1.40) {
+    const ratio = (line / projValue).toFixed(2);
+    return {
+      ok: false,
+      reason: `Line ${line} is ${ratio}× our projection ${projValue.toFixed(2)} — likely a threshold/multi-game market, not a standard per-game over/under`,
+    };
+  }
+
   const absEdge = Math.abs(projValue - line);
 
-  // Edge magnitude check: if edge is an outsized fraction of the line, it's likely a wrong-column
-  // match. NBA lines are large (10-40) so 40% is tight. MLB/NHL have binary props at 0.5/1.5
-  // where a 50% gap is perfectly normal, so use 65% for those sports.
+  // Secondary edge magnitude check (catches wrong-column matches).
+  // Binary 0.5 lines (anytime scorer, any hit etc.) are exempted — a projection of 0.9
+  // vs a 0.5 line is 80% of the line but is a completely valid over bet.
+  // For real over/under lines (≥ 1.0): NBA 40%, MLB/NHL 65%.
   const edgeThreshold = sport === 'NBA' ? 0.40 : 0.65;
-  if (line > 0 && absEdge / line > edgeThreshold) {
+  if (line >= 1.0 && absEdge / line > edgeThreshold) {
     return {
       ok: false,
       reason: `Edge too large: |${(projValue - line).toFixed(1)}| is ${Math.round(absEdge / line * 100)}% of line ${line} — likely wrong projection column`,
@@ -2076,6 +2091,9 @@ async function detectEdgesForSport(sport, gameDate) {
           : (legacyCol ? parseFloat(proj[legacyCol]) : NaN);
 
         if (projValue == null || isNaN(projValue)) continue;
+        // Zero projection = no model data for this stat, not a true zero value.
+        // Any non-zero sportsbook line would create a huge artificial edge — skip.
+        if (projValue === 0) continue;
 
         const line = parseFloat(lineData.line);
         if (!line || isNaN(line)) continue;
