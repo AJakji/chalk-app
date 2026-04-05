@@ -80,52 +80,43 @@ Respond with ONLY a JSON object in this EXACT format — no markdown, no text ou
   ]
 }`;
 
-/**
- * Generate player prop picks using Chalk internal model projections + The Odds API prop lines.
- * Called daily at 10:30am after edgeDetector.detectEdges() populates player_props_history.
- */
-async function generatePropPicks() {
-  const today = new Date().toISOString().split('T')[0];
-  console.log('🎯 Generating prop picks for', today);
+// Max props to consider per sport when sending to Claude
+const SPORT_PICK_LIMITS = { NBA: 20, NHL: 15, MLB: 15 };
 
-  // Fetch prop lines from The Odds API (player_props markets)
-  const propLines = await fetchPropLines();
-  if (!propLines || propLines.length === 0) {
-    console.log('No prop lines available today — skipping prop generation');
+/**
+ * Call Claude for a single sport's prop picks.
+ * Returns array of prop pick objects.
+ */
+async function callClaudeForSport(sport, sportProjections, today) {
+  if (Object.keys(sportProjections).length === 0) {
+    console.log(`  [${sport}] No edges — skipping`);
     return [];
   }
 
-  // Build a lookup: Odds API game ID → UTC ISO commence_time, for storage later
-  const gameTimeMap = {};
-  for (const g of propLines) {
-    if (g.id && g.commence_time) gameTimeMap[g.id] = g.commence_time;
-  }
+  const limit = SPORT_PICK_LIMITS[sport] || 15;
+  // Trim to top N players by confidence (already sorted DESC from fetchProjections)
+  const playerEntries = Object.entries(sportProjections).slice(0, limit);
+  const trimmed = Object.fromEntries(playerEntries);
 
-  // Fetch player projections from our internal Chalk model (player_props_history + chalk_projections)
-  const projections = await fetchProjections(today);
+  const userContent = `Today is ${today}. Below is the Chalk internal model data for today's ${sport} player props. Each player entry includes our projection, the sportsbook line, the edge, confidence, bookmaker odds, and last-5 game logs. Find the 3–5 biggest statistical edges and generate prop picks in Chalky's voice:\n\n${JSON.stringify(trimmed, null, 2)}`;
 
-  const userContent = buildPromptContent(propLines, projections, today);
-  console.log('📊 Sending prop data to Claude...');
+  console.log(`  [${sport}] Sending ${playerEntries.length} players to Claude...`);
 
   let message;
   try {
     message = await client.messages.create({
       model: 'claude-sonnet-4-6',
-      max_tokens: 16000,
+      max_tokens: 8000,
       system: PROP_SYSTEM_PROMPT,
       messages: [{ role: 'user', content: userContent }],
     });
   } catch (err) {
-    console.error(`[generatePropPicks] Claude API error: ${err.status || ''} ${err.message}`);
-    console.error('  Prop picks generation skipped — Claude unavailable.');
+    console.error(`  [${sport}] Claude API error: ${err.status || ''} ${err.message}`);
     return [];
   }
 
   const raw = message?.content?.[0]?.text;
-  if (!raw) {
-    console.error('[generatePropPicks] Claude returned empty content — no prop picks generated');
-    return [];
-  }
+  if (!raw) return [];
 
   let parsed;
   try {
@@ -133,23 +124,62 @@ async function generatePropPicks() {
   } catch {
     const match = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
     if (match) {
-      try { parsed = JSON.parse(match[1]); } catch {
-        console.error('[generatePropPicks] Failed to parse Claude code-fenced JSON');
-        console.error('  Raw response (first 500 chars):', raw.slice(0, 500));
-        return [];
-      }
+      try { parsed = JSON.parse(match[1]); } catch { return []; }
     } else {
-      console.error('[generatePropPicks] Claude returned unparseable prop output');
-      console.error('  Raw response (first 500 chars):', raw.slice(0, 500));
+      console.error(`  [${sport}] Could not parse Claude response`);
       return [];
     }
   }
 
-  const props = parsed.props ?? [];
-  console.log(`✅ Claude generated ${props.length} prop picks`);
+  const picks = parsed.props ?? [];
+  console.log(`  ✅ [${sport}] Claude generated ${picks.length} picks`);
+  return picks;
+}
 
-  await storePropPicks(props, gameTimeMap);
-  return props;
+/**
+ * Generate player prop picks using Chalk internal model projections.
+ * Makes separate Claude calls per sport (NBA max 20, NHL max 15, MLB max 15)
+ * to reduce payload size and avoid connection timeouts.
+ */
+async function generatePropPicks() {
+  const today = new Date().toISOString().split('T')[0];
+  console.log('🎯 Generating prop picks for', today);
+
+  // Fetch prop lines from The Odds API (used only for game time lookup)
+  const propLines = await fetchPropLines();
+
+  // Build a lookup: Odds API game ID → UTC ISO commence_time, for storage later
+  const gameTimeMap = {};
+  for (const g of (propLines || [])) {
+    if (g.id && g.commence_time) gameTimeMap[g.id] = g.commence_time;
+  }
+
+  // Fetch player projections from our internal Chalk model (player_props_history + chalk_projections)
+  const allProjections = await fetchProjections(today);
+  if (Object.keys(allProjections).length === 0) {
+    console.log('  No edges in DB — skipping prop generation');
+    return [];
+  }
+
+  // Split projections by sport
+  const bySport = { NBA: {}, NHL: {}, MLB: {} };
+  for (const [playerName, data] of Object.entries(allProjections)) {
+    const sport = data.sport || 'NBA';
+    if (bySport[sport]) bySport[sport][playerName] = data;
+  }
+
+  console.log(`  NBA: ${Object.keys(bySport.NBA).length} players | NHL: ${Object.keys(bySport.NHL).length} | MLB: ${Object.keys(bySport.MLB).length}`);
+
+  // Call Claude separately per sport to keep payloads small
+  const allProps = [];
+  for (const sport of ['NBA', 'NHL', 'MLB']) {
+    const picks = await callClaudeForSport(sport, bySport[sport], today);
+    allProps.push(...picks);
+  }
+
+  console.log(`📊 Total prop picks generated: ${allProps.length}`);
+  await storePropPicks(allProps, gameTimeMap);
+  return allProps;
 }
 
 // Player props require the event-specific endpoint — the /odds/ endpoint doesn't support them

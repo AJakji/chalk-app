@@ -162,7 +162,7 @@ def calculate_confidence(edge: float, prop_type: str, sport: str, sample_size: i
     # 87 = exceptional edge (4× minimum). Linear mapping across that range.
     base = 50
     edge_ratio = abs(edge) / min_edge
-    edge_bonus = min(37, int((edge_ratio - 1) * 12.33))
+    edge_bonus = min(37, int((edge_ratio - 1) * 3.7))
     if sample_size >= 20:
         sample_bonus = 5
     elif sample_size >= 10:
@@ -452,8 +452,8 @@ def get_position_defense_factor(conn, opponent: str, position: str, stat: str) -
                     if league_avg_val <= 0:
                         return 1.0
                     factor = team_val / league_avg_val
-                    # Clamp: ±20% max adjustment to avoid dominating total projection
-                    return clamp(factor, 0.80, 1.20)
+                    # Clamp: ±18% max — tightened from ±20% to reduce over-amplification
+                    return clamp(factor, 0.82, 1.18)
     except Exception as exc:
         log.debug('get_position_defense_factor %s %s %s: %s', opponent, position, stat, exc)
     return 1.0
@@ -517,13 +517,23 @@ def rolling_avg(logs: list[dict], stat: str, n: int) -> float:
 
 
 def weighted_base(logs: list[dict], season_avg: float, stat: str) -> float:
-    """Equal weight across all windows — L5×0.25 + L10×0.25 + L20×0.25 + season×0.25.
-    Previously L5×0.35/L10×0.30/L20×0.20/season×0.15 overweighted hot streaks,
-    pushing projections 20-35% above market lines for star players on outlier runs."""
+    """Stat-aware weighted average across rolling windows.
+    High-volatility stats (pts, ast) weight recent form more.
+    Stable/rate stats (reb) weight season equally.
+    Season-heavy for stats where recent noise causes big swings.
+    """
+    # Stat-specific weights: (l5, l10, l20, season)
+    STAT_WEIGHTS = {
+        'points':   (0.30, 0.30, 0.25, 0.15),  # volatile — recent form matters
+        'assists':  (0.30, 0.30, 0.25, 0.15),  # volatile — playmaker trends change
+        'rebounds': (0.25, 0.25, 0.25, 0.25),  # stable — season is most predictive
+        # threes handled separately in weighted_base_threes
+    }
+    w = STAT_WEIGHTS.get(stat, (0.25, 0.25, 0.25, 0.25))
     l5  = rolling_avg(logs, stat, 5)
     l10 = rolling_avg(logs, stat, 10)
     l20 = rolling_avg(logs, stat, 20)
-    return l5*0.25 + l10*0.25 + l20*0.25 + season_avg*0.25
+    return l5*w[0] + l10*w[1] + l20*w[2] + season_avg*w[3]
 
 
 def weighted_base_threes(logs: list[dict], season_avg: float) -> float:
@@ -766,7 +776,7 @@ def project_player(
     # weighted base (elite scorers average more points because they're efficient).
     # Large coefficients added a compounding bonus on top of what the base already captures.
     combined_eff_f   = 1.0 + min(ts_deviation_rel * 0.08, usage_deviation * 0.05)
-    combined_eff_f   = clamp(combined_eff_f, 0.90, 1.15)
+    combined_eff_f   = clamp(combined_eff_f, 0.90, 1.12)  # tightened from 1.15
 
     # Injury/role boost is applied separately — it represents a genuine change from
     # a player's baseline (someone else is out), not a double-count of existing skill.
@@ -782,12 +792,21 @@ def project_player(
     team_pace = get_team_pace(conn, team)
     opp_pace  = get_team_pace(conn, opponent)
     avg_pace  = (team_pace + opp_pace) / 2
-    pace_f    = clamp(avg_pace / LEAGUE_AVG['pace'], 0.90, 1.10)
+    pace_f    = clamp(avg_pace / LEAGUE_AVG['pace'], 0.93, 1.07)  # tightened: pace is context, not a major amplifier
 
-    # Rest factor
+    # Rest factor — age-aware B2B penalty (no birth year in DB; proxy via avg minutes).
+    # High-minute players are typically veterans (age 28-35) who recover worse on B2B.
+    # Low-minute players are typically young/bench (age 20-25), faster recovery.
     rest_days = get_rest_days(conn, player_id, game_date)
     if rest_days == 0:
-        rest_f = 0.92   # B2B
+        if min_season >= 34:
+            rest_f = 0.86   # B2B — heavy-minute veteran star (age ~32+)
+        elif min_season >= 30:
+            rest_f = 0.90   # B2B — prime-age starter (age ~28-32)
+        elif min_season >= 24:
+            rest_f = 0.93   # B2B — regular starter (age ~24-28)
+        else:
+            rest_f = 0.96   # B2B — bench/young player (age ~22-26)
     elif rest_days == 1:
         rest_f = 0.97
     elif rest_days >= 3:
@@ -845,6 +864,11 @@ def project_player(
     l5_pts     = rolling_avg(logs, 'points', 5)
     l10_pts    = rolling_avg(logs, 'points', 10)
 
+    # Star floor: established players (15+ games) should never project below
+    # 85% of season avg — prevents a 5-game cold streak from crashing Jokic to 12 pts.
+    if len(logs) >= 15 and pts_season > 0:
+        base_pts = max(base_pts, pts_season * 0.85)
+
     proj_pts   = (base_pts
                   * pos_def_pts
                   * pace_f
@@ -883,6 +907,8 @@ def project_player(
     base_reb = weighted_base(logs, reb_season, 'rebounds')
     l5_reb   = rolling_avg(logs, 'rebounds', 5)
     l10_reb  = rolling_avg(logs, 'rebounds', 10)
+    if len(logs) >= 15 and reb_season > 0:
+        base_reb = max(base_reb, reb_season * 0.85)
 
     # Big man bonus removed — weighted base already reflects a big's rebounding role
     # (their L5/L10/season averages ARE their rebounding output, which is already high
@@ -918,6 +944,8 @@ def project_player(
     base_ast = weighted_base(logs, ast_season, 'assists')
     l5_ast   = rolling_avg(logs, 'assists', 5)
     l10_ast  = rolling_avg(logs, 'assists', 10)
+    if len(logs) >= 15 and ast_season > 0:
+        base_ast = max(base_ast, ast_season * 0.85)
 
     # Playmaker bonus removed — same reason as big_bonus for rebounds.
     # A true playmaker's base already reflects 7+ apg; 1.08× double-counts their role.
@@ -1069,7 +1097,7 @@ def project_team_props(
     avg_pace  = (home_pace + away_pace) / 2
 
     # ── TOTAL ────────────────────────────────────────────────────────────────
-    pace_f       = clamp(avg_pace / LEAGUE_AVG['pace'], 0.90, 1.10)
+    pace_f       = clamp(avg_pace / LEAGUE_AVG['pace'], 0.93, 1.07)
     total_base   = implied_total if implied_total > 0 else LEAGUE_AVG['game_total']
 
     # Position defense aggregates per team.

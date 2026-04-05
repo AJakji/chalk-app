@@ -275,10 +275,19 @@ def rolling_avg(rows: list, col: str, n: int) -> float:
 
 def weighted_avg(rows: list, col: str) -> float:
     """
-    Equal weight across all windows: L5×0.25 + L10×0.25 + L20×0.25 + season×0.25.
-    Previously L5×0.40 overweighted hot streaks, pushing projections 20-35% above
-    market lines for players on outlier runs (same calibration issue fixed in NBA model).
+    Stat-aware weighted average.
+    Goals (volatile) and assists weight recent form more.
+    SOG (stable physical trait) weights season equally.
     """
+    # (l5, l10, l20, season)
+    STAT_WEIGHTS = {
+        'points':    (0.30, 0.30, 0.25, 0.15),   # goals — volatile, streak-driven
+        'three_made':(0.30, 0.30, 0.25, 0.15),   # assists — volatile
+        'fg_made':   (0.25, 0.25, 0.25, 0.25),   # SOG — stable physical shooting habit
+        'minutes':   (0.25, 0.25, 0.25, 0.25),   # TOI — stable role
+        'plus_minus':(0.30, 0.30, 0.25, 0.15),   # PM — volatile
+    }
+    w = STAT_WEIGHTS.get(col, (0.25, 0.25, 0.25, 0.25))
     n = len(rows)
     if n == 0:
         return 0.0
@@ -288,7 +297,7 @@ def weighted_avg(rows: list, col: str) -> float:
     szn = rolling_avg(rows, col, n)
 
     if n >= 20:
-        return l5 * 0.25 + l10 * 0.25 + l20 * 0.25 + szn * 0.25
+        return l5 * w[0] + l10 * w[1] + l20 * w[2] + szn * w[3]
     elif n >= 10:
         return l5 * 0.35 + l10 * 0.35 + szn * 0.30
     elif n >= 5:
@@ -715,6 +724,12 @@ def project_shots_on_goal(logs: list, opp_team_logs: list,
     if base <= 0:
         base = LEAGUE['sog_pg']
 
+    # Star floor: established skaters (15+ games) never project below 85% of season SOG avg.
+    if len(logs) >= 15:
+        szn_sog = rolling_avg(logs, 'fg_made', len(logs))
+        if szn_sog > 0:
+            base = max(base, szn_sog * 0.85)
+
     # 1. TOI factor
     toi_l10  = get_avg_toi(logs, 10)
     toi_szn  = get_avg_toi(logs, len(logs))
@@ -853,9 +868,9 @@ def project_goals(logs: list, opp_goalie_logs: list, opp_team_logs: list,
         backup_flag = False
 
     opp_goalie_f = ((1 - LEAGUE['sv_pct']) / (1 - opp_sv)) if (1 - opp_sv) > 0 else 1.0
-    # Tightened from [0.60, 1.60] — no single goalie should swing goals by ±40-60%.
-    # [0.70, 1.40] still allows meaningful differentiation for elite vs backup goalies.
-    opp_goalie_f = cap(opp_goalie_f, 0.70, 1.40)
+    # Tightened from [0.70, 1.40] → [0.75, 1.28] — further reduces goalie over-swing.
+    # Elite goalies and backups both matter, but ±28% is enough differentiation.
+    opp_goalie_f = cap(opp_goalie_f, 0.75, 1.28)
 
     # 3. Opponent goals allowed factor
     opp_ga_l10 = rolling_avg(opp_team_logs, 'points_allowed', 10) or LEAGUE['team_ga_pg']
@@ -887,8 +902,11 @@ def project_goals(logs: list, opp_goalie_logs: list, opp_team_logs: list,
     # 6. B2B: goals drop more than SOG on B2B
     b2b_f = 0.93 if is_b2b else 1.00
 
-    proj = (proj_ev + proj_pp) * sh_reg_f * opp_goalie_f * opp_ga_f * \
-           opp_ga_trend_f * toi_f * ha_f * b2b_f
+    # Cap combined factor product to ±30% — prevents correlated factors (good matchup +
+    # backup goalie + B2B + home ice) from compounding to 2-3× in the same direction.
+    goals_combined_f = sh_reg_f * opp_goalie_f * opp_ga_f * opp_ga_trend_f * toi_f * ha_f * b2b_f
+    goals_combined_f = cap(goals_combined_f, 0.70, 1.30)
+    proj = (proj_ev + proj_pp) * goals_combined_f
 
     factors = {
         'base_goals':        round(base_goals, 3),
@@ -929,7 +947,7 @@ def project_assists(logs: list, opp_team_logs: list, own_team_logs: list,
     # 1. PP assist factor
     pp_toi_l10 = get_avg_pp_toi(logs, 10)
     pp_ast_f   = 1.0 + ((pp_toi_l10 / LEAGUE['pp_toi_pg']) - 1.0) * 0.40
-    pp_ast_f   = cap(pp_ast_f, 0.70, 1.60)
+    pp_ast_f   = cap(pp_ast_f, 0.75, 1.32)  # tightened from [0.70, 1.60]
 
     # 2. TOI factor
     toi_szn = get_avg_toi(logs, len(logs))
@@ -1602,7 +1620,7 @@ def calculate_confidence(edge: float, prop_type: str, sport: str, sample_size: i
     # 87 = exceptional edge (4× minimum). Linear mapping across that range.
     base = 50
     edge_ratio = abs(edge) / min_edge
-    edge_bonus = min(37, int((edge_ratio - 1) * 12.33))
+    edge_bonus = min(37, int((edge_ratio - 1) * 3.7))
     if sample_size >= 20:
         sample_bonus = 5
     elif sample_size >= 10:

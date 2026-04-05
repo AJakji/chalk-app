@@ -73,7 +73,7 @@ const MIN_EDGE_BY_SPORT = {
     outs_recorded: 1.5,
     rbi:           0.30,
     runs:          0.30,
-    stolen_bases:  0.06,
+    stolen_bases:  0.30,  // raised to match calculateConfidence; pre-filter only passes real SB edges
     default:       0.25,
   },
   NHL: {
@@ -610,7 +610,7 @@ function calculateConfidence(edge, propType, sport, sampleSize = 10) {
       walks:         0.40,
       rbi:           0.40,
       runs:          0.40,
-      stolen_bases:  0.15,
+      stolen_bases:  0.35,  // raised: SB is a rare binary event (0.5 lines); small edge ≠ high confidence
       run_line:      0.5,
       total:         1.5,
       moneyline:     0.05,
@@ -637,7 +637,10 @@ function calculateConfidence(edge, propType, sport, sampleSize = 10) {
   // 87 = exceptional edge (4× minimum threshold). Linear mapping across that range.
   const base = 50
   const edgeRatio = Math.abs(edge) / minEdge
-  const edgeBonus = Math.min(37, Math.floor((edgeRatio - 1) * 12.33))
+  // 3.7 multiplier: 87% requires ~11× minEdge (truly exceptional edge).
+  // Previously 12.33 reached 87% at 4× minEdge — too easy, producing 87%
+  // on routine props. Now: 2× = +3, 4× = +11, 8× = +25, 11× = +37 → 87%.
+  const edgeBonus = Math.min(37, Math.floor((edgeRatio - 1) * 3.7))
   let sampleBonus = 0
   if (sampleSize >= 20) sampleBonus = 5
   else if (sampleSize >= 10) sampleBonus = 3
@@ -1260,17 +1263,27 @@ function validateLineConsistency(propType, line, projValue, proj, sport = 'NBA')
     return { ok: false, reason: `Line ${line} exceeds per-game max ${sportMaxLines[propType]} for ${propType} — likely a multi-hit threshold market` };
   }
 
-  // Line plausibility check (all sports): sportsbooks set standard over/unders near the
-  // player's expected value. If the line is MORE than 1.4× our projection, the book is
-  // posting a threshold/multi-game prop (e.g. "2+ hits" when the player averages 1.1/game,
-  // or a series total). Low lines (0.5 binary markets) are fine — players regularly get
-  // fewer hits than their average. Only block inflated lines.
-  // Exception: very small projections (< 0.5) where model uncertainty is high.
+  // Line plausibility — two-sided check (all sports):
+  // 1. If line > 1.4× projection: book is posting a threshold/multi-game prop.
+  //    e.g. "2+ hits" when player averages 1.1/game. Only block inflated lines.
+  //    Exception: very small projections (< 0.5) where model uncertainty is high.
   if (projValue > 0.5 && line > projValue * 1.40) {
     const ratio = (line / projValue).toFixed(2);
     return {
       ok: false,
       reason: `Line ${line} is ${ratio}× our projection ${projValue.toFixed(2)} — likely a threshold/multi-game market, not a standard per-game over/under`,
+    };
+  }
+
+  // 2. If projection > 1.6× line: our model is projecting 60%+ above the market line.
+  //    For lines ≥ 0.5 only (avoids blocking binary 0.5 anytime-scorer markets where
+  //    projection > line is normal). Catches wrong-column matches (e.g. RBI proj=1.35
+  //    vs SB line=0.5) and early-season small samples that inflate the base.
+  if (line >= 0.5 && projValue > line * 1.60) {
+    const ratio = (projValue / line).toFixed(2);
+    return {
+      ok: false,
+      reason: `Projection ${projValue.toFixed(2)} is ${ratio}× line ${line} — model over-projection or wrong-column match`,
     };
   }
 

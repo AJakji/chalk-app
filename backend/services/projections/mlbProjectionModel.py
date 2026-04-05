@@ -479,9 +479,19 @@ def rolling_avg(rows: list, col: str, n: int) -> float:
 
 def new_weighted_avg(rows: list, col: str) -> float:
     """
-    Equal weight across all windows: L5×0.25 + L10×0.25 + L20×0.25 + season×0.25.
-    Previously L5×0.35 overweighted recent outlier games (same fix applied to NBA/NHL).
+    Stat-aware weighted average. Stable rate stats (hits, TB) weight season more
+    heavily to resist early-season sample noise. Volatile stats (HR, SB) weight
+    recent form. Fallback: equal weights.
     """
+    # (l5, l10, l20, season) weights by stat
+    STAT_WEIGHTS = {
+        'fg_made':    (0.20, 0.20, 0.25, 0.35),  # hits: very stable BA-driven stat
+        'off_reb':    (0.20, 0.20, 0.25, 0.35),  # doubles: stable
+        'three_made': (0.25, 0.25, 0.25, 0.25),  # HR: moderate
+        'rebounds':   (0.25, 0.25, 0.25, 0.25),  # RBI: moderate
+        'steals':     (0.30, 0.30, 0.25, 0.15),  # SB: volatile, recent speed/role
+    }
+    w = STAT_WEIGHTS.get(col, (0.25, 0.25, 0.25, 0.25))
     n = len(rows)
     if n == 0:
         return 0.0
@@ -490,7 +500,7 @@ def new_weighted_avg(rows: list, col: str) -> float:
     l20 = rolling_avg(rows, col, min(20, n))
     szn = rolling_avg(rows, col, n)
     if n >= 20:
-        return l5 * 0.25 + l10 * 0.25 + l20 * 0.25 + szn * 0.25
+        return l5 * w[0] + l10 * w[1] + l20 * w[2] + szn * w[3]
     if n >= 10:
         return l5 * 0.35 + l10 * 0.35 + szn * 0.30
     if n >= 5:
@@ -1410,6 +1420,14 @@ def project_hits(
     # Early-season small samples (e.g. one 5-hit game in 6) can push base above this.
     base = min(base, 1.40)
 
+    # Star floor: established batters (15+ games) never project below 85% of season avg.
+    # Uses the raw full-season average (not the weighted avg) so a recent cold streak
+    # doesn't anchor both the base AND the floor to a depressed number.
+    if batter_logs and len(batter_logs) >= 15:
+        szn_hits_avg = rolling_avg(batter_logs, 'fg_made', len(batter_logs))
+        base = max(base, szn_hits_avg * 0.85)
+        base = min(base, 1.40)  # maintain hard cap
+
     season_avg = compute_season_ba(batter_logs) if batter_logs else LEAGUE_AVG['ba']
 
     pt_f    = platoon_hits_f(splits, sp_hand, season_avg)
@@ -1423,11 +1441,11 @@ def project_hits(
     dn_f    = day_night_f(splits, day_game, season_avg)
     ha_f    = home_away_factor_for_col(batter_logs, 'fg_made', home_away)
 
-    # Cap combined context factor at ±28% vs base. Individual factors are each
-    # reasonable but they compound — platoon+bad pitcher+career matchup+home splits
-    # can stack to 3-4× the base, producing impossible hit totals (>2.5/game).
+    # Cap combined context factor — tightened to ±22% vs base.
+    # Previous [0.65, 1.28] still produced some impossible values when multiple
+    # factors aligned. [0.72, 1.22] keeps enough signal while preventing outliers.
     combined_f = pt_f * spq_f * spr_f * match_f * babip_f * pa_f * park_f * wx_f * dn_f * ha_f
-    combined_f = max(0.65, min(1.28, combined_f))
+    combined_f = max(0.72, min(1.22, combined_f))
     proj = base * combined_f
 
     factors = {
@@ -1499,10 +1517,11 @@ def project_total_bases(
     ha_f      = home_away_factor_for_col(batter_logs, 'three_made', home_away) if batter_logs else 1.0
     arsen_f   = arsenal_tb_f(whiff_rate)
 
-    # Cap combined context factor at ±40% vs base. Coors altitude + park HR +
-    # wind + platoon + career matchup all stacking can push TB to 3-4× base.
+    # Cap combined context factor — tightened from [0.60, 1.40] → [0.70, 1.28].
+    # Coors+wind+park+platoon can stack to crazy values; [0.70, 1.28] still captures
+    # meaningful environmental edges without producing TB > 2.5/game.
     combined_f = iso_f * pt_slg_f * sp_hr_f * match_f * wind_f * temp_f * park_hr_f * alt_f * ha_f * arsen_f
-    combined_f = max(0.60, min(1.40, combined_f))
+    combined_f = max(0.70, min(1.28, combined_f))
     proj = base * combined_f
 
     factors = {
@@ -2319,7 +2338,7 @@ def calculate_confidence(edge: float, prop_type: str, sport: str, sample_size: i
     # 87 = exceptional edge (4× minimum). Linear mapping across that range.
     base = 50
     edge_ratio = abs(edge) / min_edge
-    edge_bonus = min(37, int((edge_ratio - 1) * 12.33))
+    edge_bonus = min(37, int((edge_ratio - 1) * 3.7))
     if sample_size >= 20:
         sample_bonus = 5
     elif sample_size >= 10:
@@ -2487,7 +2506,9 @@ def upsert_player_projection(
             ('home_runs',    proj.get('proj_hr',   0), factors_all.get('hr',   {})),
             ('rbi',          proj.get('proj_rbi',  0), factors_all.get('rbi',  {})),
             ('runs',         proj.get('proj_runs', 0), factors_all.get('runs', {})),
-            ('stolen_bases', proj.get('proj_sb',   0), factors_all.get('sb',   {})),
+            # SB floor: even non-stealers project at ≥0.02 so projValue=0 doesn't
+            # create an artificial edge vs 0.5 binary lines (edge detector handles this).
+            ('stolen_bases', max(0.02, proj.get('proj_sb', 0)), factors_all.get('sb', {})),
         ]
 
     with conn.cursor() as cur:
